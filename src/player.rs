@@ -93,7 +93,11 @@ impl Player {
 
     /// Drop to `Null`: stops playback and frees decoder state.
     pub fn stop(&self) {
+        let (_, current, _) = self.playbin.state(gst::ClockTime::ZERO);
         let _ = self.playbin.set_state(gst::State::Null);
+        if current != gst::State::Null {
+            crate::applog!("player: stopped, pipeline released");
+        }
     }
 
     /// Toggle pause; returns true when now playing.
@@ -106,9 +110,11 @@ impl Player {
         };
         if target == gst::State::Playing {
             let _ = self.playbin.set_state(gst::State::Paused);
+            crate::applog!("player: paused");
             false
         } else {
             let _ = self.playbin.set_state(gst::State::Playing);
+            crate::applog!("player: playing");
             true
         }
     }
@@ -139,6 +145,7 @@ impl Player {
     fn seek_to(&self, secs: f64) {
         let target = gst::ClockTime::from_nseconds((secs.max(0.0) * 1e9) as u64);
         let _ = self.playbin.seek_simple(SEEK_FLAGS, target);
+        crate::applog!("player: seek to {:.1}s", secs.max(0.0));
     }
 
     /// Restart from the beginning (EOS loop, FR-10.3).
@@ -158,6 +165,7 @@ impl Player {
     pub fn toggle_mute(&self) -> bool {
         let muted = !self.playbin.property::<bool>("mute");
         self.playbin.set_property("mute", muted);
+        crate::applog!("player: mute {}", muted);
         muted
     }
 }
