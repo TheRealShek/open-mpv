@@ -13,9 +13,10 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs
 | ------ | ------- | ---- |
 | Build | `cargo build` | System deps: `gtk4-devel`, `glycin-devel` (Fedora) |
 | Run | `cargo run -- <image-or-dir>` | No arg opens the empty-state window |
-| Test | `cargo test` | Unit + integration; UI-free logic must be testable headless |
+| Test | `cargo test` | Includes real trash/rotate integration tests (need user session; ImageMagick generates fixtures) |
 | Lint | `cargo clippy -- -D warnings` | Warnings are errors |
 | Format | `cargo fmt` | Run before finishing any change |
+| Install | `./install.sh` | Release build → `~/.local/bin`, registers default viewer |
 
 ---
 
@@ -50,6 +51,7 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs
 - **JPEG rotate-save is metadata-only** (EXIF orientation, FR-5.4) — never re-encode JPEG pixels. SVG/animated: view-rotate only, save disabled.
 - **Single instance** comes free from `gtk::Application` D-Bus uniqueness — handle the `open` signal; don't build custom IPC.
 - **Delete advances then toasts (FR-5.1/5.2):** undo must restore from trash *and* re-insert at the correct sorted position while the GIO file monitor is also watching the directory — guard against double-insertion.
+- **Never enumerate `trash://` via gvfs:** it hangs when no GUI main loop is serving its D-Bus machinery (bit us in tests). `fileops::restore` reads the freedesktop trash dirs (home + mount-level `.Trash-$uid`) directly; keep it that way.
 
 ---
 
@@ -64,4 +66,4 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs
 
 ## Verified
 
-Last verified: not yet verified — commands assume the `cargo` scaffold, which does not exist yet; verify and update this line once the project builds.
+Last verified: 2026-08-05 — `cargo build`, `cargo test` (15 pass, incl. trash round-trip and JPEG rotate-save), `cargo clippy -- -D warnings`, `cargo fmt`, release build 4.7 MB, single-instance forward 46 ms, smoke-run against PNG/JPEG/animated GIF/SVG/corrupt file/directory.
