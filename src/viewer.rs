@@ -164,6 +164,9 @@ mod imp {
         pub(super) on_view_changed: Callback<f64>,
         /// Fired on horizontal scroll: +1 next, -1 prev (FR-3.1).
         pub(super) on_navigate: Callback<i32>,
+        /// Fired when a live source reports its dimensions; argument is
+        /// the source size in logical pixels.
+        pub(super) on_source_size: Callback<(f64, f64)>,
     }
 
     #[glib::object_subclass]
@@ -361,11 +364,23 @@ impl ImageView {
             }
         });
         let weak = self.downgrade();
-        let size = paintable.connect_invalidate_size(move |_| {
+        let size = paintable.connect_invalidate_size(move |paintable| {
             if let Some(view) = weak.upgrade() {
                 // New source dimensions change the effective zoom.
                 view.queue_draw();
                 view.emit_view_changed();
+                // A video only learns its dimensions at preroll, after
+                // the window is already on screen (FR-6.6).
+                let (w, h) = (
+                    paintable.intrinsic_width() as f64,
+                    paintable.intrinsic_height() as f64,
+                );
+                if w > 0.0
+                    && h > 0.0
+                    && let Some(f) = view.imp().on_source_size.borrow().as_ref()
+                {
+                    f((w, h));
+                }
             }
         });
         *self.imp().live.borrow_mut() = Some((paintable.clone(), vec![contents, size]));
@@ -496,6 +511,10 @@ impl ImageView {
 
     pub fn connect_view_changed(&self, f: impl Fn(f64) + 'static) {
         *self.imp().on_view_changed.borrow_mut() = Some(Box::new(f));
+    }
+
+    pub fn connect_source_size(&self, f: impl Fn((f64, f64)) + 'static) {
+        *self.imp().on_source_size.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn connect_navigate(&self, f: impl Fn(i32) + 'static) {

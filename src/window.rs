@@ -89,6 +89,13 @@ const ACTION_NAMES: &[&str] = &[
     "escape",
 ];
 
+/// Seek bar width when the window has room for it: wide enough that a
+/// pixel is a usable unit of time (a ten-minute video scrubs in ~2 s
+/// steps) without turning the compact control bar into a strip.
+const SEEK_BAR_MAX_WIDTH: i32 = 320;
+/// Floor for narrow windows; below this the bar stops being aimable.
+const SEEK_BAR_MIN_WIDTH: i32 = 140;
+
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_TIMEOUT: Duration = Duration::from_millis(1200);
 const SVG_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -116,6 +123,9 @@ pub struct App {
     status: gtk::Label,
     pos_label: gtk::Label,
     transport: gtk::Box,
+    /// The bottom control bar; measured to size the seek bar to the room
+    /// left over beside the labels and buttons.
+    control_bar: gtk::Box,
     seek_bar: gtk::Scale,
     time_label: gtk::Label,
     /// Frame-clock tick driving the seek bar; installed only while the
@@ -124,6 +134,13 @@ pub struct App {
     /// True while the pointer holds the seek bar: playback positions must
     /// not write the thumb back under the user's hand.
     scrubbing: Cell<bool>,
+    /// True while the pointer rests on the overlay controls, which must
+    /// not fade out from under it (FR-6.2).
+    pointer_on_chrome: Cell<bool>,
+    /// True once the window has been sized from the media on screen. A
+    /// video presents before its dimensions are known, so its sizing
+    /// arrives late and must still be applied once (FR-6.6).
+    sized_from_media: Cell<bool>,
     indicator: gtk::Label,
     toast_revealer: gtk::Revealer,
     toast_label: gtk::Label,
@@ -190,7 +207,7 @@ impl App {
         // Video transport: seek bar + position, hidden for images
         // (FR-10.5). The position tick runs only while this is visible.
         let seek_bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
-        seek_bar.set_size_request(180, -1);
+        seek_bar.set_size_request(SEEK_BAR_MAX_WIDTH, -1);
         seek_bar.set_draw_value(false);
         // `with_range` derives round-digits from the step increment, which
         // would quantise the thumb to 1 % of the duration — 36 s of a
@@ -290,10 +307,13 @@ impl App {
             status,
             pos_label,
             transport,
+            control_bar: bar.clone(),
             seek_bar,
             time_label,
             transport_tick: RefCell::new(None),
             scrubbing: Cell::new(false),
+            pointer_on_chrome: Cell::new(false),
+            sized_from_media: Cell::new(false),
             indicator,
             toast_revealer,
             toast_label,
@@ -385,6 +405,13 @@ impl App {
             #[strong]
             app,
             move |dir| app.navigate(dir)
+        ));
+        // A video is on screen before the pipeline knows how big it is;
+        // the size arrives with preroll (FR-6.6).
+        app.view.connect_source_size(clone!(
+            #[strong]
+            app,
+            move |size| app.size_to_media(size)
         ));
 
         app
@@ -564,6 +591,7 @@ impl App {
         crate::applog!("play: {}", path.display());
         self.update_save_enabled();
         self.transport.set_visible(true);
+        self.fit_seek_bar();
         // Blank rather than carry the previous video's numbers over the
         // moment before this one's duration is known.
         self.seek_bar.set_value(0.0);
@@ -589,7 +617,24 @@ impl App {
 
     // ----- video transport (FR-10.5) ------------------------------------
 
+    /// Keep the seek bar inside what the window can actually show. The
+    /// control bar is an overlay child: an oversized one does not push
+    /// the window wider, it gets squeezed at the ends.
+    fn fit_seek_bar(&self) {
+        // Everything else in the bar — labels, buttons, padding, margins
+        // — is measured rather than assumed: the time label alone grows
+        // the bar by ~70 px once it has a duration to show.
+        let (bar_min, _, _, _) = self.control_bar.measure(gtk::Orientation::Horizontal, -1);
+        let others = bar_min - self.seek_bar.width_request().max(0);
+        let room = self.win.width() - others;
+        self.seek_bar
+            .set_size_request(room.clamp(SEEK_BAR_MIN_WIDTH, SEEK_BAR_MAX_WIDTH), -1);
+    }
+
     fn update_transport(&self) {
+        // Cheap to re-assert every tick: GTK ignores an unchanged
+        // request, and this is the one place that sees every resize.
+        self.fit_seek_bar();
         let progress = self.player.borrow().as_ref().and_then(|p| p.progress());
         let Some((pos, dur)) = progress else {
             return;
@@ -847,24 +892,36 @@ impl App {
     /// capped at 85% of the monitor work area (FR-6.6).
     fn maybe_first_present(&self, size: (f64, f64)) {
         if !self.presented.get() {
-            let (mut mw, mut mh) = (1920.0f64, 1080.0f64);
-            if let Some(display) = gdk::Display::default()
-                && let Some(monitor) = display.monitors().item(0).and_downcast::<gdk::Monitor>()
-            {
-                let geo = monitor.geometry();
-                (mw, mh) = (geo.width() as f64, geo.height() as f64);
-            }
-            let (cap_w, cap_h) = (mw * 0.85, mh * 0.85);
-            let s = (cap_w / size.0).min(cap_h / size.1).min(1.0);
-            self.win.set_default_size(
-                (size.0 * s).round().max(200.0) as i32,
-                (size.1 * s).round().max(150.0) as i32,
-            );
+            self.size_to_media(size);
             self.presented.set(true);
             // The cold-start metric (NFR-1.1): launch → first present.
             crate::applog!("first present: window shown");
         }
         self.win.present();
+    }
+
+    /// Size the window to `size` at 100%, capped at 85% of the monitor
+    /// work area (FR-6.6). Only the first media of a session does this;
+    /// everything after reuses whatever size the window has (FR-4.6).
+    fn size_to_media(&self, size: (f64, f64)) {
+        if self.sized_from_media.get() || size.0 <= 0.0 || size.1 <= 0.0 {
+            return;
+        }
+        let (mut mw, mut mh) = (1920.0f64, 1080.0f64);
+        if let Some(display) = gdk::Display::default()
+            && let Some(monitor) = display.monitors().item(0).and_downcast::<gdk::Monitor>()
+        {
+            let geo = monitor.geometry();
+            (mw, mh) = (geo.width() as f64, geo.height() as f64);
+        }
+        let (cap_w, cap_h) = (mw * 0.85, mh * 0.85);
+        let s = (cap_w / size.0).min(cap_h / size.1).min(1.0);
+        self.win.set_default_size(
+            (size.0 * s).round().max(200.0) as i32,
+            (size.1 * s).round().max(150.0) as i32,
+        );
+        self.sized_from_media.set(true);
+        crate::applog!("window sized to media {}x{}", size.0, size.1);
     }
 
     // ----- navigation ---------------------------------------------------
@@ -1156,9 +1213,10 @@ impl App {
     }
 
     fn hide_chrome(&self) {
-        // Never pull the seek bar out from under a scrub in progress; the
-        // button release restarts the fade-out.
-        if self.scrubbing.get() {
+        // Never pull the controls out from under the pointer: mid-scrub,
+        // or while it simply rests on them. Both paths restart the
+        // fade-out when the pointer is done.
+        if self.scrubbing.get() || self.pointer_on_chrome.get() {
             return;
         }
         for w in &self.chrome {
@@ -1421,6 +1479,27 @@ impl App {
             move |_| app.hide_chrome()
         ));
         self.win.add_controller(motion);
+
+        // A pointer parked on the controls generates no motion, so the
+        // fade timer would run out under it and take the click target
+        // away. Hovering holds them until the pointer moves off.
+        for w in &self.chrome {
+            let hover = gtk::EventControllerMotion::new();
+            hover.connect_enter(clone!(
+                #[strong(rename_to = app)]
+                self,
+                move |_, _, _| app.pointer_on_chrome.set(true)
+            ));
+            hover.connect_leave(clone!(
+                #[strong(rename_to = app)]
+                self,
+                move |_| {
+                    app.pointer_on_chrome.set(false);
+                    app.show_chrome();
+                }
+            ));
+            w.add_controller(hover);
+        }
 
         // Double-click: fullscreen. Middle-click: fit/100% toggle (FR-4.3).
         let click = gtk::GestureClick::new();

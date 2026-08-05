@@ -93,16 +93,21 @@ product; there is no version staging.
   the window edge to edge over a dark background.
 - **FR-6.2** Overlay controls (prev/next, rotate, delete, position/zoom
   indicator, close button) fade in on mouse movement and fade out after
-  ~2 s of inactivity; they never appear during pure keyboard use.
+  ~2 s of inactivity; they never appear during pure keyboard use. A
+  pointer resting on the controls holds them open — they must not fade
+  out from under the click they are waiting for.
 - **FR-6.3** Fullscreen toggle via `F`/`F11` and double-click.
 - **FR-6.4** Window can be moved by dragging the image (when not panning
   a zoomed image).
 - **FR-6.5** Every mouse-reachable action has a keyboard equivalent and
   vice versa.
 - **FR-6.6 Initial window size:** on open, the window sizes itself to the
-  image at 100 % up to 85 % of the monitor's work area (larger images are
-  fitted down to that bound); it never opens larger than the image
-  itself. Subsequent images reuse the current window size (FR-4.6).
+  media at 100 % up to 85 % of the monitor's work area (larger media are
+  fitted down to that bound); it never opens larger than the media
+  itself. A video does not know its size until the pipeline prerolls, so
+  it presents at a default size first and resizes once, when the
+  dimensions arrive. Subsequent media reuse the current window size
+  (FR-4.6).
 - **FR-6.7 Closing:** the app closes via `Q`, `Escape`, the overlay ×
   button, or the window-manager close request. In fullscreen, the first
   `Escape` exits fullscreen and the second closes; `Q` always closes
@@ -152,7 +157,9 @@ product; there is no version staging.
   is disabled (no lossless rotate for video).
 - **FR-10.5** The overlay control bar shows a seek bar and
   `position / duration` for videos only; its position poll runs only
-  while the overlay is visible.
+  while the overlay is visible. The seek bar takes up to 320 px and
+  shrinks to whatever the window leaves beside the buttons and labels,
+  so the bar is never squeezed off the edges of a narrow window.
 - **FR-10.6** Missing plugins or a failing pipeline are routine states:
   in-window error message, never a crash. Unlike images (NFR-3.2),
   video decoding runs in-process — an accepted trade-off recorded in
