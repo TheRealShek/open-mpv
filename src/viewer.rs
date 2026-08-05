@@ -1,8 +1,13 @@
-//! Image display widget (FR-4): fit/actual/manual zoom, cursor-anchored
+//! Display widget (FR-4): fit/actual/manual zoom, cursor-anchored
 //! zoom, pan with edge clamping, 90° view rotation, and physical-pixel
 //! alignment so 100% is pixel-exact under fractional scaling (FR-4.7).
 //!
-//! Zoom is expressed against physical pixels: zoom 1.0 means one texture
+//! Renders any `GdkPaintable`: still images arrive as `GdkTexture`
+//! (which is a paintable) and keep an explicit scaling-filter path;
+//! live paintables such as the video sink's (FR-9) redraw through
+//! their invalidate signals.
+//!
+//! Zoom is expressed against physical pixels: zoom 1.0 means one source
 //! pixel maps to one physical display pixel regardless of scale factor.
 
 use gtk4 as gtk;
@@ -25,7 +30,7 @@ enum Mode {
 }
 
 pub struct State {
-    texture: Option<gtk::gdk::Texture>,
+    paintable: Option<gtk::gdk::Paintable>,
     /// Logical pixel size of the image independent of texture resolution.
     /// For raster images this equals the texture size; for SVG it is the
     /// document's nominal size, so re-rendered hi-res textures keep the
@@ -44,7 +49,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         State {
-            texture: None,
+            paintable: None,
             nominal: None,
             mode: Mode::Fit,
             offset: (0.0, 0.0),
@@ -65,6 +70,10 @@ mod imp {
     #[derive(Default)]
     pub struct ImageView {
         pub(super) state: RefCell<State>,
+        /// Signal connections into a live paintable (video sink); kept
+        /// with their source so replacing the paintable disconnects
+        /// them and a stale source cannot keep redrawing us.
+        pub(super) live: RefCell<Option<(gtk::gdk::Paintable, Vec<glib::SignalHandlerId>)>>,
         /// Fired when zoom/rotation changes; argument is zoom percent.
         pub(super) on_view_changed: Callback<f64>,
         /// Fired on horizontal scroll: +1 next, -1 prev (FR-3.1).
@@ -92,49 +101,72 @@ mod imp {
     impl WidgetImpl for ImageView {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
-            let state = self.state.borrow();
-            let Some(texture) = state.texture.as_ref() else {
-                return;
-            };
-            let (w, h) = (obj.width() as f64, obj.height() as f64);
-            if w <= 0.0 || h <= 0.0 {
-                return;
-            }
-            let scale = obj.surface_scale();
-            let (tw, th) = super::image_dims(&state, texture);
-            let zoom = super::effective_zoom(&state, w, h, scale, tw, th);
-            // Displayed size in logical px (unrotated and rotated).
-            let (dw, dh) = (tw * zoom / scale, th * zoom / scale);
-            let (rw, rh) = if state.rotation % 2 == 1 {
-                (dh, dw)
-            } else {
-                (dw, dh)
-            };
-            let offset = super::clamp_offset(state.offset, rw, rh, w, h);
+            // Copy everything out of the state first: a foreign
+            // paintable's snapshot must not run under our borrow.
+            let (paintable, dims, zoom, rotation, center) = {
+                let state = self.state.borrow();
+                let Some(paintable) = state.paintable.clone() else {
+                    return;
+                };
+                let (w, h) = (obj.width() as f64, obj.height() as f64);
+                let (tw, th) = super::image_dims(&state, &paintable);
+                if w <= 0.0 || h <= 0.0 || tw <= 0.0 || th <= 0.0 {
+                    // Zero source size: a video paintable before preroll.
+                    return;
+                }
+                let scale = obj.surface_scale();
+                let zoom = super::effective_zoom(&state, w, h, scale, tw, th);
+                // Displayed size in logical px (unrotated and rotated).
+                let (dw, dh) = (tw * zoom / scale, th * zoom / scale);
+                let (rw, rh) = if state.rotation % 2 == 1 {
+                    (dh, dw)
+                } else {
+                    (dw, dh)
+                };
+                let offset = super::clamp_offset(state.offset, rw, rh, w, h);
 
-            // Snap the image center to the physical pixel grid so a
-            // 100% view is never compositor-blurred (FR-4.7).
-            let cx = ((w / 2.0 + offset.0) * scale).round() / scale;
-            let cy = ((h / 2.0 + offset.1) * scale).round() / scale;
-
-            let filter = if zoom < 1.0 {
-                gsk::ScalingFilter::Trilinear
-            } else if zoom > 1.0 {
-                gsk::ScalingFilter::Linear
-            } else {
-                gsk::ScalingFilter::Nearest
+                // Snap the image center to the physical pixel grid so a
+                // 100% view is never compositor-blurred (FR-4.7).
+                let cx = ((w / 2.0 + offset.0) * scale).round() / scale;
+                let cy = ((h / 2.0 + offset.1) * scale).round() / scale;
+                (paintable, (dw, dh), zoom, state.rotation, (cx, cy))
             };
+            let (dw, dh) = dims;
 
             snapshot.save();
-            snapshot.translate(&graphene::Point::new(cx as f32, cy as f32));
-            if state.rotation != 0 {
-                snapshot.rotate(state.rotation as f32 * 90.0);
+            snapshot.translate(&graphene::Point::new(center.0 as f32, center.1 as f32));
+            if rotation != 0 {
+                snapshot.rotate(rotation as f32 * 90.0);
             }
-            snapshot.append_scaled_texture(
-                texture,
-                filter,
-                &graphene::Rect::new((-dw / 2.0) as f32, (-dh / 2.0) as f32, dw as f32, dh as f32),
-            );
+            if let Some(texture) = paintable.downcast_ref::<gtk::gdk::Texture>() {
+                // Still images pick the scaling filter explicitly so
+                // 100% stays pixel-exact and downscales stay smooth.
+                let filter = if zoom < 1.0 {
+                    gsk::ScalingFilter::Trilinear
+                } else if zoom > 1.0 {
+                    gsk::ScalingFilter::Linear
+                } else {
+                    gsk::ScalingFilter::Nearest
+                };
+                snapshot.append_scaled_texture(
+                    texture,
+                    filter,
+                    &graphene::Rect::new(
+                        (-dw / 2.0) as f32,
+                        (-dh / 2.0) as f32,
+                        dw as f32,
+                        dh as f32,
+                    ),
+                );
+            } else {
+                // Live paintables (video sink) draw themselves; they
+                // composite dmabuf frames without a CPU copy.
+                snapshot.translate(&graphene::Point::new(
+                    (-dw / 2.0) as f32,
+                    (-dh / 2.0) as f32,
+                ));
+                paintable.snapshot(snapshot, dw, dh);
+            }
             snapshot.restore();
         }
     }
@@ -152,10 +184,11 @@ impl Default for ImageView {
     }
 }
 
-fn image_dims(state: &State, texture: &gtk::gdk::Texture) -> (f64, f64) {
-    state
-        .nominal
-        .unwrap_or((texture.width() as f64, texture.height() as f64))
+fn image_dims(state: &State, paintable: &gtk::gdk::Paintable) -> (f64, f64) {
+    state.nominal.unwrap_or((
+        paintable.intrinsic_width() as f64,
+        paintable.intrinsic_height() as f64,
+    ))
 }
 
 fn effective_zoom(state: &State, w: f64, h: f64, scale: f64, tw: f64, th: f64) -> f64 {
@@ -200,9 +233,17 @@ impl ImageView {
     /// `nominal` overrides the on-screen size for resolution-independent
     /// content (SVG); raster images pass None.
     pub fn show_texture(&self, texture: gtk::gdk::Texture, nominal: Option<(f64, f64)>) {
+        self.show_paintable(texture.upcast(), nominal);
+    }
+
+    /// Show any paintable, resetting the view like [`Self::show_texture`].
+    /// Non-texture paintables are treated as live sources (video): their
+    /// invalidate signals drive redraws until they are replaced.
+    pub fn show_paintable(&self, paintable: gtk::gdk::Paintable, nominal: Option<(f64, f64)>) {
+        self.watch_live_source(&paintable);
         {
             let mut st = self.state();
-            st.texture = Some(texture);
+            st.paintable = Some(paintable);
             st.nominal = nominal;
             st.rotation = 0;
             st.offset = (0.0, 0.0);
@@ -216,21 +257,50 @@ impl ImageView {
         self.emit_view_changed();
     }
 
+    /// Subscribe to a live paintable's redraw signals, dropping any
+    /// previous subscription. Textures are static: no subscription.
+    fn watch_live_source(&self, paintable: &gtk::gdk::Paintable) {
+        if let Some((old, ids)) = self.imp().live.borrow_mut().take() {
+            for id in ids {
+                old.disconnect(id);
+            }
+        }
+        if paintable.is::<gtk::gdk::Texture>() {
+            return;
+        }
+        let weak = self.downgrade();
+        let contents = paintable.connect_invalidate_contents(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.queue_draw();
+            }
+        });
+        let weak = self.downgrade();
+        let size = paintable.connect_invalidate_size(move |_| {
+            if let Some(view) = weak.upgrade() {
+                // New source dimensions change the effective zoom.
+                view.queue_draw();
+                view.emit_view_changed();
+            }
+        });
+        *self.imp().live.borrow_mut() = Some((paintable.clone(), vec![contents, size]));
+    }
+
     /// Remove the image (empty and error states).
     pub fn clear(&self) {
-        self.state().texture = None;
+        if let Some((old, ids)) = self.imp().live.borrow_mut().take() {
+            for id in ids {
+                old.disconnect(id);
+            }
+        }
+        self.state().paintable = None;
         self.queue_draw();
     }
 
     /// Swap the texture without touching view state (animation frames,
     /// SVG re-render).
     pub fn update_texture(&self, texture: gtk::gdk::Texture) {
-        self.state().texture = Some(texture);
+        self.state().paintable = Some(texture.upcast());
         self.queue_draw();
-    }
-
-    pub fn texture(&self) -> Option<gtk::gdk::Texture> {
-        self.imp().state.borrow().texture.clone()
     }
 
     /// Initial fit mode from config (FR-8.2 `fit=`).
@@ -240,10 +310,14 @@ impl ImageView {
 
     pub fn zoom_percent(&self) -> f64 {
         let st = self.imp().state.borrow();
-        let Some(tex) = st.texture.as_ref() else {
+        let Some(p) = st.paintable.as_ref() else {
             return 100.0;
         };
-        let (tw, th) = image_dims(&st, tex);
+        let (tw, th) = image_dims(&st, p);
+        if tw <= 0.0 || th <= 0.0 {
+            // Video paintable before preroll has no size yet.
+            return 100.0;
+        }
         effective_zoom(
             &st,
             self.width() as f64,
@@ -261,12 +335,12 @@ impl ImageView {
 
     pub fn is_pannable(&self) -> bool {
         let st = self.imp().state.borrow();
-        let Some(tex) = st.texture.as_ref() else {
+        let Some(p) = st.paintable.as_ref() else {
             return false;
         };
         let (w, h) = (self.width() as f64, self.height() as f64);
         let scale = self.surface_scale();
-        let (tw, th) = image_dims(&st, tex);
+        let (tw, th) = image_dims(&st, p);
         let z = effective_zoom(&st, w, h, scale, tw, th);
         let (dw, dh) = (tw * z / scale, th * z / scale);
         let (rw, rh) = if st.rotation % 2 == 1 {
