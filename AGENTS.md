@@ -68,4 +68,8 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs
 
 ## Verified
 
-Last verified: 2026-08-05 — `cargo build`, `cargo test` (15 pass, incl. trash round-trip and JPEG rotate-save), `cargo clippy -- -D warnings`, `cargo fmt`, release build 4.7 MB, single-instance forward 46 ms, smoke-run against PNG/JPEG/animated GIF/SVG/corrupt file/directory.
+Last verified: 2026-08-05 — `cargo test` (21 pass, incl. trash round-trip, JPEG rotate-save, cache byte-budget eviction), `cargo clippy -- -D warnings`, `cargo fmt`, release build 4.6 MB.
+
+Video (FR-10) verified live on this machine: `vah264dec` selected for H.264 (VA-API on the Intel iGPU), EOS loop restarts on schedule, transport actions driven over the exported `org.gtk.Actions` bus (pause/resume/seek/mute confirmed in the log), pipeline released on every video→image switch, corrupt MP4 reports in-window without crashing. Memory across 32 video↔image cycles stayed bounded (peak ~295 MB, settled 233 MB — allocator arena, not growth). Lazy `gst::init` confirmed: an image-only session loads zero GStreamer plugins (1.7 MB PSS from linked libs) and cold-starts in 187–202 ms, unchanged from before video support. Mixed-folder run covered animated GIF → WebM → JPEG → SVG including sharp SVG re-render at zoom.
+
+`gdbus call --session --dest dev.thakur.OpenMpv --object-path /dev/thakur/OpenMpv/window/1 --method org.gtk.Actions.Activate <action> "[]" "{}"` drives any action without needing window focus — the way to test interactions on Wayland (Mutter refuses the virtual-keyboard protocol, so `wtype` cannot work).
