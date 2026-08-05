@@ -26,6 +26,11 @@ enum Mode {
 
 pub struct State {
     texture: Option<gtk::gdk::Texture>,
+    /// Logical pixel size of the image independent of texture resolution.
+    /// For raster images this equals the texture size; for SVG it is the
+    /// document's nominal size, so re-rendered hi-res textures keep the
+    /// same on-screen geometry (FR-2.3).
+    nominal: Option<(f64, f64)>,
     mode: Mode,
     /// Pan offset of the image center from the widget center, logical px.
     offset: (f64, f64),
@@ -40,6 +45,7 @@ impl Default for State {
     fn default() -> Self {
         State {
             texture: None,
+            nominal: None,
             mode: Mode::Fit,
             offset: (0.0, 0.0),
             rotation: 0,
@@ -93,7 +99,7 @@ mod imp {
                 return;
             }
             let scale = obj.surface_scale();
-            let (tw, th) = (texture.width() as f64, texture.height() as f64);
+            let (tw, th) = super::image_dims(&state, texture);
             let zoom = super::effective_zoom(&state, w, h, scale, tw, th);
             // Displayed size in logical px (unrotated and rotated).
             let (dw, dh) = (tw * zoom / scale, th * zoom / scale);
@@ -149,6 +155,12 @@ impl Default for ImageView {
     }
 }
 
+fn image_dims(state: &State, texture: &gtk::gdk::Texture) -> (f64, f64) {
+    state
+        .nominal
+        .unwrap_or((texture.width() as f64, texture.height() as f64))
+}
+
 fn effective_zoom(state: &State, w: f64, h: f64, scale: f64, tw: f64, th: f64) -> f64 {
     let (rtw, rth) = if state.rotation % 2 == 1 {
         (th, tw)
@@ -188,10 +200,13 @@ impl ImageView {
     }
 
     /// Show a new image, resetting the view to the default fit (FR-4.5).
-    pub fn set_texture(&self, texture: Option<gtk::gdk::Texture>) {
+    /// `nominal` overrides the on-screen size for resolution-independent
+    /// content (SVG); raster images pass None.
+    pub fn show_texture(&self, texture: gtk::gdk::Texture, nominal: Option<(f64, f64)>) {
         {
             let mut st = self.state();
-            st.texture = texture;
+            st.texture = Some(texture);
+            st.nominal = nominal;
             st.rotation = 0;
             st.offset = (0.0, 0.0);
             st.mode = if st.default_fit_actual {
@@ -202,6 +217,12 @@ impl ImageView {
         }
         self.queue_draw();
         self.emit_view_changed();
+    }
+
+    /// Remove the image (empty and error states).
+    pub fn clear(&self) {
+        self.state().texture = None;
+        self.queue_draw();
     }
 
     /// Swap the texture without touching view state (animation frames,
@@ -225,13 +246,14 @@ impl ImageView {
         let Some(tex) = st.texture.as_ref() else {
             return 100.0;
         };
+        let (tw, th) = image_dims(&st, tex);
         effective_zoom(
             &st,
             self.width() as f64,
             self.height() as f64,
             self.surface_scale(),
-            tex.width() as f64,
-            tex.height() as f64,
+            tw,
+            th,
         ) * 100.0
     }
 
@@ -247,8 +269,9 @@ impl ImageView {
         };
         let (w, h) = (self.width() as f64, self.height() as f64);
         let scale = self.surface_scale();
-        let z = effective_zoom(&st, w, h, scale, tex.width() as f64, tex.height() as f64);
-        let (dw, dh) = (tex.width() as f64 * z / scale, tex.height() as f64 * z / scale);
+        let (tw, th) = image_dims(&st, tex);
+        let z = effective_zoom(&st, w, h, scale, tw, th);
+        let (dw, dh) = (tw * z / scale, th * z / scale);
         let (rw, rh) = if st.rotation % 2 == 1 { (dh, dw) } else { (dw, dh) };
         rw > w + 0.5 || rh > h + 0.5
     }

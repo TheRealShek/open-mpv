@@ -17,7 +17,6 @@ struct Entry {
 
 #[derive(Debug)]
 pub struct Folder {
-    dir: PathBuf,
     entries: Vec<Entry>,
     sort: SortOrder,
 }
@@ -38,17 +37,9 @@ impl Folder {
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             entries.push(Entry { path, mtime });
         }
-        let mut folder = Folder {
-            dir: dir.to_path_buf(),
-            entries,
-            sort,
-        };
+        let mut folder = Folder { entries, sort };
         folder.entries.sort_by(|a, b| folder_cmp(a, b, sort));
         Ok(folder)
-    }
-
-    pub fn dir(&self) -> &Path {
-        &self.dir
     }
 
     pub fn len(&self) -> usize {

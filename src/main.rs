@@ -1,8 +1,15 @@
 mod config;
+mod fileops;
 mod folder;
+mod loader;
 mod viewer;
+mod window;
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use gtk4 as gtk;
+
 use gtk::prelude::*;
 
 fn main() -> gtk::glib::ExitCode {
@@ -11,44 +18,34 @@ fn main() -> gtk::glib::ExitCode {
         .flags(gtk::gio::ApplicationFlags::HANDLES_OPEN)
         .build();
 
-    app.connect_activate(build_window);
-    app.connect_open(|app, files, _hint| {
-        build_window(app);
-        if let Some(file) = files.first() {
-            let file = file.clone();
-            let win = app.active_window().unwrap();
-            gtk::glib::spawn_future_local(async move {
-                match glycin::Loader::new(file).load().await {
-                    Ok(image) => match image.next_frame().await {
-                        Ok(frame) => {
-                            let texture = frame.texture();
-                            let picture = gtk::Picture::for_paintable(&texture);
-                            win.set_child(Some(&picture));
-                            println!(
-                                "decoded: {}x{} ({:?})",
-                                frame.width(),
-                                frame.height(),
-                                image.details().info_format_name()
-                            );
-                        }
-                        Err(e) => eprintln!("frame error: {e}"),
-                    },
-                    Err(e) => eprintln!("load error: {e}"),
-                }
-            });
+    // Single instance (FR-7): GApplication uniqueness routes `open` of
+    // later launches to the primary instance; one window is reused.
+    let holder: Rc<RefCell<Option<Rc<window::App>>>> = Rc::new(RefCell::new(None));
+    let get_app: Rc<dyn Fn(&gtk::Application) -> Rc<window::App>> = Rc::new({
+        let holder = holder.clone();
+        move |gtk_app| {
+            if let Some(existing) = holder.borrow().as_ref() {
+                return existing.clone();
+            }
+            let created = window::App::new(gtk_app, config::Config::load());
+            *holder.borrow_mut() = Some(created.clone());
+            created
+        }
+    });
+
+    app.connect_activate({
+        let get_app = get_app.clone();
+        move |gtk_app| get_app(gtk_app).present_default()
+    });
+    app.connect_open({
+        let get_app = get_app.clone();
+        move |gtk_app, files, _hint| {
+            let app = get_app(gtk_app);
+            match files.first().and_then(|f| f.path()) {
+                Some(path) => app.open_path(&path),
+                None => app.present_default(),
+            }
         }
     });
     app.run()
-}
-
-fn build_window(app: &gtk::Application) {
-    if app.active_window().is_none() {
-        gtk::ApplicationWindow::builder()
-            .application(app)
-            .title("open-mpv")
-            .default_width(800)
-            .default_height(600)
-            .build()
-            .present();
-    }
 }
