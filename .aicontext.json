@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "generatorVersion": "1.3.0",
+  "tools": [
+    "codex",
+    "claude",
+    "cursor",
+    "copilot"
+  ],
+  "profile": "standard",
+  "detect": false,
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "template": "AGENTS.md",
+      "role": "canonical",
+      "sha256": "dd552982b9d4bd618f458ab845db624dde3f64f4d682b44fe57dbf60affdfa17"
+    },
+    {
+      "path": "CLAUDE.md",
+      "template": "CLAUDE.md",
+      "role": "adapter",
+      "sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+    },
+    {
+      "path": ".cursor/rules/aicontext.mdc",
+      "template": "cursor.mdc",
+      "role": "adapter",
+      "sha256": "f719eabe8ea4522bf0585ef81b8319d640263ac0073d512b0ffa5ebbfe05ac0f"
+    },
+    {
+      "path": ".github/copilot-instructions.md",
+      "template": "copilot-instructions.md",
+      "role": "adapter",
+      "sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+    }
+  ]
+}
