@@ -115,6 +115,12 @@ pub struct App {
     // Widgets and timers.
     status: gtk::Label,
     pos_label: gtk::Label,
+    transport: gtk::Box,
+    seek_bar: gtk::Scale,
+    time_label: gtk::Label,
+    /// Repeating 500 ms position tick; exists only while the transport
+    /// is on screen so a hidden overlay costs nothing (NFR-2.1).
+    transport_tick: RefCell<Option<glib::SourceId>>,
     indicator: gtk::Label,
     toast_revealer: gtk::Revealer,
     toast_label: gtk::Label,
@@ -178,6 +184,18 @@ impl App {
         let pos_label = gtk::Label::new(None);
         pos_label.add_css_class("dim");
         bar.append(&pos_label);
+        // Video transport: seek bar + position, hidden for images
+        // (FR-9.5). The position tick runs only while this is visible.
+        let seek_bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
+        seek_bar.set_size_request(180, -1);
+        seek_bar.set_draw_value(false);
+        let time_label = gtk::Label::new(None);
+        time_label.add_css_class("dim");
+        let transport = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        transport.append(&seek_bar);
+        transport.append(&time_label);
+        transport.set_visible(false);
+        bar.append(&transport);
         for (icon, action, tip) in [
             (
                 "object-rotate-left-symbolic",
@@ -264,6 +282,10 @@ impl App {
             presented: Cell::new(false),
             status,
             pos_label,
+            transport,
+            seek_bar,
+            time_label,
+            transport_tick: RefCell::new(None),
             indicator,
             toast_revealer,
             toast_label,
@@ -287,6 +309,17 @@ impl App {
         app.setup_actions(gtk_app);
         app.setup_controllers();
         app.build_help(gtk_app);
+
+        // Dragging the seek bar seeks; programmatic set_value does not
+        // fire change-value, so there is no feedback loop.
+        app.seek_bar.connect_change_value(clone!(
+            #[strong(rename_to = app)]
+            app,
+            move |_, _, value| {
+                app.with_video(|p| p.seek_fraction(value));
+                glib::Propagation::Stop
+            }
+        ));
 
         // Query which formats the sandboxed editors can rewrite.
         glib::spawn_future_local(clone!(
@@ -490,6 +523,11 @@ impl App {
         }
         crate::applog!("play: {}", path.display());
         self.update_save_enabled();
+        self.transport.set_visible(true);
+        self.update_transport();
+        if self.chrome_visible() {
+            self.start_transport_tick();
+        }
         // Dimensions arrive with preroll; until then present at the
         // default size rather than blocking on the pipeline.
         self.present_default();
@@ -499,6 +537,51 @@ impl App {
         if let Some(p) = self.player.borrow().as_ref() {
             p.stop();
         }
+        self.transport.set_visible(false);
+        self.stop_transport_tick();
+    }
+
+    // ----- video transport (FR-9.5) ------------------------------------
+
+    fn update_transport(&self) {
+        let progress = self.player.borrow().as_ref().and_then(|p| p.progress());
+        let Some((pos, dur)) = progress else {
+            return;
+        };
+        if dur > 0.0 {
+            self.seek_bar.set_value(pos / dur);
+        }
+        self.time_label
+            .set_text(&format!("{} / {}", format_time(pos), format_time(dur)));
+    }
+
+    fn start_transport_tick(self: &Rc<Self>) {
+        if self.transport_tick.borrow().is_some() || !self.is_video_showing() {
+            return;
+        }
+        self.update_transport();
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_local(Duration::from_millis(500), move || {
+            let Some(app) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            app.update_transport();
+            glib::ControlFlow::Continue
+        });
+        *self.transport_tick.borrow_mut() = Some(id);
+    }
+
+    fn stop_transport_tick(&self) {
+        if let Some(id) = self.transport_tick.borrow_mut().take() {
+            id.remove();
+        }
+    }
+
+    fn chrome_visible(&self) -> bool {
+        !self
+            .chrome
+            .first()
+            .is_some_and(|w| w.has_css_class("invisible"))
     }
 
     fn is_video_showing(&self) -> bool {
@@ -1006,6 +1089,9 @@ impl App {
             w.remove_css_class("invisible");
             w.set_can_target(true);
         }
+        if self.is_video_showing() {
+            self.start_transport_tick();
+        }
         let timeout = Duration::from_secs_f64(self.cfg.overlay_timeout.max(0.2));
         reset_timer(
             &self.chrome_timer,
@@ -1023,6 +1109,8 @@ impl App {
             w.add_css_class("invisible");
             w.set_can_target(false);
         }
+        // A hidden overlay must not keep polling the pipeline.
+        self.stop_transport_tick();
     }
 
     /// Flash the current video position after a seek (FR-9.5).
