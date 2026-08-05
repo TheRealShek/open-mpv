@@ -21,6 +21,92 @@ use gtk::subclass::prelude::*;
 pub const ZOOM_MIN: f64 = 0.05;
 pub const ZOOM_MAX: f64 = 20.0;
 
+/// Zoom applied per wheel detent (FR-4.2).
+const ZOOM_STEP: f64 = 1.1;
+/// GDK reports mouse-wheel scrolling in detent clicks but touchpad
+/// scrolling in *logical pixels* (`GdkScrollUnit`), and the two arrive
+/// through the same signal. This many pixels stands in for one detent.
+const SURFACE_PIXELS_PER_DETENT: f64 = 50.0;
+/// Travel before a touchpad gesture commits to zooming or navigating, so
+/// sideways jitter during a two-finger zoom cannot flip the image.
+const AXIS_LOCK_DETENTS: f64 = 0.2;
+/// Sideways travel that counts as one swipe to the next image.
+const SWIPE_DETENTS: f64 = 2.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, PartialEq)]
+enum ScrollAction {
+    Ignore,
+    /// +1 next, -1 previous.
+    Navigate(i32),
+    /// Multiply the current zoom by this factor.
+    Zoom(f64),
+}
+
+/// Scroll travel accumulated within one touchpad gesture. A wheel detent
+/// is a complete gesture in itself and does not touch this.
+#[derive(Debug, Default)]
+struct ScrollGesture {
+    /// Unspent travel, in detent equivalents.
+    dx: f64,
+    dy: f64,
+    axis: Option<Axis>,
+}
+
+impl ScrollGesture {
+    /// What one scroll event should do. Wheel detents act immediately,
+    /// one image or one zoom step each. Touchpad pixels are accumulated:
+    /// a swipe delivers dozens of events, and acting on each one would
+    /// race through the folder or zoom by orders of magnitude.
+    fn event(&mut self, unit: gtk::gdk::ScrollUnit, dx: f64, dy: f64) -> ScrollAction {
+        if unit == gtk::gdk::ScrollUnit::Wheel {
+            return if dx.abs() > dy.abs() {
+                ScrollAction::Navigate(if dx > 0.0 { 1 } else { -1 })
+            } else if dy != 0.0 {
+                ScrollAction::Zoom(ZOOM_STEP.powf(-dy))
+            } else {
+                ScrollAction::Ignore
+            };
+        }
+
+        self.dx += dx / SURFACE_PIXELS_PER_DETENT;
+        self.dy += dy / SURFACE_PIXELS_PER_DETENT;
+        if self.axis.is_none() && self.dx.abs().max(self.dy.abs()) >= AXIS_LOCK_DETENTS {
+            self.axis = Some(if self.dx.abs() > self.dy.abs() {
+                Axis::Horizontal
+            } else {
+                Axis::Vertical
+            });
+        }
+        match self.axis {
+            // Too early to tell what the fingers are doing; the travel
+            // stays banked and is spent once the axis settles.
+            None => ScrollAction::Ignore,
+            Some(Axis::Horizontal) => {
+                if self.dx.abs() < SWIPE_DETENTS {
+                    return ScrollAction::Ignore;
+                }
+                let dir = if self.dx > 0.0 { 1 } else { -1 };
+                self.dx -= f64::from(dir) * SWIPE_DETENTS;
+                ScrollAction::Navigate(dir)
+            }
+            Some(Axis::Vertical) => {
+                let travel = std::mem::take(&mut self.dy);
+                if travel == 0.0 {
+                    ScrollAction::Ignore
+                } else {
+                    ScrollAction::Zoom(ZOOM_STEP.powf(-travel))
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
     /// Scale to the window, never above 100% (FR-4.1). Not pannable.
@@ -438,19 +524,42 @@ impl ImageView {
         // Vertical scroll zooms at the cursor; horizontal (or Shift+
         // vertical, which GTK delivers as horizontal) navigates (FR-3.1).
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        let gesture = std::rc::Rc::new(std::cell::RefCell::new(ScrollGesture::default()));
+        // Each touchpad gesture starts with a clean slate; without this
+        // the previous swipe's axis would still be locked in.
+        scroll.connect_scroll_begin(glib::clone!(
+            #[strong]
+            gesture,
+            move |_| *gesture.borrow_mut() = ScrollGesture::default()
+        ));
+        scroll.connect_scroll_end(glib::clone!(
+            #[strong]
+            gesture,
+            move |_| *gesture.borrow_mut() = ScrollGesture::default()
+        ));
         scroll.connect_scroll(glib::clone!(
             #[weak(rename_to = view)]
             self,
+            #[strong]
+            gesture,
             #[upgrade_or]
             glib::Propagation::Proceed,
-            move |_, dx, dy| {
-                if dx.abs() > dy.abs() {
-                    if let Some(f) = view.imp().on_navigate.borrow().as_ref() {
-                        f(if dx > 0.0 { 1 } else { -1 });
+            move |controller, dx, dy| {
+                // Resolve the action before acting on it: the callbacks
+                // below re-enter the widget, and a live borrow here would
+                // abort the process inside this GTK callback.
+                let action = gesture.borrow_mut().event(controller.unit(), dx, dy);
+                match action {
+                    ScrollAction::Navigate(dir) => {
+                        if let Some(f) = view.imp().on_navigate.borrow().as_ref() {
+                            f(dir);
+                        }
                     }
-                } else if dy != 0.0 {
-                    let anchor = view.imp().state.borrow().pointer;
-                    view.zoom_by(1.1f64.powf(-dy), Some(anchor));
+                    ScrollAction::Zoom(factor) => {
+                        let anchor = view.imp().state.borrow().pointer;
+                        view.zoom_by(factor, Some(anchor));
+                    }
+                    ScrollAction::Ignore => {}
                 }
                 glib::Propagation::Stop
             }
@@ -516,6 +625,84 @@ impl ImageView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use gtk::gdk::ScrollUnit::{Surface, Wheel};
+
+    /// One touchpad event, in the logical pixels GDK reports.
+    fn swipe(g: &mut ScrollGesture, dx: f64, dy: f64) -> ScrollAction {
+        g.event(Surface, dx, dy)
+    }
+
+    #[test]
+    fn wheel_detents_act_one_at_a_time() {
+        let mut g = ScrollGesture::default();
+        assert_eq!(g.event(Wheel, 0.0, -1.0), ScrollAction::Zoom(ZOOM_STEP));
+        assert_eq!(g.event(Wheel, 1.0, 0.0), ScrollAction::Navigate(1));
+        assert_eq!(g.event(Wheel, -1.0, 0.0), ScrollAction::Navigate(-1));
+        assert_eq!(g.event(Wheel, 0.0, 0.0), ScrollAction::Ignore);
+    }
+
+    /// Images advanced by a sideways swipe of `pixels`, delivered the way
+    /// a touchpad delivers it: many small events.
+    fn images_moved(pixels: f64) -> usize {
+        let mut g = ScrollGesture::default();
+        (0..(pixels / 10.0).round() as usize)
+            .filter(|_| swipe(&mut g, 10.0, 0.0) == ScrollAction::Navigate(1))
+            .count()
+    }
+
+    #[test]
+    fn a_touchpad_swipe_advances_by_travel_not_by_event_count() {
+        // One image per SWIPE_DETENTS of travel (100 logical px), however
+        // many events that took. The defect this guards: a 150 px swipe
+        // arrives as ~15 events and used to move 15 images.
+        assert_eq!(images_moved(150.0), 1);
+        assert_eq!(images_moved(250.0), 2);
+        assert_eq!(images_moved(350.0), 3);
+        // A twitch is not a swipe.
+        assert_eq!(images_moved(30.0), 0);
+    }
+
+    #[test]
+    fn touchpad_zoom_is_gentle_where_wheel_zoom_is_a_full_step() {
+        let mut g = ScrollGesture::default();
+        // Reading a 10 px flick as ten detents would zoom out 2.6x.
+        let ScrollAction::Zoom(factor) = swipe(&mut g, 0.0, 10.0) else {
+            panic!("expected a zoom");
+        };
+        assert!(
+            (factor - ZOOM_STEP.powf(-10.0 / SURFACE_PIXELS_PER_DETENT)).abs() < 1e-12,
+            "{factor} should be one fifth of a detent"
+        );
+        assert!(
+            factor > 0.97 && factor < 1.0,
+            "{factor} is not a gentle step"
+        );
+    }
+
+    #[test]
+    fn sideways_jitter_during_a_zoom_never_navigates() {
+        let mut g = ScrollGesture::default();
+        for _ in 0..20 {
+            // Fingers drifting a pixel sideways per event while zooming.
+            assert_ne!(swipe(&mut g, 1.0, -12.0), ScrollAction::Navigate(-1));
+            assert_ne!(swipe(&mut g, -1.0, -12.0), ScrollAction::Navigate(1));
+        }
+        assert_eq!(g.axis, Some(Axis::Vertical));
+    }
+
+    #[test]
+    fn a_new_gesture_is_free_to_pick_the_other_axis() {
+        let mut g = ScrollGesture::default();
+        for _ in 0..5 {
+            swipe(&mut g, 20.0, 0.0);
+        }
+        assert_eq!(g.axis, Some(Axis::Horizontal));
+        // What connect_scroll_begin/end do between gestures.
+        g = ScrollGesture::default();
+        swipe(&mut g, 0.0, 30.0);
+        assert_eq!(g.axis, Some(Axis::Vertical));
+    }
 
     #[test]
     fn fit_never_upscales() {
