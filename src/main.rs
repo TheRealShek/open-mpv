@@ -1,5 +1,6 @@
 mod config;
 mod folder;
+mod viewer;
 
 use gtk4 as gtk;
 use gtk::prelude::*;
