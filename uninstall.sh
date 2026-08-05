@@ -1,5 +1,6 @@
 #!/bin/sh
-# Remove open-mpv and hand default-viewer status back to Loupe.
+# Remove open-mpv and hand default-viewer status back to Loupe for
+# images and to mpv for videos.
 set -eu
 
 APP_ID="dev.thakur.OpenMpv"
@@ -13,4 +14,9 @@ for mime in image/jpeg image/png image/webp image/avif image/bmp \
     xdg-mime default org.gnome.Loupe.desktop "$mime" 2>/dev/null || true
 done
 
-echo "Removed open-mpv; Loupe is the default image viewer again."
+for mime in video/mp4 video/x-matroska video/webm video/quicktime \
+    video/vnd.avi video/x-msvideo; do
+    xdg-mime default mpv.desktop "$mime" 2>/dev/null || true
+done
+
+echo "Removed open-mpv; Loupe handles images and mpv handles videos again."

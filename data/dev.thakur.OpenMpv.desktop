@@ -7,6 +7,6 @@ Exec=@BINDIR@/open-mpv %f
 Icon=dev.thakur.OpenMpv
 Terminal=false
 Categories=Graphics;Viewer;GTK;
-MimeType=image/jpeg;image/png;image/webp;image/avif;image/bmp;image/gif;image/svg+xml;image/svg+xml-compressed;video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;
+MimeType=image/jpeg;image/png;image/webp;image/avif;image/bmp;image/gif;image/svg+xml;image/svg+xml-compressed;video/mp4;video/x-matroska;video/webm;video/quicktime;video/vnd.avi;video/x-msvideo;
 SingleMainWindow=true
 StartupNotify=true

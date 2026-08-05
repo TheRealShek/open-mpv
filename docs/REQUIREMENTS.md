@@ -130,8 +130,8 @@ product; there is no version staging.
 ### FR-9 — Desktop integration
 
 - **FR-9.1** Ships a `.desktop` entry and MIME associations for all
-  FR-2 formats; installable as the system **default** image viewer so
-  double-click in Files opens it.
+  FR-2 image formats and FR-10.1 video containers; installable as the
+  system **default** viewer for both so double-click in Files opens it.
 - **FR-9.2** Shows a proper app icon and name in the GNOME shell
   (window switcher, dock).
 

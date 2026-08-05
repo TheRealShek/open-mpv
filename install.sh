@@ -20,10 +20,15 @@ sed "s|@BINDIR@|${BIN_DIR}|" "${SRC_DIR}/data/${APP_ID}.desktop" \
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
 gtk-update-icon-cache -q "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 
-# Become the default viewer for every supported format (FR-9.1).
+# Become the default viewer for every supported format (FR-9.1). The
+# video list mirrors config::is_video; .m4v resolves to video/mp4, and
+# video/x-msvideo is registered alongside the canonical video/vnd.avi
+# because either name may reach us depending on the caller.
 for mime in image/jpeg image/png image/webp image/avif image/bmp \
-    image/gif image/svg+xml image/svg+xml-compressed; do
+    image/gif image/svg+xml image/svg+xml-compressed \
+    video/mp4 video/x-matroska video/webm video/quicktime \
+    video/vnd.avi video/x-msvideo; do
     xdg-mime default "${APP_ID}.desktop" "$mime"
 done
 
-echo "Installed ${BIN_DIR}/open-mpv and registered as default image viewer."
+echo "Installed ${BIN_DIR}/open-mpv and registered as default image and video viewer."
