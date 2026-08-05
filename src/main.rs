@@ -3,6 +3,7 @@ mod fileops;
 mod folder;
 mod loader;
 mod log;
+mod player;
 mod viewer;
 mod window;
 

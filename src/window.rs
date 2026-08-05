@@ -17,16 +17,18 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::prelude::*;
 
-use crate::config::{Config, FitMode};
+use crate::config::{self, Config, FitMode};
 use crate::fileops;
 use crate::folder::Folder;
 use crate::loader::{self, Decoded};
+use crate::player::{self, Player};
 use crate::viewer::ImageView;
 
 /// Default key → action map; config `bind=` lines override per key.
 const DEFAULT_BINDS: &[(&str, &str)] = &[
     ("Right", "next"),
-    ("space", "next"),
+    // Space pauses video, flips to the next photo otherwise.
+    ("space", "play-pause"),
     ("Page_Down", "next"),
     ("Left", "prev"),
     ("BackSpace", "prev"),
@@ -44,6 +46,12 @@ const DEFAULT_BINDS: &[(&str, &str)] = &[
     ("r", "rotate-cw"),
     ("<Shift>r", "rotate-ccw"),
     ("s", "save"),
+    // Video transport (FR-9), mpv-flavored.
+    ("j", "seek-back"),
+    ("l", "seek-forward"),
+    ("m", "mute"),
+    ("Up", "volume-up"),
+    ("Down", "volume-down"),
     ("Delete", "trash"),
     ("KP_Delete", "trash"),
     ("<Control>z", "undo"),
@@ -66,6 +74,12 @@ const ACTION_NAMES: &[&str] = &[
     "zoom-toggle",
     "rotate-cw",
     "rotate-ccw",
+    "play-pause",
+    "seek-back",
+    "seek-forward",
+    "mute",
+    "volume-up",
+    "volume-down",
     "save",
     "trash",
     "undo",
@@ -93,6 +107,9 @@ pub struct App {
     /// touching the UI so stale decodes/frames are dropped (NFR-1.3).
     generation: Cell<u64>,
     editable_mimes: RefCell<BTreeSet<String>>,
+    /// Created on the first video (lazy GStreamer init, NFR-1.1) and
+    /// reused; `None` also while videos have never been opened.
+    player: RefCell<Option<Rc<Player>>>,
     pending_undo: RefCell<Option<PathBuf>>,
     presented: Cell<bool>,
     // Widgets and timers.
@@ -242,6 +259,7 @@ impl App {
             cache: loader::Cache::new(3, cfg.cache_budget_mb as usize * 1024 * 1024),
             generation: Cell::new(0),
             editable_mimes: RefCell::new(BTreeSet::new()),
+            player: RefCell::new(None),
             pending_undo: RefCell::new(None),
             presented: Cell::new(false),
             status,
@@ -390,6 +408,14 @@ impl App {
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
 
+        if config::is_video(&path) {
+            self.show_video(&path);
+            self.preload_neighbors(idx);
+            return;
+        }
+        // Leaving a video for an image: silence and free the decoder.
+        self.stop_video();
+
         if let Some((decoded, mime)) = self.cache.get(&path) {
             crate::applog!("show: {} (cache hit)", path.display());
             self.apply_decoded(decoded, mime, generation);
@@ -421,6 +447,97 @@ impl App {
             ));
         }
         self.preload_neighbors(idx);
+    }
+
+    // ----- showing videos (FR-9) ---------------------------------------
+
+    /// Lazily build the shared player; `None` if the pipeline cannot be
+    /// assembled (missing plugins) — a routine state, not a panic.
+    fn player(self: &Rc<Self>) -> Option<Rc<Player>> {
+        if let Some(p) = self.player.borrow().as_ref() {
+            return Some(p.clone());
+        }
+        let weak = Rc::downgrade(self);
+        match Player::new(move |event| {
+            if let Some(app) = weak.upgrade() {
+                app.on_player_event(event);
+            }
+        }) {
+            Ok(p) => {
+                let p = Rc::new(p);
+                *self.player.borrow_mut() = Some(p.clone());
+                Some(p)
+            }
+            Err(e) => {
+                eprintln!("open-mpv: error: {e}");
+                None
+            }
+        }
+    }
+
+    fn show_video(self: &Rc<Self>, path: &Path) {
+        let Some(player) = self.player() else {
+            self.show_error(path, "video playback unavailable (GStreamer)");
+            return;
+        };
+        self.status.set_visible(false);
+        *self.current_decoded.borrow_mut() = None;
+        *self.current_mime.borrow_mut() = None;
+        self.view.show_paintable(player.paintable(), None);
+        if let Err(e) = player.play(path) {
+            self.show_error(path, &e);
+            return;
+        }
+        crate::applog!("play: {}", path.display());
+        self.update_save_enabled();
+        // Dimensions arrive with preroll; until then present at the
+        // default size rather than blocking on the pipeline.
+        self.present_default();
+    }
+
+    fn stop_video(&self) {
+        if let Some(p) = self.player.borrow().as_ref() {
+            p.stop();
+        }
+    }
+
+    fn is_video_showing(&self) -> bool {
+        self.showing
+            .borrow()
+            .as_deref()
+            .is_some_and(config::is_video)
+    }
+
+    fn on_player_event(self: &Rc<Self>, event: player::Event) {
+        match event {
+            player::Event::EndOfStream => {
+                if self.is_video_showing() {
+                    // Loop like animated images do (FR-9.3).
+                    if let Some(p) = self.player.borrow().as_ref() {
+                        p.rewind();
+                    }
+                }
+            }
+            player::Event::Error(message) => {
+                let path = self.showing.borrow().clone();
+                self.stop_video();
+                if let Some(path) = path {
+                    self.show_error(&path, &message);
+                }
+            }
+        }
+    }
+
+    /// Run `f` on the player when a video is on screen; used by the
+    /// transport actions so they are no-ops on images.
+    fn with_video(self: &Rc<Self>, f: impl FnOnce(&Player)) {
+        if !self.is_video_showing() {
+            return;
+        }
+        let player = self.player.borrow().clone();
+        if let Some(p) = player {
+            f(&p);
+        }
     }
 
     fn apply_decoded(self: &Rc<Self>, decoded: Rc<Decoded>, mime: String, generation: u64) {
@@ -538,6 +655,8 @@ impl App {
                 .into_iter()
                 .flatten()
                 .filter_map(|i| folder.get(i))
+                // Videos are streamed, never pre-decoded (FR-9.4).
+                .filter(|p| !config::is_video(p))
                 .map(Path::to_path_buf)
                 .collect()
         };
@@ -560,6 +679,7 @@ impl App {
 
     fn show_error(self: &Rc<Self>, path: &Path, message: &str) {
         self.generation.set(self.generation.get() + 1);
+        self.stop_video();
         self.view.clear();
         *self.current_decoded.borrow_mut() = None;
         *self.current_mime.borrow_mut() = None;
@@ -576,6 +696,7 @@ impl App {
 
     fn empty_state(self: &Rc<Self>, message: &str) {
         self.generation.set(self.generation.get() + 1);
+        self.stop_video();
         self.view.clear();
         *self.current_decoded.borrow_mut() = None;
         *self.current_mime.borrow_mut() = None;
@@ -744,6 +865,10 @@ impl App {
         let Some(path) = self.showing.borrow().clone() else {
             return;
         };
+        // Release the file before it moves to trash.
+        if config::is_video(&path) {
+            self.stop_video();
+        }
         let idx = self.current_index().unwrap_or(0);
         glib::spawn_future_local(clone!(
             #[strong(rename_to = app)]
@@ -900,6 +1025,23 @@ impl App {
         }
     }
 
+    /// Flash the current video position after a seek (FR-9.5).
+    fn flash_progress(self: &Rc<Self>) {
+        let mut progress = None;
+        self.with_video(|p| progress = p.progress());
+        if let Some((pos, dur)) = progress {
+            self.flash(&format!("{} / {}", format_time(pos), format_time(dur)));
+        }
+    }
+
+    fn change_volume(self: &Rc<Self>, delta: f64) {
+        let mut vol = None;
+        self.with_video(|p| vol = Some(p.add_volume(delta)));
+        if let Some(v) = vol {
+            self.flash(&format!("Volume {:.0}%", v * 100.0));
+        }
+    }
+
     /// Brief top-left indicator: zoom level and edge cues (FR-4.4, FR-3.3).
     fn flash(self: &Rc<Self>, text: &str) {
         self.indicator.set_text(text);
@@ -980,6 +1122,51 @@ impl App {
         add("zoom-toggle", Box::new(|a| a.view.toggle_fit_actual()));
         add("rotate-cw", Box::new(|a| a.view.rotate_view(1)));
         add("rotate-ccw", Box::new(|a| a.view.rotate_view(-1)));
+        add(
+            "play-pause",
+            Box::new(|a| {
+                if a.is_video_showing() {
+                    let mut playing = None;
+                    a.with_video(|p| playing = Some(p.toggle_pause()));
+                    match playing {
+                        Some(true) => a.flash("Play"),
+                        Some(false) => a.flash("Paused"),
+                        None => {}
+                    }
+                } else {
+                    // Space keeps its photo-flipping habit on images.
+                    a.navigate(1);
+                }
+            }),
+        );
+        add(
+            "seek-back",
+            Box::new(|a| {
+                a.with_video(|p| p.seek_by(-5.0));
+                a.flash_progress();
+            }),
+        );
+        add(
+            "seek-forward",
+            Box::new(|a| {
+                a.with_video(|p| p.seek_by(5.0));
+                a.flash_progress();
+            }),
+        );
+        add(
+            "mute",
+            Box::new(|a| {
+                let mut muted = None;
+                a.with_video(|p| muted = Some(p.toggle_mute()));
+                match muted {
+                    Some(true) => a.flash("Muted"),
+                    Some(false) => a.flash("Sound on"),
+                    None => {}
+                }
+            }),
+        );
+        add("volume-up", Box::new(|a| a.change_volume(0.1)));
+        add("volume-down", Box::new(|a| a.change_volume(-0.1)));
         add("trash", Box::new(|a| a.trash_current()));
         add(
             "fullscreen",
@@ -1227,6 +1414,17 @@ fn apply_css(background: &str) {
     }
 }
 
+/// `M:SS`, or `H:MM:SS` from the first hour (FR-9.5).
+fn format_time(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    let (h, m, s) = (s / 3600, (s % 3600) / 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 /// One-shot timer slot where scheduling again supersedes the pending
 /// timer. The slot is cleared from inside the callback because a fired
 /// source auto-removes — removing its id later would log a critical.
@@ -1243,4 +1441,19 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
         f();
     });
     *slot.0.borrow_mut() = Some(id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_time;
+
+    #[test]
+    fn time_formatting() {
+        assert_eq!(format_time(0.0), "0:00");
+        assert_eq!(format_time(5.4), "0:05");
+        assert_eq!(format_time(65.0), "1:05");
+        assert_eq!(format_time(3600.0), "1:00:00");
+        assert_eq!(format_time(3725.0), "1:02:05");
+        assert_eq!(format_time(-3.0), "0:00");
+    }
 }

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 glycin = { version = "3.1.0", features = ["gdk4", "async-io"] }
+gstreamer = "0.25.3"
 gtk4 = { version = "0.11.4", features = ["gio_v2_80", "v4_18", "v4_22"] }
 gufo-common = "1.1.0"
 
