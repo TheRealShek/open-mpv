@@ -1,0 +1,253 @@
+//! Folder model (FR-3): the sorted list of images in one directory and
+//! navigation over it. Pure logic — no GTK types — so the future
+//! explorer iteration can reuse it (NFR-6.1). Filesystem events from
+//! the GIO monitor are fed in via [`Folder::insert`] / [`Folder::remove`].
+
+use std::cmp::Ordering;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use crate::config::{is_supported, SortOrder};
+
+#[derive(Debug, Clone)]
+struct Entry {
+    path: PathBuf,
+    mtime: SystemTime,
+}
+
+#[derive(Debug)]
+pub struct Folder {
+    dir: PathBuf,
+    entries: Vec<Entry>,
+    sort: SortOrder,
+}
+
+impl Folder {
+    /// Scan `dir` for supported images. Unreadable entries are skipped.
+    pub fn scan(dir: &Path, sort: SortOrder) -> std::io::Result<Folder> {
+        let mut entries = Vec::new();
+        for res in std::fs::read_dir(dir)? {
+            let Ok(de) = res else { continue };
+            let path = de.path();
+            if !path.is_file() || !is_supported(&path) {
+                continue;
+            }
+            let mtime = de
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            entries.push(Entry { path, mtime });
+        }
+        let mut folder = Folder {
+            dir: dir.to_path_buf(),
+            entries,
+            sort,
+        };
+        folder.entries.sort_by(|a, b| folder_cmp(a, b, sort));
+        Ok(folder)
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Path> {
+        self.entries.get(index).map(|e| e.path.as_path())
+    }
+
+    pub fn index_of(&self, path: &Path) -> Option<usize> {
+        self.entries.iter().position(|e| e.path == path)
+    }
+
+    /// Index to show after `index`, honoring `wrap` (FR-3.3).
+    pub fn next(&self, index: usize, wrap: bool) -> Option<usize> {
+        if index + 1 < self.entries.len() {
+            Some(index + 1)
+        } else if wrap && !self.entries.is_empty() {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    pub fn prev(&self, index: usize, wrap: bool) -> Option<usize> {
+        if index > 0 {
+            Some(index - 1)
+        } else if wrap && !self.entries.is_empty() {
+            Some(self.entries.len() - 1)
+        } else {
+            None
+        }
+    }
+
+    /// Insert a newly appeared file at its sorted position (FR-3.5).
+    /// Returns its index, or None if unsupported or already present
+    /// (guards against monitor/undo double-insertion).
+    pub fn insert(&mut self, path: &Path) -> Option<usize> {
+        if !is_supported(path) || self.index_of(path).is_some() {
+            return None;
+        }
+        let mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let entry = Entry {
+            path: path.to_path_buf(),
+            mtime,
+        };
+        let sort = self.sort;
+        let pos = self
+            .entries
+            .partition_point(|e| folder_cmp(e, &entry, sort) == Ordering::Less);
+        self.entries.insert(pos, entry);
+        Some(pos)
+    }
+
+    /// Remove a vanished file. Returns its former index.
+    pub fn remove(&mut self, path: &Path) -> Option<usize> {
+        let pos = self.index_of(path)?;
+        self.entries.remove(pos);
+        Some(pos)
+    }
+}
+
+fn folder_cmp(a: &Entry, b: &Entry, sort: SortOrder) -> Ordering {
+    match sort {
+        SortOrder::Name => natural_cmp(
+            &a.path.file_name().unwrap_or_default().to_string_lossy(),
+            &b.path.file_name().unwrap_or_default().to_string_lossy(),
+        ),
+        // Newest first (FR-3.2); name breaks ties for a stable order.
+        SortOrder::Date => b.mtime.cmp(&a.mtime).then_with(|| {
+            natural_cmp(
+                &a.path.file_name().unwrap_or_default().to_string_lossy(),
+                &b.path.file_name().unwrap_or_default().to_string_lossy(),
+            )
+        }),
+    }
+}
+
+/// Case-insensitive natural ordering: `img2` < `img10` (FR-3.2).
+pub fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let mut ca = a.chars().peekable();
+    let mut cb = b.chars().peekable();
+    loop {
+        match (ca.peek().copied(), cb.peek().copied()) {
+            (None, None) => return a.cmp(b), // full tie-break for stability
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                if x.is_ascii_digit() && y.is_ascii_digit() {
+                    let na = take_number(&mut ca);
+                    let nb = take_number(&mut cb);
+                    match na.cmp(&nb) {
+                        Ordering::Equal => {}
+                        ord => return ord,
+                    }
+                } else {
+                    let (lx, ly) = (
+                        x.to_lowercase().next().unwrap_or(x),
+                        y.to_lowercase().next().unwrap_or(y),
+                    );
+                    match lx.cmp(&ly) {
+                        Ordering::Equal => {
+                            ca.next();
+                            cb.next();
+                        }
+                        ord => return ord,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Consume a run of digits as a number; leading zeros don't change value.
+fn take_number(it: &mut std::iter::Peekable<std::str::Chars>) -> u128 {
+    let mut n: u128 = 0;
+    while let Some(c) = it.peek().copied() {
+        if let Some(d) = c.to_digit(10) {
+            n = n.saturating_mul(10).saturating_add(d as u128);
+            it.next();
+        } else {
+            break;
+        }
+    }
+    n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+
+    fn tempdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("open-mpv-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn natural_ordering() {
+        assert_eq!(natural_cmp("img2.jpg", "img10.jpg"), Ordering::Less);
+        assert_eq!(natural_cmp("img10.jpg", "img2.jpg"), Ordering::Greater);
+        assert_eq!(natural_cmp("a.png", "B.png"), Ordering::Less); // case-insensitive
+        assert_eq!(natural_cmp("img007.jpg", "img7.jpg"), natural_cmp("img007.jpg", "img7.jpg")); // stable
+        assert_eq!(natural_cmp("x.jpg", "x.jpg"), Ordering::Equal);
+        assert_eq!(natural_cmp("9.jpg", "10.jpg"), Ordering::Less);
+    }
+
+    #[test]
+    fn scan_sorts_and_filters() {
+        let dir = tempdir("scan");
+        for name in ["b10.jpg", "b2.jpg", "a.png", "notes.txt", "z.gif"] {
+            File::create(dir.join(name)).unwrap();
+        }
+        let folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        let names: Vec<_> = (0..folder.len())
+            .map(|i| folder.get(i).unwrap().file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["a.png", "b2.jpg", "b10.jpg", "z.gif"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn navigation_and_wrap() {
+        let dir = tempdir("nav");
+        for name in ["1.jpg", "2.jpg", "3.jpg"] {
+            File::create(dir.join(name)).unwrap();
+        }
+        let folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        assert_eq!(folder.next(0, false), Some(1));
+        assert_eq!(folder.next(2, false), None); // no wrap at end (FR-3.3)
+        assert_eq!(folder.next(2, true), Some(0));
+        assert_eq!(folder.prev(0, false), None);
+        assert_eq!(folder.prev(0, true), Some(2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn insert_remove_and_dedup() {
+        let dir = tempdir("mut");
+        for name in ["a.jpg", "c.jpg"] {
+            File::create(dir.join(name)).unwrap();
+        }
+        let mut folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        let b = dir.join("b.jpg");
+        File::create(&b).unwrap();
+        assert_eq!(folder.insert(&b), Some(1)); // sorted position
+        assert_eq!(folder.insert(&b), None); // double-insertion guarded
+        assert_eq!(folder.insert(&dir.join("x.txt")), None); // unsupported
+        assert_eq!(folder.remove(&b), Some(1));
+        assert_eq!(folder.remove(&b), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

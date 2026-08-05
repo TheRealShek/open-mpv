@@ -1,3 +1,6 @@
+mod config;
+mod folder;
+
 use gtk4 as gtk;
 use gtk::prelude::*;
 
