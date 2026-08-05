@@ -305,6 +305,7 @@ impl App {
     /// drag-and-drop (FR-1).
     pub fn open_path(self: &Rc<Self>, path: &Path) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        crate::applog!("open: {}", path.display());
         if path.is_dir() {
             self.open_folder(&path);
         } else {
@@ -341,6 +342,7 @@ impl App {
     }
 
     fn install_folder(self: &Rc<Self>, folder: Folder, dir: &Path) {
+        crate::applog!("folder: {} with {} images", dir.display(), folder.len());
         *self.folder.borrow_mut() = Some(folder);
         let monitor = gio::File::for_path(dir)
             .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
@@ -388,6 +390,7 @@ impl App {
         self.generation.set(generation);
 
         if let Some((decoded, mime)) = self.cache.get(&path) {
+            crate::applog!("show: {} (cache hit)", path.display());
             self.apply_decoded(decoded, mime, generation);
         } else {
             glib::spawn_future_local(clone!(
@@ -396,12 +399,18 @@ impl App {
                 async move {
                     match loader::decode(&path).await {
                         Ok((decoded, mime)) => {
-                            app.cache.put(path, decoded.clone(), mime.clone());
+                            app.cache.put(path.clone(), decoded.clone(), mime.clone());
                             if app.generation.get() == generation {
                                 app.apply_decoded(decoded, mime, generation);
+                            } else {
+                                crate::applog!(
+                                    "show: {} superseded, kept in cache",
+                                    path.display()
+                                );
                             }
                         }
                         Err(e) => {
+                            eprintln!("open-mpv: error: {}: {e}", path.display());
                             if app.generation.get() == generation {
                                 app.show_error(&path, &e);
                             }
@@ -498,10 +507,17 @@ impl App {
                             let Decoded::Svg { image, .. } = &*decoded else {
                                 return;
                             };
+                            let started = std::time::Instant::now();
                             let request = glycin::FrameRequest::new().scale(w as u32, h as u32);
                             if let Ok(frame) = image.specific_frame(request).await
                                 && app.generation.get() == generation
                             {
+                                crate::applog!(
+                                    "svg: re-rendered {}x{} in {:.1} ms",
+                                    w,
+                                    h,
+                                    started.elapsed().as_secs_f64() * 1000.0
+                                );
                                 app.view.update_texture(frame.texture());
                             }
                         }
@@ -533,6 +549,7 @@ impl App {
                 self,
                 async move {
                     if let Ok((decoded, mime)) = loader::decode(&path).await {
+                        crate::applog!("preload: {}", path.display());
                         app.cache.put(path, decoded, mime);
                     }
                 }
@@ -588,6 +605,8 @@ impl App {
                 (size.1 * s).round().max(150.0) as i32,
             );
             self.presented.set(true);
+            // The cold-start metric (NFR-1.1): launch → first present.
+            crate::applog!("first present: window shown");
         }
         self.win.present();
     }
@@ -685,6 +704,15 @@ impl App {
                 _ => return,
             }
         }
+        crate::applog!(
+            "fs event: {event:?} {}{}",
+            file.path().unwrap_or_default().display(),
+            if showing_vanished {
+                " (current image vanished)"
+            } else {
+                ""
+            }
+        );
         if showing_vanished {
             self.after_current_removed();
         }
@@ -720,8 +748,14 @@ impl App {
             #[strong(rename_to = app)]
             self,
             async move {
+                let started = std::time::Instant::now();
                 match fileops::trash(&path).await {
                     Ok(()) => {
+                        crate::applog!(
+                            "trash: {} in {:.1} ms",
+                            path.display(),
+                            started.elapsed().as_secs_f64() * 1000.0
+                        );
                         app.cache.invalidate(&path);
                         let len = {
                             let mut folder = app.folder.borrow_mut();
@@ -740,7 +774,10 @@ impl App {
                         }
                         app.show_toast("Moved to trash", true);
                     }
-                    Err(e) => app.show_toast(&e, false),
+                    Err(e) => {
+                        eprintln!("open-mpv: error: {e}");
+                        app.show_toast(&e, false);
+                    }
                 }
             }
         ));
@@ -757,6 +794,7 @@ impl App {
             async move {
                 match fileops::restore(&path).await {
                     Ok(()) => {
+                        crate::applog!("restore: {}", path.display());
                         let idx = {
                             let mut folder = app.folder.borrow_mut();
                             match folder.as_mut() {
@@ -770,7 +808,10 @@ impl App {
                             app.show_index(idx);
                         }
                     }
-                    Err(e) => app.show_toast(&e, false),
+                    Err(e) => {
+                        eprintln!("open-mpv: error: {e}");
+                        app.show_toast(&e, false);
+                    }
                 }
             }
         ));
@@ -789,8 +830,15 @@ impl App {
             #[strong(rename_to = app)]
             self,
             async move {
+                let started = std::time::Instant::now();
                 match fileops::save_rotation(&path, rotation).await {
                     Ok(()) => {
+                        crate::applog!(
+                            "save-rotation: {} ({}°) in {:.1} ms",
+                            path.display(),
+                            rotation as u32 * 90,
+                            started.elapsed().as_secs_f64() * 1000.0
+                        );
                         app.cache.invalidate(&path);
                         app.flash("Saved");
                         // Reload: the file now carries the rotation.
@@ -799,6 +847,7 @@ impl App {
                         }
                     }
                     Err(e) => {
+                        eprintln!("open-mpv: error: {e}");
                         app.show_toast(&e, false);
                         app.update_save_enabled();
                     }

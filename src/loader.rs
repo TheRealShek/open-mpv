@@ -44,6 +44,7 @@ impl Decoded {
 }
 
 pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), String> {
+    let started = std::time::Instant::now();
     let file = gio::File::for_path(path);
     let image = glycin::Loader::new(file)
         .load()
@@ -51,6 +52,14 @@ pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), String> {
         .map_err(|e| e.to_string())?;
     let mime = image.mime_type().to_string();
     let frame = image.next_frame().await.map_err(|e| e.to_string())?;
+    crate::applog!(
+        "decode: {} {}x{} {} in {:.1} ms",
+        path.display(),
+        frame.width(),
+        frame.height(),
+        mime,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
     let is_svg = matches!(mime.as_str(), "image/svg+xml" | "image/svg+xml-compressed");
     let decoded = if is_svg {
         Decoded::Svg {

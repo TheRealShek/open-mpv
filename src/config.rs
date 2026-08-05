@@ -50,8 +50,19 @@ impl Config {
     pub fn load() -> Config {
         let path = gtk4::glib::user_config_dir().join("open-mpv/open-mpv.conf");
         match std::fs::read_to_string(&path) {
-            Ok(text) => Config::parse(&text, &path.display().to_string()),
-            Err(_) => Config::default(),
+            Ok(text) => {
+                let cfg = Config::parse(&text, &path.display().to_string());
+                crate::applog!(
+                    "config: loaded {} ({} binds)",
+                    path.display(),
+                    cfg.binds.len()
+                );
+                cfg
+            }
+            Err(_) => {
+                crate::applog!("config: {} absent, using defaults", path.display());
+                Config::default()
+            }
         }
     }
 

@@ -72,6 +72,28 @@ bind = n next
 bind = <Shift>d trash
 ```
 
+## Logs
+
+Silent by default. Set `OPEN_MPV_LOG=1` to get a diagnostic trace on
+stderr — what was opened, every decode with dimensions and duration,
+cache hits, preloads, trash/restore/save results, and the cold-start
+time to first frame:
+
+```sh
+OPEN_MPV_LOG=1 open-mpv ~/Pictures | grep -v Gsk
+```
+
+When launched from Files (desktop), stderr goes to the journal:
+
+```sh
+journalctl --user -t open-mpv -b   # or: journalctl --user -g open-mpv
+```
+
+Logging is free when off (a single flag check per site — nothing is
+formatted or written) and never runs on the frame-rendering path.
+Genuine errors (failed decode, failed trash/save) always print to
+stderr, log enabled or not.
+
 ## Development
 
 ```sh

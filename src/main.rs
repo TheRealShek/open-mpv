@@ -2,6 +2,7 @@ mod config;
 mod fileops;
 mod folder;
 mod loader;
+mod log;
 mod viewer;
 mod window;
 
@@ -13,6 +14,7 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 
 fn main() -> gtk::glib::ExitCode {
+    log::init();
     let app = gtk::Application::builder()
         .application_id("dev.thakur.OpenMpv")
         .flags(gtk::gio::ApplicationFlags::HANDLES_OPEN)
