@@ -135,15 +135,32 @@ fn warn(origin: &str, lineno: usize, line: &str, msg: &str) {
     );
 }
 
-/// True if the path has an extension we try to open (FR-2).
+/// True if the path has an extension we try to open (FR-2, FR-9).
 pub fn is_supported(path: &Path) -> bool {
+    is_image(path) || is_video(path)
+}
+
+pub fn is_image(path: &Path) -> bool {
     matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref(),
+        lowercase_ext(path).as_deref(),
         Some("jpg" | "jpeg" | "png" | "webp" | "avif" | "bmp" | "gif" | "svg" | "svgz")
     )
+}
+
+/// Video containers routed to the GStreamer player instead of glycin
+/// (FR-9). The codec set inside is whatever the system's VA-API /
+/// GStreamer plugins decode.
+pub fn is_video(path: &Path) -> bool {
+    matches!(
+        lowercase_ext(path).as_deref(),
+        Some("mp4" | "m4v" | "mkv" | "webm" | "mov" | "avi")
+    )
+}
+
+fn lowercase_ext(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -196,5 +213,17 @@ mod tests {
         assert!(is_supported(Path::new("v.svgz")));
         assert!(!is_supported(Path::new("doc.pdf")));
         assert!(!is_supported(Path::new("noext")));
+    }
+
+    #[test]
+    fn video_extensions() {
+        assert!(is_video(Path::new("clip.mp4")));
+        assert!(is_video(Path::new("CLIP.MKV")));
+        assert!(is_video(Path::new("a/b.webm")));
+        assert!(is_video(Path::new("v.mov")));
+        assert!(!is_video(Path::new("photo.jpg")));
+        assert!(!is_image(Path::new("clip.mp4")));
+        // Videos are supported paths, but never images.
+        assert!(is_supported(Path::new("clip.mp4")));
     }
 }
