@@ -167,6 +167,8 @@ mod tests {
     #[test]
     fn supported_extensions() {
         assert!(is_supported(Path::new("a/b/photo.JPG")));
+        assert!(is_supported(Path::new("scan.jpeg")));
+        assert!(is_supported(Path::new("scan.JPEG")));
         assert!(is_supported(Path::new("anim.webp")));
         assert!(is_supported(Path::new("v.svgz")));
         assert!(!is_supported(Path::new("doc.pdf")));
