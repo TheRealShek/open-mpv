@@ -46,7 +46,7 @@ const DEFAULT_BINDS: &[(&str, &str)] = &[
     ("r", "rotate-cw"),
     ("<Shift>r", "rotate-ccw"),
     ("s", "save"),
-    // Video transport (FR-9), mpv-flavored.
+    // Video transport (FR-10.4), mpv-flavored.
     ("j", "seek-back"),
     ("l", "seek-forward"),
     ("m", "mute"),
@@ -185,7 +185,7 @@ impl App {
         pos_label.add_css_class("dim");
         bar.append(&pos_label);
         // Video transport: seek bar + position, hidden for images
-        // (FR-9.5). The position tick runs only while this is visible.
+        // (FR-10.5). The position tick runs only while this is visible.
         let seek_bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
         seek_bar.set_size_request(180, -1);
         seek_bar.set_draw_value(false);
@@ -482,7 +482,7 @@ impl App {
         self.preload_neighbors(idx);
     }
 
-    // ----- showing videos (FR-9) ---------------------------------------
+    // ----- showing videos (FR-10) ---------------------------------------
 
     /// Lazily build the shared player; `None` if the pipeline cannot be
     /// assembled (missing plugins) — a routine state, not a panic.
@@ -541,7 +541,7 @@ impl App {
         self.stop_transport_tick();
     }
 
-    // ----- video transport (FR-9.5) ------------------------------------
+    // ----- video transport (FR-10.5) ------------------------------------
 
     fn update_transport(&self) {
         let progress = self.player.borrow().as_ref().and_then(|p| p.progress());
@@ -595,7 +595,7 @@ impl App {
         match event {
             player::Event::EndOfStream => {
                 if self.is_video_showing() {
-                    // Loop like animated images do (FR-9.3).
+                    // Loop like animated images do (FR-10.3).
                     if let Some(p) = self.player.borrow().as_ref() {
                         p.rewind();
                     }
@@ -738,7 +738,7 @@ impl App {
                 .into_iter()
                 .flatten()
                 .filter_map(|i| folder.get(i))
-                // Videos are streamed, never pre-decoded (FR-9.4).
+                // Videos are streamed, never pre-decoded (FR-10.2).
                 .filter(|p| !config::is_video(p))
                 .map(Path::to_path_buf)
                 .collect()
@@ -1113,7 +1113,7 @@ impl App {
         self.stop_transport_tick();
     }
 
-    /// Flash the current video position after a seek (FR-9.5).
+    /// Flash the current video position after a seek (FR-10.5).
     fn flash_progress(self: &Rc<Self>) {
         let mut progress = None;
         self.with_video(|p| progress = p.progress());
@@ -1502,7 +1502,7 @@ fn apply_css(background: &str) {
     }
 }
 
-/// `M:SS`, or `H:MM:SS` from the first hour (FR-9.5).
+/// `M:SS`, or `H:MM:SS` from the first hour (FR-10.5).
 fn format_time(secs: f64) -> String {
     let s = secs.max(0.0).round() as u64;
     let (h, m, s) = (s / 3600, (s % 3600) / 60, s % 60);

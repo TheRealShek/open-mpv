@@ -1,4 +1,4 @@
-//! Video playback (FR-9): one `playbin3` pipeline rendering into a
+//! Video playback (FR-10.1): one `playbin3` pipeline rendering into a
 //! `gtk4paintablesink`, whose `GdkPaintable` the viewer displays like
 //! any other paintable.
 //!
@@ -141,7 +141,7 @@ impl Player {
         let _ = self.playbin.seek_simple(SEEK_FLAGS, target);
     }
 
-    /// Restart from the beginning (EOS loop, FR-9.3).
+    /// Restart from the beginning (EOS loop, FR-10.3).
     pub fn rewind(&self) {
         self.seek_to(0.0);
         let _ = self.playbin.set_state(gst::State::Playing);

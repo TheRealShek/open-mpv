@@ -4,7 +4,7 @@
 //!
 //! Renders any `GdkPaintable`: still images arrive as `GdkTexture`
 //! (which is a paintable) and keep an explicit scaling-filter path;
-//! live paintables such as the video sink's (FR-9) redraw through
+//! live paintables such as the video sink's (FR-10) redraw through
 //! their invalidate signals.
 //!
 //! Zoom is expressed against physical pixels: zoom 1.0 means one source

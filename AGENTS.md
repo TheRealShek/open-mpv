@@ -1,7 +1,7 @@
 # AGENTS.md
 
-> **Project:** **open-mpv** — a minimalist, mpv-inspired photo viewer for GNOME/Wayland (frameless window, overlay controls, folder navigation, trash + rotate-save). Personal tool, built for one machine: Fedora Workstation, GNOME on Wayland.
-> **Stack:** Rust (stable) · GTK4 via `gtk4-rs` · glycin (sandboxed image decoding) · GIO for trash/file-watching · no database, no web runtime.
+> **Project:** **open-mpv** — a minimalist, mpv-inspired photo & video viewer for GNOME/Wayland (frameless window, overlay controls, folder navigation, trash + rotate-save, inline video playback). Personal tool, built for one machine: Fedora Workstation, GNOME on Wayland.
+> **Stack:** Rust (stable) · GTK4 via `gtk4-rs` · glycin (sandboxed image decoding) · GStreamer via `gstreamer-rs` (video, FR-10) · GIO for trash/file-watching · no database, no web runtime.
 
 Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) (FR/NFR — the spec). Read both before changing behavior; requirement IDs (FR-x.y / NFR-x.y) are the vocabulary for discussing features.
 
@@ -35,8 +35,8 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs
 
 - Rust stable only; no nightly features.
 - The GTK main loop is the only event loop — run async work (glycin decoding) with `glib::spawn_future_local`; do **not** add tokio/async-std.
-- Keep the dependency tree minimal. Core: `gtk4`, `glycin`, `glib`/`gio` (ship with gtk4-rs). Hand-roll small things (natural sort, `key=value` config parsing, CLI args via `std::env`) instead of adding crates; a new dependency needs a stated justification.
-- Module boundaries (NFR-6.1/6.2): `folder` (sorted image list, GIO file monitor, navigation — no GTK types) · `viewer` (display widget: zoom/pan/fit/rotate) · `actions` (single action layer; keybindings and overlay buttons both dispatch through it) · `config` (parse `~/.config/open-mpv/open-mpv.conf`) · `fileops` (trash/undo, atomic rotate-save). The future explorer reuses `folder` untouched.
+- Keep the dependency tree minimal. Core: `gtk4`, `glycin`, `glib`/`gio` (ship with gtk4-rs), `gstreamer` (video playback, FR-10 — bindings only; the C libs are system-stock). Hand-roll small things (natural sort, `key=value` config parsing, CLI args via `std::env`) instead of adding crates; a new dependency needs a stated justification.
+- Module boundaries (NFR-6.1/6.2): `folder` (sorted image list, GIO file monitor, navigation — no GTK types) · `viewer` (display widget: zoom/pan/fit/rotate over any `GdkPaintable`) · `player` (playbin3 → gtk4paintablesink; the only module touching GStreamer) · `actions` (single action layer; keybindings and overlay buttons both dispatch through it) · `config` (parse `~/.config/open-mpv/open-mpv.conf`) · `fileops` (trash/undo, atomic rotate-save). The future explorer reuses `folder` untouched.
 - All file writes go through `fileops` and are atomic (temp + rename). No other module writes to the filesystem (FR-5.6).
 - Panics are bugs: decode failures, unreadable paths, and bad config are expected states with in-window/stderr handling (FR-1.4, FR-8.3, NFR-3.3).
 
@@ -51,6 +51,8 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs
 - **JPEG rotate-save is metadata-only** (EXIF orientation, FR-5.4) — never re-encode JPEG pixels. SVG/animated: view-rotate only, save disabled.
 - **Single instance** comes free from `gtk::Application` D-Bus uniqueness — handle the `open` signal; don't build custom IPC.
 - **Delete advances then toasts (FR-5.1/5.2):** undo must restore from trash *and* re-insert at the correct sorted position while the GIO file monitor is also watching the directory — guard against double-insertion.
+- **Video decodes in-process** (FR-10.6): GStreamer has no glycin-style sandbox — an accepted trade-off; pipeline errors are routine in-window states. `gst::init` runs lazily on the first video so image-only sessions keep cold-start (NFR-1.1). Videos are never put in the preload cache; the `Player` pipeline is built once and reused, `Null` while an image is shown.
+- **Space is contextual:** bound to `play-pause`, which toggles video playback and falls through to `next` on images — don't "fix" it to a plain `next` bind.
 - **Never enumerate `trash://` via gvfs:** it hangs when no GUI main loop is serving its D-Bus machinery (bit us in tests). `fileops::restore` reads the freedesktop trash dirs (home + mount-level `.Trash-$uid`) directly; keep it that way.
 
 ---

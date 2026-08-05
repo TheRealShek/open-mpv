@@ -14,6 +14,9 @@ daemon. See [docs/PLAN.md](docs/PLAN.md) and
 
 - JPEG, PNG, WebP, AVIF, BMP; animated GIF/WebP/APNG; SVG (re-rendered
   sharply at any zoom).
+- Video (MP4, MKV, WebM, MOV, AVI) inline in the same folder flow:
+  hardware-decoded (VA-API), looped, with pause/seek/volume and a seek
+  bar in the overlay. Codec support is the system's GStreamer set.
 - Flip through the folder of the opened image, natural filename order,
   live updates when files appear or vanish.
 - Fit / 100% / free zoom anchored at the cursor; pixel-exact at 100%
@@ -26,7 +29,7 @@ daemon. See [docs/PLAN.md](docs/PLAN.md) and
 ## Install (Fedora / GNOME)
 
 ```sh
-sudo dnf install gtk4-devel glycin-devel   # build deps; runtime is stock
+sudo dnf install gtk4-devel glycin-devel gstreamer1-devel   # build deps; runtime is stock
 ./install.sh                               # user install + default viewer
 ./uninstall.sh                             # revert to Loupe
 ```
@@ -35,8 +38,12 @@ sudo dnf install gtk4-devel glycin-devel   # build deps; runtime is stock
 
 | Key | Action |
 | --- | ------ |
-| Right / space / Page Down | next image |
+| Right / Page Down | next image |
+| space | pause video · next image otherwise |
 | Left / Backspace / Page Up | previous image |
+| j / l | video seek −5 s / +5 s |
+| m | video mute |
+| Up / Down | video volume |
 | Home / End | first / last image |
 | scroll | zoom at cursor |
 | horizontal scroll | navigate |
@@ -70,8 +77,9 @@ cache-budget-mb = 256  # decoded frames kept beyond the shown image
 
 # rebind keys: bind = <key> <action>
 # actions: next prev first last zoom-in zoom-out zoom-fit zoom-actual
-#          zoom-toggle rotate-cw rotate-ccw save trash undo fullscreen
-#          close help
+#          zoom-toggle rotate-cw rotate-ccw play-pause seek-back
+#          seek-forward mute volume-up volume-down save trash undo
+#          fullscreen close help
 bind = n next
 bind = <Shift>d trash
 ```

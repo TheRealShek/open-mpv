@@ -135,7 +135,7 @@ fn warn(origin: &str, lineno: usize, line: &str, msg: &str) {
     );
 }
 
-/// True if the path has an extension we try to open (FR-2, FR-9).
+/// True if the path has an extension we try to open (FR-2, FR-10).
 pub fn is_supported(path: &Path) -> bool {
     is_image(path) || is_video(path)
 }
@@ -148,7 +148,7 @@ pub fn is_image(path: &Path) -> bool {
 }
 
 /// Video containers routed to the GStreamer player instead of glycin
-/// (FR-9). The codec set inside is whatever the system's VA-API /
+/// (FR-10.1). The codec set inside is whatever the system's VA-API /
 /// GStreamer plugins decode.
 pub fn is_video(path: &Path) -> bool {
     matches!(

@@ -32,6 +32,9 @@ replacing Loupe as the system default image viewer.
 
 - View a single image; flip through all images in its folder.
 - Formats: JPEG, PNG, WebP, AVIF, BMP; animated GIF/WebP/PNG; SVG.
+- Video (MP4/MKV/WebM/MOV/AVI) inline in the same folder flow —
+  hardware-decoded, looped, with mpv-style transport keys. A viewer
+  that happens to play video, not a media player.
 - Zoom, pan, fit modes, view rotation.
 - Delete to trash with undo toast; rotate + save to disk.
 - Frameless window with fade-in overlay controls; fullscreen.

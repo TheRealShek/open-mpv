@@ -135,6 +135,29 @@ product; there is no version staging.
 - **FR-9.2** Shows a proper app icon and name in the GNOME shell
   (window switcher, dock).
 
+### FR-10 — Video playback
+
+- **FR-10.1** Plays MP4, MKV, WebM, MOV and AVI containers through the
+  system GStreamer stack (`playbin3` → `gtk4paintablesink`), hardware
+  decoding via VA-API where available; frames reach GTK as dmabufs
+  with no CPU pixel copies. GStreamer initializes lazily on the first
+  video so image-only sessions keep NFR-1.1.
+- **FR-10.2** Videos appear in the same folder navigation as images
+  (FR-3). They are streamed on show, never pre-decoded into the
+  neighbor cache.
+- **FR-10.3** Playback loops at end of stream, like animated images.
+- **FR-10.4** Transport through the single action layer, rebindable
+  (FR-8.2): play-pause (advances on images), seek ±5 s, mute,
+  volume up/down. Zoom, pan and view rotation apply to video; save
+  is disabled (no lossless rotate for video).
+- **FR-10.5** The overlay control bar shows a seek bar and
+  `position / duration` for videos only; its position poll runs only
+  while the overlay is visible.
+- **FR-10.6** Missing plugins or a failing pipeline are routine states:
+  in-window error message, never a crash. Unlike images (NFR-3.2),
+  video decoding runs in-process — an accepted trade-off recorded in
+  AGENTS.md.
+
 ---
 
 ## 2. Non-Functional Requirements
