@@ -96,6 +96,11 @@ const SEEK_BAR_MAX_WIDTH: i32 = 320;
 /// Floor for narrow windows; below this the bar stops being aimable.
 const SEEK_BAR_MIN_WIDTH: i32 = 140;
 
+/// Invisible resize border along the window edges. Frameless means no
+/// client-side decorations, and the decorations are what normally carry
+/// the resize handles — so the app draws its own border (FR-6.4).
+const RESIZE_MARGIN: f64 = 8.0;
+
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_TIMEOUT: Duration = Duration::from_millis(1200);
 const SVG_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -670,6 +675,27 @@ impl App {
     fn stop_transport_tick(&self) {
         if let Some(id) = self.transport_tick.borrow_mut().take() {
             id.remove();
+        }
+    }
+
+    // ----- window edges (FR-6.4) ----------------------------------------
+
+    /// The edge the pointer is close enough to grab, if any. Fullscreen
+    /// has no edges to pull.
+    fn resize_edge(&self, x: f64, y: f64) -> Option<gdk::SurfaceEdge> {
+        if self.win.is_fullscreen() {
+            return None;
+        }
+        resize_edge_at(x, y, self.win.width() as f64, self.win.height() as f64)
+    }
+
+    /// Show the grab as a resize cursor, so the border can be found
+    /// without knowing it is there.
+    fn update_resize_cursor(&self, x: f64, y: f64) {
+        let name = self.resize_edge(x, y).map(edge_cursor_name);
+        let current = self.win.cursor().and_then(|c| c.name());
+        if current.as_deref() != name {
+            self.win.set_cursor_from_name(name);
         }
     }
 
@@ -1461,6 +1487,7 @@ impl App {
         lines.push("<tt>Escape</tt> leaves fullscreen, then closes".to_string());
         lines.push("Scroll: zoom · horizontal scroll: navigate".to_string());
         lines.push("Drag: pan (zoomed) or move window · double-click: fullscreen".to_string());
+        lines.push("Drag an edge or corner: resize the window".to_string());
         self.help_label.set_markup(&lines.join("\n"));
     }
 
@@ -1471,14 +1498,58 @@ impl App {
         motion.connect_motion(clone!(
             #[strong(rename_to = app)]
             self,
-            move |_, _, _| app.show_chrome()
+            move |_, x, y| {
+                app.show_chrome();
+                app.update_resize_cursor(x, y);
+            }
         ));
         motion.connect_leave(clone!(
             #[strong(rename_to = app)]
             self,
-            move |_| app.hide_chrome()
+            move |_| {
+                app.win.set_cursor_from_name(None);
+                app.hide_chrome();
+            }
         ));
         self.win.add_controller(motion);
+
+        // A frameless window has no decorations to grab, so the edges are
+        // the app's job (FR-6.4). Capture phase, and claiming only inside
+        // the margin, puts the edge ahead of the pan and window-move
+        // drags that start on the image while leaving them untouched
+        // everywhere else.
+        let resize = gtk::GestureDrag::new();
+        resize.set_propagation_phase(gtk::PropagationPhase::Capture);
+        resize.connect_drag_begin(clone!(
+            #[strong(rename_to = app)]
+            self,
+            move |gesture, x, y| {
+                let Some(edge) = app.resize_edge(x, y) else {
+                    return;
+                };
+                let Some(surface) = app.win.surface() else {
+                    return;
+                };
+                let Ok(toplevel) = surface.downcast::<gdk::Toplevel>() else {
+                    return;
+                };
+                let Some(device) = gesture.device() else {
+                    return;
+                };
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                // The compositor owns the drag from here (Wayland has no
+                // client-side window geometry).
+                toplevel.begin_resize(
+                    edge,
+                    Some(&device),
+                    gdk::BUTTON_PRIMARY as i32,
+                    x,
+                    y,
+                    gesture.current_event_time(),
+                );
+            }
+        ));
+        self.win.add_controller(resize);
 
         // A pointer parked on the controls generates no motion, so the
         // fade timer would run out under it and take the click target
@@ -1637,6 +1708,37 @@ fn apply_css(background: &str) {
     }
 }
 
+/// Which window edge a point belongs to, given the window size. Corners
+/// win over sides so the diagonal grabs stay reachable.
+fn resize_edge_at(x: f64, y: f64, w: f64, h: f64) -> Option<gdk::SurfaceEdge> {
+    let (left, right) = (x <= RESIZE_MARGIN, x >= w - RESIZE_MARGIN);
+    let (top, bottom) = (y <= RESIZE_MARGIN, y >= h - RESIZE_MARGIN);
+    Some(match (left, right, top, bottom) {
+        (true, _, true, _) => gdk::SurfaceEdge::NorthWest,
+        (_, true, true, _) => gdk::SurfaceEdge::NorthEast,
+        (true, _, _, true) => gdk::SurfaceEdge::SouthWest,
+        (_, true, _, true) => gdk::SurfaceEdge::SouthEast,
+        (true, ..) => gdk::SurfaceEdge::West,
+        (_, true, ..) => gdk::SurfaceEdge::East,
+        (_, _, true, _) => gdk::SurfaceEdge::North,
+        (_, _, _, true) => gdk::SurfaceEdge::South,
+        _ => return None,
+    })
+}
+
+fn edge_cursor_name(edge: gdk::SurfaceEdge) -> &'static str {
+    match edge {
+        gdk::SurfaceEdge::NorthWest => "nw-resize",
+        gdk::SurfaceEdge::North => "n-resize",
+        gdk::SurfaceEdge::NorthEast => "ne-resize",
+        gdk::SurfaceEdge::West => "w-resize",
+        gdk::SurfaceEdge::East => "e-resize",
+        gdk::SurfaceEdge::SouthWest => "sw-resize",
+        gdk::SurfaceEdge::SouthEast => "se-resize",
+        _ => "s-resize",
+    }
+}
+
 /// `M:SS`, or `H:MM:SS` from the first hour (FR-10.5).
 fn format_time(secs: f64) -> String {
     let s = secs.max(0.0).round() as u64;
@@ -1668,7 +1770,27 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_time;
+    use super::{format_time, resize_edge_at};
+
+    use gtk4::gdk::SurfaceEdge;
+
+    #[test]
+    fn window_edges_are_grabbable() {
+        // 400x300 window; the margin is 8 px.
+        let at = |x, y| resize_edge_at(x, y, 400.0, 300.0);
+        assert_eq!(at(200.0, 150.0), None, "the middle is not an edge");
+        assert_eq!(at(0.0, 0.0), Some(SurfaceEdge::NorthWest));
+        assert_eq!(at(399.0, 299.0), Some(SurfaceEdge::SouthEast));
+        assert_eq!(at(2.0, 297.0), Some(SurfaceEdge::SouthWest));
+        assert_eq!(at(398.0, 3.0), Some(SurfaceEdge::NorthEast));
+        assert_eq!(at(200.0, 1.0), Some(SurfaceEdge::North));
+        assert_eq!(at(200.0, 299.0), Some(SurfaceEdge::South));
+        assert_eq!(at(1.0, 150.0), Some(SurfaceEdge::West));
+        assert_eq!(at(399.0, 150.0), Some(SurfaceEdge::East));
+        // Just inside the border is still the image, not a resize grab.
+        assert_eq!(at(9.0, 150.0), None);
+        assert_eq!(at(200.0, 291.0), None);
+    }
 
     #[test]
     fn time_formatting() {

@@ -98,7 +98,10 @@ product; there is no version staging.
   out from under the click they are waiting for.
 - **FR-6.3** Fullscreen toggle via `F`/`F11` and double-click.
 - **FR-6.4** Window can be moved by dragging the image (when not panning
-  a zoomed image).
+  a zoomed image) and resized by dragging within a few pixels of any edge
+  or corner, with the pointer showing the resize cursor there. Frameless
+  means no decorations, and decorations are what normally carry the
+  resize handles — so the app provides that border itself.
 - **FR-6.5** Every mouse-reachable action has a keyboard equivalent and
   vice versa.
 - **FR-6.6 Initial window size:** on open, the window sizes itself to the
