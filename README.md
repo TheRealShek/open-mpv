@@ -63,6 +63,10 @@ sort = name            # name | date (newest first)
 wrap = no              # wrap around at folder ends
 fit = fit              # fit | actual — zoom when an image opens
 overlay-timeout = 2.0  # seconds before controls fade out
+cache-budget-mb = 256  # decoded frames kept beyond the shown image
+                       # (preloaded neighbors); lower it to trade RAM
+                       # for a short decode wait on next/prev with
+                       # very large photos
 
 # rebind keys: bind = <key> <action>
 # actions: next prev first last zoom-in zoom-out zoom-fit zoom-actual

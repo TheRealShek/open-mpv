@@ -239,7 +239,7 @@ impl App {
             showing: RefCell::new(None),
             current_mime: RefCell::new(None),
             current_decoded: RefCell::new(None),
-            cache: loader::Cache::new(3),
+            cache: loader::Cache::new(3, cfg.cache_budget_mb as usize * 1024 * 1024),
             generation: Cell::new(0),
             editable_mimes: RefCell::new(BTreeSet::new()),
             pending_undo: RefCell::new(None),
@@ -380,6 +380,7 @@ impl App {
             return;
         };
         *self.showing.borrow_mut() = Some(path.clone());
+        self.cache.pin(&path);
         self.win.set_title(
             path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())

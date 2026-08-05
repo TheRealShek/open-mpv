@@ -28,6 +28,10 @@ pub struct Config {
     pub fit: FitMode,
     /// Seconds of mouse inactivity before overlay controls fade out.
     pub overlay_timeout: f64,
+    /// Megabytes of decoded frames the cache may hold *beyond* the
+    /// image on screen (NFR-2.1). 0 disables neighbor preloading's
+    /// memory entirely.
+    pub cache_budget_mb: u32,
     /// Key → action name, merged over the built-in defaults.
     pub binds: BTreeMap<String, String>,
 }
@@ -40,6 +44,7 @@ impl Default for Config {
             wrap: false,
             fit: FitMode::Fit,
             overlay_timeout: 2.0,
+            cache_budget_mb: 256,
             binds: BTreeMap::new(),
         }
     }
@@ -98,6 +103,10 @@ impl Config {
                     Ok(t) if t >= 0.0 => cfg.overlay_timeout = t,
                     _ => warn(origin, lineno, raw, "overlay-timeout must be seconds"),
                 },
+                "cache-budget-mb" => match value.parse::<u32>() {
+                    Ok(mb) => cfg.cache_budget_mb = mb,
+                    _ => warn(origin, lineno, raw, "cache-budget-mb must be megabytes"),
+                },
                 "bind" => match value.split_once(' ') {
                     Some((k, action)) if !k.is_empty() && !action.trim().is_empty() => {
                         cfg.binds.insert(k.to_string(), action.trim().to_string());
@@ -149,13 +158,15 @@ mod tests {
         assert!(!c.wrap);
         assert_eq!(c.fit, FitMode::Fit);
         assert_eq!(c.overlay_timeout, 2.0);
+        assert_eq!(c.cache_budget_mb, 256);
         assert!(c.binds.is_empty());
     }
 
     #[test]
     fn parses_options_and_binds() {
-        let text = "\n# comment\nbackground = #000000\nsort=date\nwrap=yes\nfit=actual\noverlay-timeout=1.5\nbind=n next\nbind=BackSpace prev\n";
+        let text = "\n# comment\nbackground = #000000\nsort=date\nwrap=yes\nfit=actual\noverlay-timeout=1.5\ncache-budget-mb=64\nbind=n next\nbind=BackSpace prev\n";
         let c = Config::parse(text, "t");
+        assert_eq!(c.cache_budget_mb, 64);
         assert_eq!(c.background, "#000000");
         assert_eq!(c.sort, SortOrder::Date);
         assert!(c.wrap);
@@ -167,10 +178,11 @@ mod tests {
 
     #[test]
     fn malformed_lines_are_skipped() {
-        let text = "nonsense\nsort=upside-down\nwrap=maybe\nbind=x\nunknown=1\nsort=date\n";
+        let text = "nonsense\nsort=upside-down\nwrap=maybe\nbind=x\nunknown=1\ncache-budget-mb=lots\nsort=date\n";
         let c = Config::parse(text, "t");
         // The one valid line still applies; everything else falls back.
         assert_eq!(c.sort, SortOrder::Date);
+        assert_eq!(c.cache_budget_mb, 256);
         assert!(!c.wrap);
         assert!(c.binds.is_empty());
     }
