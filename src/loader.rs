@@ -41,7 +41,6 @@ impl Decoded {
             Decoded::Svg { first, .. } => first.clone(),
         }
     }
-
 }
 
 pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), String> {

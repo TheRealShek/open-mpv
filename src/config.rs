@@ -109,7 +109,10 @@ fn parse_bool(v: &str) -> Option<bool> {
 }
 
 fn warn(origin: &str, lineno: usize, line: &str, msg: &str) {
-    eprintln!("open-mpv: {origin}:{}: ignoring `{line}`: {msg}", lineno + 1);
+    eprintln!(
+        "open-mpv: {origin}:{}: ignoring `{line}`: {msg}",
+        lineno + 1
+    );
 }
 
 /// True if the path has an extension we try to open (FR-2).

@@ -60,13 +60,15 @@ mod imp {
     use super::*;
     use std::cell::RefCell;
 
+    pub(super) type Callback<T> = RefCell<Option<Box<dyn Fn(T)>>>;
+
     #[derive(Default)]
     pub struct ImageView {
         pub(super) state: RefCell<State>,
         /// Fired when zoom/rotation changes; argument is zoom percent.
-        pub(super) on_view_changed: RefCell<Option<Box<dyn Fn(f64)>>>,
+        pub(super) on_view_changed: Callback<f64>,
         /// Fired on horizontal scroll: +1 next, -1 prev (FR-3.1).
-        pub(super) on_navigate: RefCell<Option<Box<dyn Fn(i32)>>>,
+        pub(super) on_navigate: Callback<i32>,
     }
 
     #[glib::object_subclass]
@@ -131,12 +133,7 @@ mod imp {
             snapshot.append_scaled_texture(
                 texture,
                 filter,
-                &graphene::Rect::new(
-                    (-dw / 2.0) as f32,
-                    (-dh / 2.0) as f32,
-                    dw as f32,
-                    dh as f32,
-                ),
+                &graphene::Rect::new((-dw / 2.0) as f32, (-dh / 2.0) as f32, dw as f32, dh as f32),
             );
             snapshot.restore();
         }
@@ -272,7 +269,11 @@ impl ImageView {
         let (tw, th) = image_dims(&st, tex);
         let z = effective_zoom(&st, w, h, scale, tw, th);
         let (dw, dh) = (tw * z / scale, th * z / scale);
-        let (rw, rh) = if st.rotation % 2 == 1 { (dh, dw) } else { (dw, dh) };
+        let (rw, rh) = if st.rotation % 2 == 1 {
+            (dh, dw)
+        } else {
+            (dw, dh)
+        };
         rw > w + 0.5 || rh > h + 0.5
     }
 
@@ -426,7 +427,7 @@ impl ImageView {
             #[strong]
             base,
             move |gesture, scale| {
-                let anchor = gesture.bounding_box_center().map(|(x, y)| (x, y));
+                let anchor = gesture.bounding_box_center();
                 view.zoom_to(base.get() * scale, anchor);
             }
         ));
@@ -464,7 +465,10 @@ mod tests {
     #[test]
     fn offset_clamping() {
         // Image fits: always centered.
-        assert_eq!(clamp_offset((50.0, -50.0), 100.0, 100.0, 400.0, 400.0), (0.0, 0.0));
+        assert_eq!(
+            clamp_offset((50.0, -50.0), 100.0, 100.0, 400.0, 400.0),
+            (0.0, 0.0)
+        );
         // Image overflows: clamped to edges.
         let (ox, oy) = clamp_offset((500.0, -500.0), 800.0, 800.0, 400.0, 400.0);
         assert_eq!((ox, oy), (200.0, -200.0));

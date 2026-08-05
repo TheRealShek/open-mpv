@@ -30,55 +30,115 @@ pub async fn trash(path: &Path) -> Result<(), String> {
 }
 
 /// Restore the most recently trashed file whose original location was
-/// `orig` (FR-5.2). Uses the freedesktop trash via GIO, so the entry
-/// disappears from Files' trash view too.
+/// `orig` (FR-5.2). Reads the freedesktop trash directories directly
+/// (the same on-disk format GIO writes) rather than the `trash://`
+/// gvfs backend, which is not reliably reachable outside a running
+/// GUI main loop.
 pub async fn restore(orig: &Path) -> Result<(), String> {
-    let trash_root = gio::File::for_uri("trash:///");
-    let attrs = "standard::name,trash::orig-path,trash::deletion-date";
-    let enumerator = trash_root
-        .enumerate_children_future(attrs, gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, glib::Priority::DEFAULT)
-        .await
-        .map_err(|e| format!("could not read trash: {e}"))?;
-
-    let mut best: Option<(String, String)> = None; // (trash item name, deletion date)
-    loop {
-        let batch = enumerator
-            .next_files_future(64, glib::Priority::DEFAULT)
-            .await
-            .map_err(|e| format!("could not read trash: {e}"))?;
-        if batch.is_empty() {
-            break;
-        }
-        for info in batch {
-            let orig_path = info
-                .attribute_byte_string("trash::orig-path")
-                .map(|s| PathBuf::from(s.as_str()));
-            if orig_path.as_deref() == Some(orig) {
-                let date = info
-                    .attribute_string("trash::deletion-date")
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                // ISO 8601 dates compare correctly as strings.
-                if best.as_ref().is_none_or(|(_, d)| date > *d) {
-                    best = Some((info.name().display().to_string(), date));
+    let mut best: Option<(PathBuf, PathBuf, String)> = None; // (files/<n>, info file, date)
+    for trash_dir in trash_dirs_for(orig) {
+        let info_dir = trash_dir.join("info");
+        let Ok(entries) = std::fs::read_dir(&info_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let info_path = entry.path();
+            if info_path.extension().and_then(|e| e.to_str()) != Some("trashinfo") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&info_path) else {
+                continue;
+            };
+            let (mut path, mut date) = (None, String::new());
+            for line in text.lines() {
+                if let Some(v) = line.strip_prefix("Path=") {
+                    path = Some(percent_decode(v));
+                } else if let Some(v) = line.strip_prefix("DeletionDate=") {
+                    date = v.to_string();
                 }
+            }
+            let Some(path) = path else { continue };
+            // Mount-level trashes store paths relative to the mount root.
+            let abs = if path.is_absolute() {
+                path
+            } else {
+                match trash_dir.parent().and_then(Path::parent) {
+                    Some(top) => top.join(path),
+                    None => continue,
+                }
+            };
+            if abs != orig {
+                continue;
+            }
+            let Some(stem) = info_path.file_stem() else {
+                continue;
+            };
+            let file = trash_dir.join("files").join(stem);
+            // ISO 8601 deletion dates compare correctly as strings.
+            if best.as_ref().is_none_or(|(_, _, d)| date > *d) {
+                best = Some((file, info_path, date));
             }
         }
     }
+    let (file, info, _) =
+        best.ok_or_else(|| format!("{} is no longer in the trash", orig.display()))?;
+    std::fs::rename(&file, orig)
+        .map_err(|e| format!("could not restore {}: {e}", orig.display()))?;
+    let _ = std::fs::remove_file(info);
+    Ok(())
+}
 
-    let (name, _) = best.ok_or_else(|| {
-        format!("{} is no longer in the trash", orig.display())
-    })?;
-    let src = trash_root.child(&name);
-    let dst = gio::File::for_path(orig);
-    src.move_future(
-        &dst,
-        gio::FileCopyFlags::NOFOLLOW_SYMLINKS,
-        glib::Priority::DEFAULT,
-    )
-    .0
-    .await
-    .map_err(|e| format!("could not restore {}: {e}", orig.display()))
+/// Trash directories that could hold `orig` per the freedesktop trash
+/// spec: the home trash, and the `.Trash`/`.Trash-$uid` dirs at the top
+/// of the file's mount point.
+fn trash_dirs_for(orig: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![glib::user_data_dir().join("Trash")];
+    if let Some(top) = mount_topdir(orig) {
+        // Effective uid without adding a libc dependency (Linux).
+        if let Ok(meta) = std::fs::metadata("/proc/self") {
+            use std::os::unix::fs::MetadataExt;
+            let uid = meta.uid();
+            dirs.push(top.join(".Trash").join(uid.to_string()));
+            dirs.push(top.join(format!(".Trash-{uid}")));
+        }
+    }
+    dirs
+}
+
+/// Highest ancestor of `path` on the same device — the mount top.
+fn mount_topdir(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let start = path.parent()?;
+    let dev = std::fs::metadata(start).ok()?.dev();
+    let mut top = start.to_path_buf();
+    while let Some(parent) = top.parent() {
+        match std::fs::metadata(parent) {
+            Ok(m) if m.dev() == dev => top = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    Some(top)
+}
+
+/// Decode %XX escapes in trashinfo Path values.
+fn percent_decode(s: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
 /// Persist a clockwise view rotation (in quarter turns) to disk via the
@@ -111,7 +171,8 @@ pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), Stri
             let bytes = data
                 .get_full()
                 .map_err(|e| format!("could not read edited image data: {e}"))?;
-            atomic_write(path, &bytes).map_err(|e| format!("could not write {}: {e}", path.display()))
+            atomic_write(path, &bytes)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))
         }
     }
 }
@@ -145,6 +206,85 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// gio futures use the thread-default main context; serialize the
+    /// async tests and give each its own context.
+    static ASYNC_LOCK: Mutex<()> = Mutex::new(());
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        let ctx = glib::MainContext::new();
+        let _acquired = ctx.acquire().unwrap();
+        ctx.with_thread_default(|| ctx.block_on(fut)).unwrap()
+    }
+
+    /// Temp dir on the home filesystem — the freedesktop trash does not
+    /// accept files from tmpfs without a mount-level trash dir.
+    fn home_tempdir(name: &str) -> PathBuf {
+        let dir = glib::home_dir().join(format!(
+            ".cache/open-mpv-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn trash_and_restore_roundtrip() {
+        let _guard = ASYNC_LOCK.lock().unwrap();
+        let dir = home_tempdir("trash");
+        let file = dir.join("victim.txt");
+        std::fs::write(&file, b"payload").unwrap();
+
+        block_on(trash(&file)).unwrap();
+        assert!(!file.exists(), "file must be gone after trash");
+
+        block_on(restore(&file)).unwrap();
+        assert!(file.exists(), "file must be back after restore");
+        assert_eq!(std::fs::read(&file).unwrap(), b"payload");
+
+        // Restoring again must fail cleanly — nothing left in trash.
+        assert!(block_on(restore(&file)).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rotate_save_jpeg_90_cw() {
+        let _guard = ASYNC_LOCK.lock().unwrap();
+        let dir = home_tempdir("rotate");
+        let file = dir.join("photo.jpg");
+        // 40x20 so a 90° rotation is observable in the dimensions.
+        let magick = std::process::Command::new("magick")
+            .args(["-size", "40x20", "xc:red", file.to_str().unwrap()])
+            .status();
+        if !magick.map(|s| s.success()).unwrap_or(false) {
+            eprintln!("skipping: ImageMagick unavailable to generate fixture");
+            return;
+        }
+
+        block_on(save_rotation(&file, 1)).unwrap();
+
+        // Either a sparse metadata edit (orientation flag, pixels kept)
+        // or a full sandboxed rewrite is acceptable — but the displayed
+        // result must be the 90° CW rotation: 20x40 after auto-orient.
+        let out = std::process::Command::new("magick")
+            .args([
+                file.to_str().unwrap(),
+                "-auto-orient",
+                "-format",
+                "%w %h",
+                "info:",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "20 40",
+            "saved file must display rotated 90 degrees clockwise"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn atomic_write_replaces_content() {
@@ -161,7 +301,8 @@ mod tests {
 
     #[test]
     fn atomic_write_cleans_up_on_failure() {
-        let dir = std::env::temp_dir().join(format!("open-mpv-fileops-fail-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("open-mpv-fileops-fail-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Renaming over a directory fails after the temp file is written.
         let target = dir.join("occupied");

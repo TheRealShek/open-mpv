@@ -55,9 +55,24 @@ const DEFAULT_BINDS: &[(&str, &str)] = &[
 ];
 
 const ACTION_NAMES: &[&str] = &[
-    "next", "prev", "first", "last", "zoom-in", "zoom-out", "zoom-fit", "zoom-actual",
-    "zoom-toggle", "rotate-cw", "rotate-ccw", "save", "trash", "undo", "fullscreen", "close",
-    "help", "escape",
+    "next",
+    "prev",
+    "first",
+    "last",
+    "zoom-in",
+    "zoom-out",
+    "zoom-fit",
+    "zoom-actual",
+    "zoom-toggle",
+    "rotate-cw",
+    "rotate-ccw",
+    "save",
+    "trash",
+    "undo",
+    "fullscreen",
+    "close",
+    "help",
+    "escape",
 ];
 
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -147,9 +162,21 @@ impl App {
         pos_label.add_css_class("dim");
         bar.append(&pos_label);
         for (icon, action, tip) in [
-            ("object-rotate-left-symbolic", "win.rotate-ccw", "Rotate left"),
-            ("object-rotate-right-symbolic", "win.rotate-cw", "Rotate right"),
-            ("document-save-symbolic", "win.save", "Save rotation to file"),
+            (
+                "object-rotate-left-symbolic",
+                "win.rotate-ccw",
+                "Rotate left",
+            ),
+            (
+                "object-rotate-right-symbolic",
+                "win.rotate-cw",
+                "Rotate right",
+            ),
+            (
+                "document-save-symbolic",
+                "win.save",
+                "Save rotation to file",
+            ),
             ("user-trash-symbolic", "win.trash", "Move to trash"),
             ("view-fullscreen-symbolic", "win.fullscreen", "Fullscreen"),
         ] {
@@ -291,9 +318,7 @@ impl App {
                     self.install_folder(folder, &dir);
                     match idx {
                         Some(idx) => self.show_index(idx),
-                        None => {
-                            self.show_error(&path, "not a supported image, or unreadable")
-                        }
+                        None => self.show_error(&path, "not a supported image, or unreadable"),
                     }
                 }
                 Err(e) => self.show_error(&path, &format!("cannot read directory: {e}")),
@@ -399,8 +424,7 @@ impl App {
                 *nominal
             }
             _ => {
-                self.view
-                    .show_texture(texture.clone(), None);
+                self.view.show_texture(texture.clone(), None);
                 (texture.width() as f64, texture.height() as f64)
             }
         };
@@ -461,8 +485,12 @@ impl App {
                         return;
                     };
                     let zoom = app.view.zoom_percent() / 100.0;
-                    let w = (nominal.0 * zoom).round().clamp(1.0, loader::SVG_RENDER_MAX as f64);
-                    let h = (nominal.1 * zoom).round().clamp(1.0, loader::SVG_RENDER_MAX as f64);
+                    let w = (nominal.0 * zoom)
+                        .round()
+                        .clamp(1.0, loader::SVG_RENDER_MAX as f64);
+                    let h = (nominal.1 * zoom)
+                        .round()
+                        .clamp(1.0, loader::SVG_RENDER_MAX as f64);
                     glib::spawn_future_local(clone!(
                         #[strong]
                         app,
@@ -470,12 +498,11 @@ impl App {
                             let Decoded::Svg { image, .. } = &*decoded else {
                                 return;
                             };
-                            let request =
-                                glycin::FrameRequest::new().scale(w as u32, h as u32);
-                            if let Ok(frame) = image.specific_frame(request).await {
-                                if app.generation.get() == generation {
-                                    app.view.update_texture(frame.texture());
-                                }
+                            let request = glycin::FrameRequest::new().scale(w as u32, h as u32);
+                            if let Ok(frame) = image.specific_frame(request).await
+                                && app.generation.get() == generation
+                            {
+                                app.view.update_texture(frame.texture());
                             }
                         }
                     ));
@@ -548,11 +575,11 @@ impl App {
     fn maybe_first_present(&self, size: (f64, f64)) {
         if !self.presented.get() {
             let (mut mw, mut mh) = (1920.0f64, 1080.0f64);
-            if let Some(display) = gdk::Display::default() {
-                if let Some(monitor) = display.monitors().item(0).and_downcast::<gdk::Monitor>() {
-                    let geo = monitor.geometry();
-                    (mw, mh) = (geo.width() as f64, geo.height() as f64);
-                }
+            if let Some(display) = gdk::Display::default()
+                && let Some(monitor) = display.monitors().item(0).and_downcast::<gdk::Monitor>()
+            {
+                let geo = monitor.geometry();
+                (mw, mh) = (geo.width() as f64, geo.height() as f64);
             }
             let (cap_w, cap_h) = (mw * 0.85, mh * 0.85);
             let s = (cap_w / size.0).min(cap_h / size.1).min(1.0);
@@ -590,7 +617,11 @@ impl App {
         };
         match target {
             Some(idx) => self.show_index(idx),
-            None => self.flash(if delta > 0 { "Last image" } else { "First image" }),
+            None => self.flash(if delta > 0 {
+                "Last image"
+            } else {
+                "First image"
+            }),
         }
     }
 
@@ -864,7 +895,8 @@ impl App {
     // ----- actions and input -------------------------------------------
 
     fn setup_actions(self: &Rc<Self>, gtk_app: &gtk::Application) {
-        let add = |name: &str, f: Box<dyn Fn(&Rc<App>)>| {
+        type Handler = Box<dyn Fn(&Rc<App>)>;
+        let add = |name: &str, f: Handler| {
             let action = gio::SimpleAction::new(name, None);
             let app = self.clone();
             action.connect_activate(move |_, _| f(&app));
@@ -936,7 +968,8 @@ impl App {
 
         let app = self.clone();
         self.undo_action.set_enabled(false);
-        self.undo_action.connect_activate(move |_, _| app.undo_trash());
+        self.undo_action
+            .connect_activate(move |_, _| app.undo_trash());
         self.win.add_action(&self.undo_action);
 
         // Defaults merged with user binds (FR-8.2); a user bind takes
@@ -1077,11 +1110,11 @@ impl App {
             #[strong(rename_to = app)]
             self,
             move |_, value, _, _| {
-                if let Ok(file) = value.get::<gio::File>() {
-                    if let Some(path) = file.path() {
-                        app.open_path(&path);
-                        return true;
-                    }
+                if let Ok(file) = value.get::<gio::File>()
+                    && let Some(path) = file.path()
+                {
+                    app.open_path(&path);
+                    return true;
                 }
                 false
             }

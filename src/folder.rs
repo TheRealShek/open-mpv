@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::config::{is_supported, SortOrder};
+use crate::config::{SortOrder, is_supported};
 
 #[derive(Debug, Clone)]
 struct Entry {
@@ -191,7 +191,10 @@ mod tests {
         assert_eq!(natural_cmp("img2.jpg", "img10.jpg"), Ordering::Less);
         assert_eq!(natural_cmp("img10.jpg", "img2.jpg"), Ordering::Greater);
         assert_eq!(natural_cmp("a.png", "B.png"), Ordering::Less); // case-insensitive
-        assert_eq!(natural_cmp("img007.jpg", "img7.jpg"), natural_cmp("img007.jpg", "img7.jpg")); // stable
+        assert_eq!(
+            natural_cmp("img007.jpg", "img7.jpg"),
+            natural_cmp("img007.jpg", "img7.jpg")
+        ); // stable
         assert_eq!(natural_cmp("x.jpg", "x.jpg"), Ordering::Equal);
         assert_eq!(natural_cmp("9.jpg", "10.jpg"), Ordering::Less);
     }
@@ -204,7 +207,16 @@ mod tests {
         }
         let folder = Folder::scan(&dir, SortOrder::Name).unwrap();
         let names: Vec<_> = (0..folder.len())
-            .map(|i| folder.get(i).unwrap().file_name().unwrap().to_str().unwrap().to_string())
+            .map(|i| {
+                folder
+                    .get(i)
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect();
         assert_eq!(names, ["a.png", "b2.jpg", "b10.jpg", "z.gif"]);
         std::fs::remove_dir_all(&dir).unwrap();

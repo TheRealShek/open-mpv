@@ -20,8 +20,9 @@ fn main() -> gtk::glib::ExitCode {
 
     // Single instance (FR-7): GApplication uniqueness routes `open` of
     // later launches to the primary instance; one window is reused.
+    type AppFactory = Rc<dyn Fn(&gtk::Application) -> Rc<window::App>>;
     let holder: Rc<RefCell<Option<Rc<window::App>>>> = Rc::new(RefCell::new(None));
-    let get_app: Rc<dyn Fn(&gtk::Application) -> Rc<window::App>> = Rc::new({
+    let get_app: AppFactory = Rc::new({
         let holder = holder.clone();
         move |gtk_app| {
             if let Some(existing) = holder.borrow().as_ref() {
