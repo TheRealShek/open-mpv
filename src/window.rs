@@ -118,9 +118,12 @@ pub struct App {
     transport: gtk::Box,
     seek_bar: gtk::Scale,
     time_label: gtk::Label,
-    /// Repeating 500 ms position tick; exists only while the transport
-    /// is on screen so a hidden overlay costs nothing (NFR-2.1).
-    transport_tick: RefCell<Option<glib::SourceId>>,
+    /// Frame-clock tick driving the seek bar; installed only while the
+    /// transport is on screen so a hidden overlay costs nothing (NFR-2.1).
+    transport_tick: RefCell<Option<gtk::TickCallbackId>>,
+    /// True while the pointer holds the seek bar: playback positions must
+    /// not write the thumb back under the user's hand.
+    scrubbing: Cell<bool>,
     indicator: gtk::Label,
     toast_revealer: gtk::Revealer,
     toast_label: gtk::Label,
@@ -189,6 +192,10 @@ impl App {
         let seek_bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
         seek_bar.set_size_request(180, -1);
         seek_bar.set_draw_value(false);
+        // `with_range` derives round-digits from the step increment, which
+        // would quantise the thumb to 1 % of the duration — 36 s of a
+        // one-hour video. Scrubbing has to be continuous.
+        seek_bar.set_round_digits(-1);
         let time_label = gtk::Label::new(None);
         time_label.add_css_class("dim");
         let transport = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -286,6 +293,7 @@ impl App {
             seek_bar,
             time_label,
             transport_tick: RefCell::new(None),
+            scrubbing: Cell::new(false),
             indicator,
             toast_revealer,
             toast_label,
@@ -310,16 +318,48 @@ impl App {
         app.setup_controllers();
         app.build_help(gtk_app);
 
-        // Dragging the seek bar seeks; programmatic set_value does not
-        // fire change-value, so there is no feedback loop.
+        // Clicking or dragging the seek bar seeks. Proceed — not Stop —
+        // because GtkRange only moves the thumb to the pointer in its
+        // default handler, which a handled signal would suppress. There is
+        // no feedback loop: programmatic set_value does not fire
+        // change-value.
         app.seek_bar.connect_change_value(clone!(
             #[strong(rename_to = app)]
             app,
             move |_, _, value| {
                 app.with_video(|p| p.seek_fraction(value));
-                glib::Propagation::Stop
+                glib::Propagation::Proceed
             }
         ));
+
+        // Knowing when the pointer holds the bar keeps playback from
+        // dragging the thumb back mid-scrub. GtkRange claims the pointer
+        // sequence for its own drag, which would cancel a GestureClick of
+        // ours — watching the raw events is what survives that.
+        let press = gtk::EventControllerLegacy::new();
+        press.set_propagation_phase(gtk::PropagationPhase::Capture);
+        press.connect_event(clone!(
+            #[strong(rename_to = app)]
+            app,
+            move |_, event| {
+                match event.event_type() {
+                    gdk::EventType::ButtonPress | gdk::EventType::TouchBegin => {
+                        app.scrubbing.set(true)
+                    }
+                    gdk::EventType::ButtonRelease
+                    | gdk::EventType::TouchEnd
+                    | gdk::EventType::TouchCancel => {
+                        app.scrubbing.set(false);
+                        // Restart the fade-out that was held off while the
+                        // bar was under the pointer.
+                        app.show_chrome();
+                    }
+                    _ => {}
+                }
+                glib::Propagation::Proceed
+            }
+        ));
+        app.seek_bar.add_controller(press);
 
         // Query which formats the sandboxed editors can rewrite.
         glib::spawn_future_local(clone!(
@@ -524,6 +564,10 @@ impl App {
         crate::applog!("play: {}", path.display());
         self.update_save_enabled();
         self.transport.set_visible(true);
+        // Blank rather than carry the previous video's numbers over the
+        // moment before this one's duration is known.
+        self.seek_bar.set_value(0.0);
+        self.time_label.set_text("");
         self.update_transport();
         if self.chrome_visible() {
             self.start_transport_tick();
@@ -538,6 +582,8 @@ impl App {
             p.stop();
         }
         self.transport.set_visible(false);
+        // Hiding the bar mid-drag means no button release reaches it.
+        self.scrubbing.set(false);
         self.stop_transport_tick();
     }
 
@@ -548,20 +594,25 @@ impl App {
         let Some((pos, dur)) = progress else {
             return;
         };
-        if dur > 0.0 {
+        // While the pointer holds the thumb it owns the bar's value.
+        if dur > 0.0 && !self.scrubbing.get() {
             self.seek_bar.set_value(pos / dur);
         }
-        self.time_label
-            .set_text(&format!("{} / {}", format_time(pos), format_time(dur)));
+        let time = format!("{} / {}", format_time(pos), format_time(dur));
+        if self.time_label.text() != time {
+            self.time_label.set_text(&time);
+        }
     }
 
+    /// Drive the bar from the frame clock: it advances with the frames the
+    /// user is watching, instead of stepping once per polling interval.
     fn start_transport_tick(self: &Rc<Self>) {
         if self.transport_tick.borrow().is_some() || !self.is_video_showing() {
             return;
         }
         self.update_transport();
         let weak = Rc::downgrade(self);
-        let id = glib::timeout_add_local(Duration::from_millis(500), move || {
+        let id = self.seek_bar.add_tick_callback(move |_, _| {
             let Some(app) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
@@ -1105,6 +1156,11 @@ impl App {
     }
 
     fn hide_chrome(&self) {
+        // Never pull the seek bar out from under a scrub in progress; the
+        // button release restarts the fade-out.
+        if self.scrubbing.get() {
+            return;
+        }
         for w in &self.chrome {
             w.add_css_class("invisible");
             w.set_can_target(false);
