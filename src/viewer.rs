@@ -392,7 +392,11 @@ impl ImageView {
             self,
             move |gesture, _, _| {
                 if view.is_pannable() {
-                    view.state().drag_origin = view.imp().state.borrow().offset;
+                    // Single borrow: the RHS temporary of a two-borrow
+                    // assignment lives until end of statement and aborts
+                    // the process inside this non-unwinding GTK callback.
+                    let mut st = view.state();
+                    st.drag_origin = st.offset;
                 } else {
                     gesture.set_state(gtk::EventSequenceState::Denied);
                 }
