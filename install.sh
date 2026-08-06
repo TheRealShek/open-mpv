@@ -21,11 +21,18 @@ update-desktop-database "${APP_DIR}" 2>/dev/null || true
 gtk-update-icon-cache -q "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 
 # Become the default viewer for every supported format (FR-9.1). The
-# video list mirrors config::is_video; .m4v resolves to video/mp4, and
+# image list mirrors what the installed glycin loaders decode (see
+# config::IMAGE_EXTENSIONS, pinned by a test); the video list mirrors
+# config::VIDEO_EXTENSIONS. .m4v resolves to video/mp4, and
 # video/x-msvideo is registered alongside the canonical video/vnd.avi
 # because either name may reach us depending on the caller.
-for mime in image/jpeg image/png image/webp image/avif image/bmp \
-    image/gif image/svg+xml image/svg+xml-compressed \
+for mime in image/jpeg image/png image/apng image/webp image/avif \
+    image/bmp image/gif image/svg+xml image/svg+xml-compressed \
+    image/heif image/jxl image/tiff image/jp2 image/x-jp2-codestream \
+    image/vnd.microsoft.icon image/x-win-bitmap image/x-tga image/qoi \
+    image/x-exr image/x-dds image/x-portable-anymap \
+    image/x-portable-bitmap image/x-portable-graymap \
+    image/x-portable-pixmap image/x-xbitmap image/x-xpixmap \
     video/mp4 video/x-matroska video/webm video/quicktime \
     video/vnd.avi video/x-msvideo; do
     xdg-mime default "${APP_ID}.desktop" "$mime"

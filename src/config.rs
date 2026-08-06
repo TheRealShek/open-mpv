@@ -135,26 +135,34 @@ fn warn(origin: &str, lineno: usize, line: &str, msg: &str) {
     );
 }
 
+/// Extensions routed to glycin (FR-2). This mirrors what the installed
+/// glycin loaders advertise — deliberately a static list rather than a
+/// `Loader::supported_mime_types()` query, because the folder scan runs
+/// before the first frame and a D-Bus round trip there would eat the
+/// cold-start budget (NFR-1.1). `format_list_covers_installed_loaders`
+/// fails the build's tests if the loader set ever outgrows this.
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "apng", "webp", "avif", "avifs", "bmp", "gif", "svg", "svgz", "heic",
+    "heif", "hif", "jxl", "tif", "tiff", "jp2", "jpg2", "j2c", "jpc", "j2k", "ico", "cur", "tga",
+    "qoi", "exr", "dds", "pnm", "pbm", "pgm", "ppm", "xbm", "xpm",
+];
+
+/// Video containers routed to the GStreamer player instead of glycin
+/// (FR-10.1). The codec set inside is whatever the system's VA-API /
+/// GStreamer plugins decode.
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov", "avi"];
+
 /// True if the path has an extension we try to open (FR-2, FR-10).
 pub fn is_supported(path: &Path) -> bool {
     is_image(path) || is_video(path)
 }
 
 pub fn is_image(path: &Path) -> bool {
-    matches!(
-        lowercase_ext(path).as_deref(),
-        Some("jpg" | "jpeg" | "png" | "webp" | "avif" | "bmp" | "gif" | "svg" | "svgz")
-    )
+    matches!(lowercase_ext(path), Some(e) if IMAGE_EXTENSIONS.contains(&e.as_str()))
 }
 
-/// Video containers routed to the GStreamer player instead of glycin
-/// (FR-10.1). The codec set inside is whatever the system's VA-API /
-/// GStreamer plugins decode.
 pub fn is_video(path: &Path) -> bool {
-    matches!(
-        lowercase_ext(path).as_deref(),
-        Some("mp4" | "m4v" | "mkv" | "webm" | "mov" | "avi")
-    )
+    matches!(lowercase_ext(path), Some(e) if VIDEO_EXTENSIONS.contains(&e.as_str()))
 }
 
 fn lowercase_ext(path: &Path) -> Option<String> {
@@ -211,8 +219,89 @@ mod tests {
         assert!(is_supported(Path::new("scan.JPEG")));
         assert!(is_supported(Path::new("anim.webp")));
         assert!(is_supported(Path::new("v.svgz")));
+        // Formats the installed loaders decode that the allowlist used to
+        // refuse on extension alone.
+        assert!(is_supported(Path::new("IMG_0042.HEIC")));
+        assert!(is_supported(Path::new("photo.jxl")));
+        assert!(is_supported(Path::new("scan.tiff")));
         assert!(!is_supported(Path::new("doc.pdf")));
         assert!(!is_supported(Path::new("noext")));
+    }
+
+    /// The extension list is static so the folder scan never waits on
+    /// D-Bus (NFR-1.1). This pins it to what this machine's glycin
+    /// loaders actually advertise, so a loader gained or lost in a system
+    /// update surfaces here instead of silently making files unopenable.
+    #[test]
+    fn format_list_covers_installed_loaders() {
+        use std::collections::BTreeSet;
+
+        // Alias types that shared-mime-info knows no filename glob for:
+        // no extension can map to them, so they are not our gap.
+        const NO_GLOB: &[&str] = &["image/x-qoi"];
+
+        let ctx = gtk4::glib::MainContext::new();
+        let _acquired = ctx.acquire().unwrap();
+        let supported = ctx
+            .with_thread_default(|| ctx.block_on(glycin::Loader::supported_mime_types()))
+            .unwrap();
+        assert!(
+            !supported.is_empty(),
+            "no glycin loaders installed; cannot verify format coverage"
+        );
+
+        let ours: BTreeSet<String> = IMAGE_EXTENSIONS
+            .iter()
+            .map(|e| {
+                gtk4::gio::content_type_guess(Some(format!("x.{e}")), None::<&[u8]>)
+                    .0
+                    .to_string()
+            })
+            .collect();
+        let missing: Vec<String> = supported
+            .iter()
+            .map(|m| m.to_string())
+            .filter(|m| !ours.contains(m) && !NO_GLOB.contains(&m.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "glycin loaders decode {missing:?} but no extension in IMAGE_EXTENSIONS maps to them"
+        );
+    }
+
+    /// Adding a format to `IMAGE_EXTENSIONS` without registering its MIME
+    /// type means double-clicking the file in Files still opens something
+    /// else — the format works from the CLI and nowhere else (FR-9.1).
+    #[test]
+    fn desktop_entry_registers_every_image_format() {
+        use std::collections::BTreeSet;
+
+        let desktop = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/dev.thakur.OpenMpv.desktop"
+        ))
+        .expect("desktop entry must be readable");
+        let registered: BTreeSet<&str> = desktop
+            .lines()
+            .find_map(|l| l.strip_prefix("MimeType="))
+            .expect("desktop entry must declare MimeType")
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let unregistered: Vec<String> = IMAGE_EXTENSIONS
+            .iter()
+            .map(|e| {
+                gtk4::gio::content_type_guess(Some(format!("x.{e}")), None::<&[u8]>)
+                    .0
+                    .to_string()
+            })
+            .filter(|m| !registered.contains(m.as_str()))
+            .collect();
+        assert!(
+            unregistered.is_empty(),
+            "IMAGE_EXTENSIONS opens {unregistered:?} but the .desktop MimeType line omits them"
+        );
     }
 
     #[test]
