@@ -101,6 +101,20 @@ const SEEK_BAR_MIN_WIDTH: i32 = 140;
 /// the resize handles — so the app draws its own border (FR-6.4).
 const RESIZE_MARGIN: f64 = 8.0;
 
+/// Consecutive undecodable files navigation will step over before it
+/// gives up and shows the error. A folder of unreadable files must not
+/// spin, and with wrap on it would otherwise loop forever.
+const SKIP_BUDGET: u32 = 32;
+
+/// Why an image is being shown, which decides what a decode failure
+/// means: a file the user opened explicitly shows its error, while one
+/// merely stepped over on the way through a folder is skipped (FR-2.5).
+#[derive(Clone, Copy)]
+enum Arrival {
+    Direct,
+    Step { dir: i32, budget: u32 },
+}
+
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_TIMEOUT: Duration = Duration::from_millis(1200);
 const SVG_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -441,7 +455,7 @@ impl App {
                     let idx = folder.index_of(&path);
                     self.install_folder(folder, &dir);
                     match idx {
-                        Some(idx) => self.show_index(idx),
+                        Some(idx) => self.show_index(idx, Arrival::Direct),
                         None => self.show_error(&path, "not a supported image, or unreadable"),
                     }
                 }
@@ -454,7 +468,7 @@ impl App {
         match Folder::scan(dir, self.cfg.sort) {
             Ok(folder) if !folder.is_empty() => {
                 self.install_folder(folder, dir);
-                self.show_index(0);
+                self.show_index(0, Arrival::Direct);
             }
             Ok(folder) => {
                 self.install_folder(folder, dir);
@@ -492,7 +506,7 @@ impl App {
 
     // ----- showing images ----------------------------------------------
 
-    fn show_index(self: &Rc<Self>, idx: usize) {
+    fn show_index(self: &Rc<Self>, idx: usize, arrival: Arrival) {
         let Some(path) = self
             .folder
             .borrow()
@@ -544,7 +558,7 @@ impl App {
                         Err(e) => {
                             eprintln!("open-mpv: error: {}: {e}", path.display());
                             if app.generation.get() == generation {
-                                app.show_error(&path, &e);
+                                app.on_decode_failed(&path, &e, idx, arrival);
                             }
                         }
                     }
@@ -552,6 +566,37 @@ impl App {
             ));
         }
         self.preload_neighbors(idx);
+    }
+
+    /// A file did not decode. Stepping through a folder carries on in the
+    /// direction of travel so one unreadable file is a hesitation rather
+    /// than a wall; a file opened directly shows its error, so the user
+    /// learns why nothing appeared (FR-2.5).
+    fn on_decode_failed(self: &Rc<Self>, path: &Path, message: &str, idx: usize, arrival: Arrival) {
+        let next = {
+            let folder = self.folder.borrow();
+            folder
+                .as_ref()
+                .and_then(|f| skip_target(f, idx, arrival, self.cfg.wrap))
+        };
+        let Arrival::Step { dir, budget } = arrival else {
+            self.show_error(path, message);
+            return;
+        };
+        match next {
+            Some(next) => {
+                crate::applog!("skip: {} ({message})", path.display());
+                self.show_index(
+                    next,
+                    Arrival::Step {
+                        dir,
+                        budget: budget - 1,
+                    },
+                );
+            }
+            // Nowhere left to step, or the budget ran out.
+            None => self.show_error(path, message),
+        }
     }
 
     // ----- showing videos (FR-10) ---------------------------------------
@@ -961,20 +1006,19 @@ impl App {
     fn navigate(self: &Rc<Self>, delta: i32) {
         let target = {
             let folder = self.folder.borrow();
-            let Some(folder) = folder.as_ref() else {
-                return;
-            };
-            let Some(current) = self.current_index() else {
-                return;
-            };
-            if delta > 0 {
-                folder.next(current, self.cfg.wrap)
-            } else {
-                folder.prev(current, self.cfg.wrap)
-            }
+            let current = self.current_index();
+            folder
+                .as_ref()
+                .and_then(|f| nav_target(f, current, delta, self.cfg.wrap))
         };
         match target {
-            Some(idx) => self.show_index(idx),
+            Some(idx) => self.show_index(
+                idx,
+                Arrival::Step {
+                    dir: delta,
+                    budget: SKIP_BUDGET,
+                },
+            ),
             None => self.flash(if delta > 0 {
                 "Last image"
             } else {
@@ -1072,7 +1116,7 @@ impl App {
                 .as_deref()
                 .and_then(|p| self.folder.borrow().as_ref().and_then(|f| f.index_of(p)))
                 .unwrap_or(0);
-            self.show_index(idx.min(len - 1));
+            self.show_index(idx.min(len - 1), Arrival::Direct);
         }
     }
 
@@ -1113,7 +1157,7 @@ impl App {
                         if len == 0 {
                             app.empty_state("No images left in this folder");
                         } else {
-                            app.show_index(idx.min(len - 1));
+                            app.show_index(idx.min(len - 1), Arrival::Direct);
                         }
                         app.show_toast("Moved to trash", true);
                     }
@@ -1148,7 +1192,7 @@ impl App {
                             }
                         };
                         if let Some(idx) = idx {
-                            app.show_index(idx);
+                            app.show_index(idx, Arrival::Direct);
                         }
                     }
                     Err(e) => {
@@ -1186,7 +1230,7 @@ impl App {
                         app.flash("Saved");
                         // Reload: the file now carries the rotation.
                         if let Some(idx) = app.current_index() {
-                            app.show_index(idx);
+                            app.show_index(idx, Arrival::Direct);
                         }
                     }
                     Err(e) => {
@@ -1330,7 +1374,7 @@ impl App {
             "first",
             Box::new(|a| {
                 if a.folder.borrow().as_ref().is_some_and(|f| !f.is_empty()) {
-                    a.show_index(0);
+                    a.show_index(0, Arrival::Direct);
                 }
             }),
         );
@@ -1339,7 +1383,7 @@ impl App {
             Box::new(|a| {
                 let len = a.folder.borrow().as_ref().map_or(0, Folder::len);
                 if len > 0 {
-                    a.show_index(len - 1);
+                    a.show_index(len - 1, Arrival::Direct);
                 }
             }),
         );
@@ -1708,6 +1752,37 @@ fn apply_css(background: &str) {
     }
 }
 
+/// Index to move to for a next/previous step. With nothing on screen —
+/// an unsupported file was opened directly, so the folder loaded but
+/// never landed on an image — the folder is entered from whichever end
+/// the key points at, rather than leaving the arrows inert.
+fn nav_target(folder: &Folder, current: Option<usize>, delta: i32, wrap: bool) -> Option<usize> {
+    if folder.is_empty() {
+        return None;
+    }
+    match current {
+        Some(current) if delta > 0 => folder.next(current, wrap),
+        Some(current) => folder.prev(current, wrap),
+        None => Some(if delta > 0 { 0 } else { folder.len() - 1 }),
+    }
+}
+
+/// Where a decode failure at `idx` sends us: onward in the direction of
+/// travel, or `None` to stop and show the error (FR-2.5).
+fn skip_target(folder: &Folder, idx: usize, arrival: Arrival, wrap: bool) -> Option<usize> {
+    let Arrival::Step { dir, budget } = arrival else {
+        return None;
+    };
+    if budget == 0 {
+        return None;
+    }
+    if dir > 0 {
+        folder.next(idx, wrap)
+    } else {
+        folder.prev(idx, wrap)
+    }
+}
+
 /// Which window edge a point belongs to, given the window size. Corners
 /// win over sides so the diagonal grabs stay reachable.
 fn resize_edge_at(x: f64, y: f64, w: f64, h: f64) -> Option<gdk::SurfaceEdge> {
@@ -1770,9 +1845,80 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_time, resize_edge_at};
+    use super::{Arrival, SKIP_BUDGET, format_time, nav_target, resize_edge_at, skip_target};
 
+    use crate::config::SortOrder;
+    use crate::folder::Folder;
     use gtk4::gdk::SurfaceEdge;
+
+    /// A three-image folder on disk, which is what `Folder` reads.
+    fn folder_of(name: &str, files: &[&str]) -> (std::path::PathBuf, Folder) {
+        let dir =
+            std::env::temp_dir().join(format!("open-mpv-window-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in files {
+            std::fs::File::create(dir.join(f)).unwrap();
+        }
+        let folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        (dir, folder)
+    }
+
+    #[test]
+    fn arrows_work_when_nothing_is_on_screen() {
+        // Opening an unsupported file loads the folder but never lands on
+        // an image, leaving `showing` unset. The arrows used to go dead:
+        // navigate() bailed out on the missing current index.
+        let (dir, folder) = folder_of("nav", &["a.jpg", "b.jpg", "c.jpg"]);
+        assert_eq!(
+            nav_target(&folder, None, 1, false),
+            Some(0),
+            "right enters at the first image"
+        );
+        assert_eq!(
+            nav_target(&folder, None, -1, false),
+            Some(2),
+            "left enters at the last"
+        );
+        // Normal stepping is unchanged.
+        assert_eq!(nav_target(&folder, Some(0), 1, false), Some(1));
+        assert_eq!(nav_target(&folder, Some(2), 1, false), None);
+        assert_eq!(nav_target(&folder, Some(2), 1, true), Some(0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_empty_folder_has_nowhere_to_enter() {
+        let (dir, folder) = folder_of("empty", &["notes.txt"]);
+        assert_eq!(nav_target(&folder, None, 1, false), None);
+        assert_eq!(nav_target(&folder, None, -1, true), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn undecodable_files_are_stepped_over_only_while_navigating() {
+        let (dir, folder) = folder_of("skip", &["a.jpg", "b.jpg", "c.jpg"]);
+        let step = |dir, budget| Arrival::Step { dir, budget };
+
+        // Opened directly: the error is the answer (FR-2.5).
+        assert_eq!(skip_target(&folder, 1, Arrival::Direct, false), None);
+        // Stepping: carry on the way the user was already going.
+        assert_eq!(
+            skip_target(&folder, 1, step(1, SKIP_BUDGET), false),
+            Some(2)
+        );
+        assert_eq!(
+            skip_target(&folder, 1, step(-1, SKIP_BUDGET), false),
+            Some(0)
+        );
+        // Nowhere further to step.
+        assert_eq!(skip_target(&folder, 2, step(1, SKIP_BUDGET), false), None);
+        // A folder of unreadable files must stop, not spin — especially
+        // with wrap on, where there is always a next index.
+        assert_eq!(skip_target(&folder, 1, step(1, 1), true), Some(2));
+        assert_eq!(skip_target(&folder, 1, step(1, 0), true), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn window_edges_are_grabbable() {
