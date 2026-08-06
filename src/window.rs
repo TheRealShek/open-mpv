@@ -106,8 +106,11 @@ const ACTIONS: &[(&str, &str)] = &[
 /// pixel is a usable unit of time (a ten-minute video scrubs in ~2 s
 /// steps) without turning the compact control bar into a strip.
 const SEEK_BAR_MAX_WIDTH: i32 = 320;
-/// Floor for narrow windows; below this the bar stops being aimable.
-const SEEK_BAR_MIN_WIDTH: i32 = 140;
+/// Floor for narrow windows; below this the bar stops being aimable. The
+/// control bar sheds other things before letting the seek bar reach it —
+/// clamping here without shedding is what used to push the whole bar past
+/// the window edge and clip the position/duration readout off it.
+const SEEK_BAR_MIN_WIDTH: i32 = 96;
 
 /// Invisible resize border along the window edges. Frameless means no
 /// client-side decorations, and the decorations are what normally carry
@@ -162,6 +165,11 @@ pub struct App {
     play_btn: gtk::Button,
     mute_btn: gtk::Button,
     save_btn: gtk::Button,
+    /// Image-editing controls, the first thing the control bar gives up
+    /// when a video leaves it no room (see `fit_seek_bar`).
+    compact_group: Vec<gtk::Widget>,
+    /// (window width, transport shown) the bar was last fitted for.
+    fitted_for: Cell<Option<(i32, bool, usize, usize)>>,
     /// The bottom control bar; measured to size the seek bar to the room
     /// left over beside the labels and buttons.
     control_bar: gtk::Box,
@@ -270,6 +278,9 @@ impl App {
         seek_bar.set_round_digits(-1);
         let time_label = gtk::Label::new(None);
         time_label.add_css_class("dim");
+        // Reserve "0:00 / 0:00" so the bar does not twitch every time a
+        // digit rolls over; longer runtimes grow it once and settle.
+        time_label.set_width_chars(11);
         // A seek bar with no play button was the clearest hole in the
         // overlay: pausing was keyboard-only (FR-6.5). Icons track the
         // pipeline in update_transport.
@@ -286,16 +297,18 @@ impl App {
         transport.append(&mute_btn);
         transport.set_visible(false);
         bar.append(&transport);
-        bar.append(&bar_button(
+        let rotate_ccw = bar_button(
             "object-rotate-left-symbolic",
             "win.rotate-ccw",
             "Rotate left",
-        ));
-        bar.append(&bar_button(
+        );
+        let rotate_cw = bar_button(
             "object-rotate-right-symbolic",
             "win.rotate-cw",
             "Rotate right",
-        ));
+        );
+        bar.append(&rotate_ccw);
+        bar.append(&rotate_cw);
         // Held onto: a disabled save button has to be able to say why
         // (FR-5.4), which update_save_enabled writes into its tooltip.
         let save_btn = bar_button(
@@ -379,7 +392,13 @@ impl App {
             transport,
             play_btn,
             mute_btn,
+            compact_group: vec![
+                rotate_ccw.upcast(),
+                rotate_cw.upcast(),
+                save_btn.clone().upcast(),
+            ],
             save_btn,
+            fitted_for: Cell::new(None),
             control_bar: bar.clone(),
             seek_bar,
             time_label,
@@ -719,6 +738,9 @@ impl App {
         }
         self.set_idle_inhibited(false);
         self.transport.set_visible(false);
+        // Give back whatever the transport made the bar shed: nothing
+        // else re-fits it, since the tick only runs for video.
+        self.fit_seek_bar();
         // Hiding the bar mid-drag means no button release reaches it.
         self.scrubbing.set(false);
         self.stop_transport_tick();
@@ -726,16 +748,56 @@ impl App {
 
     // ----- video transport (FR-10.5) ------------------------------------
 
-    /// Keep the seek bar inside what the window can actually show. The
-    /// control bar is an overlay child: an oversized one does not push
-    /// the window wider, it gets squeezed at the ends.
+    /// Keep the control bar inside what the window can actually show. It
+    /// is an overlay child, so an oversized bar does not push the window
+    /// wider — it is squeezed, and whatever cannot shrink is clipped off
+    /// the ends. With the transport shown the bar needs ~520 px before
+    /// the seek bar gets any width at all, which is more than a window
+    /// sized to a 640-wide video has to give; the position/duration
+    /// readout was being clipped away as a result.
+    ///
+    /// So things yield in order of what the medium needs least: the seek
+    /// bar gives up width first, then the filename, then rotate/save —
+    /// which for a video are a fringe case and a disabled button anyway.
     fn fit_seek_bar(&self) {
-        // Everything else in the bar — labels, buttons, padding, margins
-        // — is measured rather than assumed: the time label alone grows
-        // the bar by ~70 px once it has a duration to show.
-        let (bar_min, _, _, _) = self.control_bar.measure(gtk::Orientation::Horizontal, -1);
-        let others = bar_min - self.seek_bar.width_request().max(0);
-        let room = self.win.width() - others;
+        // Every measurement here forces a layout pass, and this is called
+        // from the per-frame transport tick. Only the window width and
+        // which mode we are in can change the answer.
+        // The label lengths belong in the key, not just the window size:
+        // the bar's minimum grows the moment the clock goes from empty to
+        // "0:03 / 0:10", and a fit computed before that is stale.
+        let key = (
+            self.win.width(),
+            self.transport.is_visible(),
+            self.time_label.text().len(),
+            self.pos_label.text().len(),
+        );
+        if self.fitted_for.get() == Some(key) {
+            return;
+        }
+        self.fitted_for.set(Some(key));
+        let (width, video, ..) = key;
+
+        // Measure from everything restored, with the seek bar
+        // contributing nothing, so `others` is the rest at its minimum.
+        self.seek_bar.set_size_request(0, -1);
+        self.name_label.set_visible(true);
+        for w in &self.compact_group {
+            w.set_visible(true);
+        }
+        let others = |s: &Self| s.control_bar.measure(gtk::Orientation::Horizontal, -1).0;
+
+        let mut room = width - others(self);
+        if room < SEEK_BAR_MIN_WIDTH && video {
+            self.name_label.set_visible(false);
+            room = width - others(self);
+        }
+        if room < SEEK_BAR_MIN_WIDTH && video {
+            for w in &self.compact_group {
+                w.set_visible(false);
+            }
+            room = width - others(self);
+        }
         self.seek_bar
             .set_size_request(room.clamp(SEEK_BAR_MIN_WIDTH, SEEK_BAR_MAX_WIDTH), -1);
     }
