@@ -204,17 +204,24 @@ pub fn is_supported(path: &Path) -> bool {
 }
 
 pub fn is_image(path: &Path) -> bool {
-    matches!(lowercase_ext(path), Some(e) if IMAGE_EXTENSIONS.contains(&e.as_str()))
+    has_extension(path, IMAGE_EXTENSIONS)
 }
 
 pub fn is_video(path: &Path) -> bool {
-    matches!(lowercase_ext(path), Some(e) if VIDEO_EXTENSIONS.contains(&e.as_str()))
+    has_extension(path, VIDEO_EXTENSIONS)
 }
 
-fn lowercase_ext(path: &Path) -> Option<String> {
+/// Case-insensitive extension match, without lowercasing into a fresh
+/// `String` first: this runs up to twice for every entry in a directory
+/// during a folder scan, on the cold-start path (NFR-1.1).
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|ext| {
+            extensions
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
 }
 
 #[cfg(test)]

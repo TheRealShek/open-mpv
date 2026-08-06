@@ -12,6 +12,9 @@ use crate::config::{Sort, SortOrder, is_supported};
 #[derive(Debug, Clone)]
 struct Entry {
     path: PathBuf,
+    /// Only meaningful under `SortOrder::Date`; reading it costs a stat
+    /// per file, so name sorting leaves it at the epoch rather than pay
+    /// for a value nothing compares (see `mtime_of`).
     mtime: SystemTime,
 }
 
@@ -28,14 +31,17 @@ impl Folder {
         for res in std::fs::read_dir(dir)? {
             let Ok(de) = res else { continue };
             let path = de.path();
-            if !path.is_file() || !is_supported(&path) {
+            // Extension first: it is pure string work, and it rejects most
+            // of a mixed directory before anything touches the filesystem.
+            // `Path::is_file` was doing that work for every entry, stat
+            // included, only to discard the answer a moment later.
+            if !is_supported(&path) || !is_regular_file(&de, &path) {
                 continue;
             }
-            let mtime = de
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            entries.push(Entry { path, mtime });
+            entries.push(Entry {
+                mtime: mtime_of(&de, sort),
+                path,
+            });
         }
         let mut folder = Folder { entries, sort };
         folder.entries.sort_by(|a, b| folder_cmp(a, b, sort));
@@ -86,9 +92,12 @@ impl Folder {
         if !is_supported(path) || self.index_of(path).is_some() {
             return None;
         }
-        let mtime = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let mtime = match self.sort.order {
+            SortOrder::Date => std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH),
+            SortOrder::Name => SystemTime::UNIX_EPOCH,
+        };
         let entry = Entry {
             path: path.to_path_buf(),
             mtime,
@@ -106,6 +115,30 @@ impl Folder {
         let pos = self.index_of(path)?;
         self.entries.remove(pos);
         Some(pos)
+    }
+}
+
+/// Whether a directory entry is a regular file. `DirEntry::file_type`
+/// comes from readdir's `d_type` on Linux, so it usually costs no syscall
+/// at all — but it describes the *link*, so a symlink has to be followed
+/// the slow way or symlinked images would vanish from the folder.
+fn is_regular_file(de: &std::fs::DirEntry, path: &Path) -> bool {
+    match de.file_type() {
+        Ok(t) if t.is_symlink() => path.is_file(),
+        Ok(t) => t.is_file(),
+        Err(_) => path.is_file(),
+    }
+}
+
+/// Modification time, read only when something will actually order by it
+/// — it is a second stat per file, and name sorting never looks at it.
+fn mtime_of(de: &std::fs::DirEntry, sort: Sort) -> SystemTime {
+    match sort.order {
+        SortOrder::Date => de
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH),
+        SortOrder::Name => SystemTime::UNIX_EPOCH,
     }
 }
 
@@ -191,6 +224,19 @@ mod tests {
         }
     }
 
+    fn names(f: &Folder) -> Vec<String> {
+        (0..f.len())
+            .map(|i| {
+                f.get(i)
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
     fn tempdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("open-mpv-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -234,6 +280,46 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The scan reads `d_type` from readdir rather than stat-ing every
+    /// entry, but `d_type` describes the link, not its target — a symlink
+    /// has to be followed or symlinked images disappear from the folder.
+    #[test]
+    fn symlinked_images_are_found_and_broken_links_are_not() {
+        let dir = tempdir("symlink");
+        File::create(dir.join("real.jpg")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real.jpg"), dir.join("link.jpg")).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone.jpg"), dir.join("broken.jpg")).unwrap();
+
+        let folder = Folder::scan(&dir, by_name()).unwrap();
+        assert_eq!(
+            names(&folder),
+            ["link.jpg", "real.jpg"],
+            "a symlink to an image counts; a dangling one does not"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Guards the stat that name sorting skips: date sorting still has to
+    /// read real modification times.
+    #[test]
+    fn date_sort_orders_by_modification_time() {
+        let dir = tempdir("date");
+        for name in ["oldest.jpg", "middle.jpg", "newest.jpg"] {
+            File::create(dir.join(name)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let by_date = |reverse| Sort {
+            order: SortOrder::Date,
+            reverse,
+        };
+        // Newest first is the default direction for dates (FR-3.2).
+        let folder = Folder::scan(&dir, by_date(false)).unwrap();
+        assert_eq!(names(&folder), ["newest.jpg", "middle.jpg", "oldest.jpg"]);
+        let folder = Folder::scan(&dir, by_date(true)).unwrap();
+        assert_eq!(names(&folder), ["oldest.jpg", "middle.jpg", "newest.jpg"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn reverse_flips_the_order_and_insertion_follows_it() {
         let dir = tempdir("reverse");
@@ -245,18 +331,6 @@ mod tests {
             reverse: true,
         };
         let mut folder = Folder::scan(&dir, sort).unwrap();
-        let names = |f: &Folder| -> Vec<String> {
-            (0..f.len())
-                .map(|i| {
-                    f.get(i)
-                        .unwrap()
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect()
-        };
         // Natural order reversed: b10 before b2, not lexical.
         assert_eq!(names(&folder), ["b10.jpg", "b2.jpg", "a.jpg"]);
         // A file appearing later lands in the reversed position too.
