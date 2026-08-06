@@ -648,15 +648,15 @@ impl App {
     /// than a wall; a file opened directly shows its error, so the user
     /// learns why nothing appeared (FR-2.5).
     fn on_decode_failed(self: &Rc<Self>, path: &Path, message: &str, idx: usize, arrival: Arrival) {
+        let Arrival::Step { dir, budget } = arrival else {
+            self.show_error(path, message);
+            return;
+        };
         let next = {
             let folder = self.folder.borrow();
             folder
                 .as_ref()
                 .and_then(|f| skip_target(f, idx, arrival, self.cfg.wrap))
-        };
-        let Arrival::Step { dir, budget } = arrival else {
-            self.show_error(path, message);
-            return;
         };
         match next {
             Some(next) => {
@@ -1107,35 +1107,44 @@ impl App {
         }
     }
 
-    fn show_error(self: &Rc<Self>, path: &Path, message: &str) {
+    /// Take down whatever is on screen: silence any video, drop the
+    /// decoded image, and bump the generation so async work already in
+    /// flight knows it has been superseded.
+    fn clear_media(&self) {
         self.generation.set(self.generation.get() + 1);
         self.stop_video();
         self.view.clear();
         *self.current_decoded.borrow_mut() = None;
         *self.current_mime.borrow_mut() = None;
-        self.status.set_text(&format!(
+    }
+
+    /// Put a message where the image would be (FR-1.4).
+    fn show_status(&self, text: &str) {
+        self.status.set_text(text);
+        self.status.set_visible(true);
+        self.update_save_enabled();
+    }
+
+    fn show_error(self: &Rc<Self>, path: &Path, message: &str) {
+        self.clear_media();
+        // `showing` deliberately survives: the file is still the one the
+        // folder is positioned on, so navigation works from the error.
+        self.show_status(&format!(
             "{}\n\n{message}",
             path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
         ));
-        self.status.set_visible(true);
-        self.update_save_enabled();
         self.present_default();
     }
 
     fn empty_state(self: &Rc<Self>, message: &str) {
-        self.generation.set(self.generation.get() + 1);
-        self.stop_video();
-        self.view.clear();
-        *self.current_decoded.borrow_mut() = None;
-        *self.current_mime.borrow_mut() = None;
+        self.clear_media();
+        // Nothing is positioned anywhere any more, unlike show_error.
         *self.showing.borrow_mut() = None;
         self.set_current_name(None);
-        self.status.set_text(message);
-        self.status.set_visible(true);
         self.update_pos_label();
-        self.update_save_enabled();
+        self.show_status(message);
         self.present_default();
     }
 
