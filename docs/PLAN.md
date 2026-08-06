@@ -31,7 +31,9 @@ replacing Loupe as the system default image viewer.
 ### In scope (this is the full product — no v0/v1 split)
 
 - View a single image; flip through all images in its folder.
-- Formats: JPEG, PNG, WebP, AVIF, BMP; animated GIF/WebP/PNG; SVG.
+- Formats: whatever the installed glycin loaders decode — JPEG, PNG,
+  WebP, AVIF, BMP, HEIF/HEIC, JPEG XL, TIFF and more; animated
+  GIF/WebP/PNG; SVG.
 - Video (MP4/MKV/WebM/MOV/AVI) inline in the same folder flow —
   hardware-decoded, looped, with mpv-style transport keys. A viewer
   that happens to play video, not a media player.
@@ -50,7 +52,12 @@ replacing Loupe as the system default image viewer.
 - Library management, tagging, search, cloud anything.
 - Editing beyond rotate (crop, color, filters).
 - EXIF panel, slideshow, clipboard copy (explicitly cut this iteration).
-- Camera RAW.
+- Subtitles and audio/subtitle track selection. This is the line between
+  "a viewer that happens to play video" and a media player, and it is
+  also where playbin3 stops being cheap: stream selection there goes
+  through `GstStreamCollection`, not the old `current-text` property.
+- Camera RAW — no glycin loader for it, so it is a decoder question
+  rather than a policy one.
 - Non-Linux platforms.
 
 ## Technical approach

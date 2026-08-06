@@ -23,7 +23,11 @@ product; there is no version staging.
 
 ### FR-2 — Supported formats
 
-- **FR-2.1** Still images: JPEG, PNG, WebP, AVIF, BMP.
+- **FR-2.1** Still images: every format the installed glycin loaders can
+  decode — JPEG, PNG, WebP, AVIF, BMP, HEIF/HEIC, JPEG XL, TIFF, JPEG
+  2000, ICO, TGA, QOI, OpenEXR, DDS, PNM/PBM/PGM/PPM, XBM, XPM. The
+  extension list the app filters on is pinned to what the loaders
+  advertise by a test, so it cannot quietly fall behind them.
 - **FR-2.2** Animated images: GIF, animated WebP, animated PNG — play
   automatically, loop, with correct frame timing.
 - **FR-2.3** Vector: SVG, rendered sharp at any zoom level (re-rasterized,
@@ -95,15 +99,19 @@ product; there is no version staging.
   indicator, close button) fade in on mouse movement and fade out after
   ~2 s of inactivity; they never appear during pure keyboard use. A
   pointer resting on the controls holds them open — they must not fade
-  out from under the click they are waiting for.
+  out from under the click they are waiting for. The pointer itself
+  fades with them (`hide-cursor`), except over the resize border of
+  FR-6.4, where it has to stay visible to be found.
 - **FR-6.3** Fullscreen toggle via `F`/`F11` and double-click.
 - **FR-6.4** Window can be moved by dragging the image (when not panning
   a zoomed image) and resized by dragging within a few pixels of any edge
   or corner, with the pointer showing the resize cursor there. Frameless
   means no decorations, and decorations are what normally carry the
   resize handles — so the app provides that border itself.
-- **FR-6.5** Every mouse-reachable action has a keyboard equivalent and
-  vice versa.
+- **FR-6.5** Every action is reachable from the keyboard and rebindable
+  (FR-8.2). The overlay carries the common subset — navigation, rotate,
+  save, trash, fullscreen, close, and the video transport — rather than
+  a button per action, which would fight FR-6.1's "just the image".
 - **FR-6.6 Initial window size:** on open, the window sizes itself to the
   media at 100 % up to 85 % of the monitor's work area (larger media are
   fitted down to that bound); it never opens larger than the media
@@ -130,8 +138,10 @@ product; there is no version staging.
   `~/.config/open-mpv/open-mpv.conf`, mpv-style `key=value` lines with
   `#` comments. Absent file ⇒ all defaults.
 - **FR-8.2** Configurable at minimum: background color, sort order
-  (name/date), navigation wrap, default fit mode, overlay fade delay,
-  and keybindings (any action rebindable).
+  (name/date) and direction, navigation wrap, default fit mode, overlay
+  fade delay, pointer hiding, video looping, starting volume, opening
+  fullscreen, and keybindings (any action rebindable; `bind=<key> none`
+  removes a default rather than overriding it).
 - **FR-8.3** Unknown or malformed lines are ignored with a warning on
   stderr — a bad config never prevents startup.
 
@@ -153,7 +163,8 @@ product; there is no version staging.
 - **FR-10.2** Videos appear in the same folder navigation as images
   (FR-3). They are streamed on show, never pre-decoded into the
   neighbor cache.
-- **FR-10.3** Playback loops at end of stream, like animated images.
+- **FR-10.3** Playback loops at end of stream, like animated images —
+  configurable, with `loop=no` leaving the last frame up.
 - **FR-10.4** Transport through the single action layer, rebindable
   (FR-8.2): play-pause (advances on images), seek ±5 s, mute,
   volume up/down. Zoom, pan and view rotation apply to video; save
@@ -212,12 +223,16 @@ product; there is no version staging.
 - **NFR-4.1** First-class native Wayland client on GNOME (Fedora
   Workstation); no XWayland requirement. Fractional scaling and HiDPI
   render sharp.
-- **NFR-4.2** Follows the system light/dark preference only where it has
-  chrome (toasts, error states); the canvas stays the configured
+- **NFR-4.2** Chrome (overlay controls, toasts, error states) is always
+  the dark translucent OSD an mpv-style viewer wants, independent of the
+  system light/dark preference — a light toast over a dark canvas reads
+  worse than a consistent one. The canvas stays the configured
   background color.
 - **NFR-4.3** Works offline, from a read-only location, and on files the
-  user can read but not write (write actions gray out, viewing is
-  unaffected).
+  user can read but not write. Viewing is unaffected; a write that
+  cannot succeed says so in a toast rather than being pre-emptively
+  grayed out, which would cost a permission check per file to
+  anticipate a case that already reports itself honestly.
 
 ### NFR-5 — Usability
 

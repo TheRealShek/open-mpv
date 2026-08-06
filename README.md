@@ -12,15 +12,19 @@ daemon. See [docs/PLAN.md](docs/PLAN.md) and
 
 ## Features
 
-- JPEG, PNG, WebP, AVIF, BMP; animated GIF/WebP/APNG; SVG (re-rendered
-  sharply at any zoom).
+- Every format the installed glycin loaders decode: JPEG, PNG, WebP,
+  AVIF, BMP, HEIF/HEIC, JPEG XL, TIFF, JPEG 2000, ICO, TGA, QOI, EXR,
+  DDS, PNM, XBM/XPM; animated GIF/WebP/APNG; SVG (re-rendered sharply at
+  any zoom).
 - Video (MP4, MKV, WebM, MOV, AVI) inline in the same folder flow:
   hardware-decoded (VA-API), looped, with pause/seek/volume and a seek
   bar in the overlay. Codec support is the system's GStreamer set.
 - Flip through the folder of the opened image, natural filename order,
   live updates when files appear or vanish.
 - Fit / 100% / free zoom anchored at the cursor; pixel-exact at 100%
-  under fractional scaling.
+  under fractional scaling. Arrow keys pan once you are zoomed in.
+- The filename, position and zoom live in the fade-in overlay; the
+  pointer fades with it, mpv-style.
 - Delete to trash instantly, with an Undo toast. Rotate and save —
   lossless metadata-only for JPEG, atomic rewrite otherwise.
 - Single instance: opening another image reuses the window.
@@ -38,12 +42,12 @@ sudo dnf install gtk4-devel glycin-devel gstreamer1-devel   # build deps; runtim
 
 | Key | Action |
 | --- | ------ |
-| Right / Page Down | next image |
+| Right / Page Down | next image (Right pans when zoomed in) |
 | space | pause video · next image otherwise |
-| Left / Backspace / Page Up | previous image |
+| Left / Backspace / Page Up | previous image (Left pans when zoomed in) |
 | j / l | video seek −5 s / +5 s |
 | m | video mute |
-| Up / Down | video volume |
+| Up / Down | video volume (pans when zoomed in) |
 | Home / End | first / last image |
 | scroll | zoom at cursor |
 | horizontal scroll | navigate |
@@ -67,21 +71,29 @@ Optional, mpv-style: `~/.config/open-mpv/open-mpv.conf`.
 # defaults shown
 background = #121212
 sort = name            # name | date (newest first)
+sort-reverse = no      # flip whichever order `sort` picked
 wrap = no              # wrap around at folder ends
 fit = fit              # fit | actual — zoom when an image opens
 overlay-timeout = 2.0  # seconds before controls fade out
+hide-cursor = yes      # pointer fades with the overlay controls
+start-fullscreen = no  # open fullscreen instead of sized to the media
+loop = yes             # replay video at end of stream
+volume = 100           # starting playback volume, 0-150 %
 cache-budget-mb = 256  # decoded frames kept beyond the shown image
                        # (preloaded neighbors); lower it to trade RAM
                        # for a short decode wait on next/prev with
                        # very large photos
 
 # rebind keys: bind = <key> <action>
-# actions: next prev first last zoom-in zoom-out zoom-fit zoom-actual
-#          zoom-toggle rotate-cw rotate-ccw play-pause seek-back
-#          seek-forward mute volume-up volume-down save trash undo
-#          fullscreen close help
+# actions: right left up down next prev first last zoom-in zoom-out
+#          zoom-fit zoom-actual zoom-toggle rotate-cw rotate-ccw
+#          play-pause seek-back seek-forward mute volume-up volume-down
+#          save trash undo fullscreen close help
+# right/left/up/down are the contextual arrow actions: they pan a
+# zoomed image and otherwise navigate or change volume.
 bind = n next
 bind = <Shift>d trash
+bind = q none          # `none` removes a default binding outright
 ```
 
 ## Logs
