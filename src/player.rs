@@ -280,6 +280,14 @@ impl Player {
         let _ = self.playbin.set_state(gst::State::Playing);
     }
 
+    /// Set the starting volume from config (FR-8.2). The pipeline is
+    /// reused across videos, so this only needs applying once.
+    pub fn set_volume(&self, volume: f64) {
+        let volume = volume.clamp(0.0, VOLUME_MAX);
+        self.playbin.set_property("volume", volume);
+        crate::applog!("player: volume {:.0}%", volume * 100.0);
+    }
+
     /// Change volume by `delta`; returns the new volume (0..=1.5).
     pub fn add_volume(&self, delta: f64) -> f64 {
         let vol = (self.playbin.property::<f64>("volume") + delta).clamp(0.0, VOLUME_MAX);

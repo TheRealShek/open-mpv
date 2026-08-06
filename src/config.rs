@@ -14,6 +14,15 @@ pub enum SortOrder {
     Date,
 }
 
+/// Folder ordering: which key, and which way. Reversing is separate from
+/// the key because the useful direction differs — names read naturally
+/// ascending, dates newest-first (FR-3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sort {
+    pub order: SortOrder,
+    pub reverse: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FitMode {
     Fit,
@@ -23,8 +32,15 @@ pub enum FitMode {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub background: String,
-    pub sort: SortOrder,
+    pub sort: Sort,
     pub wrap: bool,
+    /// Replay a video at end of stream, the way animated images loop
+    /// (FR-10.3). Off means the last frame simply stays up.
+    pub loop_video: bool,
+    /// Open fullscreen instead of sized to the media (FR-6.6).
+    pub start_fullscreen: bool,
+    /// Starting playback volume, 0.0..=1.5.
+    pub volume: f64,
     pub fit: FitMode,
     /// Seconds of mouse inactivity before overlay controls fade out.
     pub overlay_timeout: f64,
@@ -43,8 +59,14 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             background: "#121212".into(),
-            sort: SortOrder::Name,
+            sort: Sort {
+                order: SortOrder::Name,
+                reverse: false,
+            },
             wrap: false,
+            loop_video: true,
+            start_fullscreen: false,
+            volume: 1.0,
             fit: FitMode::Fit,
             overlay_timeout: 2.0,
             hide_cursor: true,
@@ -90,9 +112,25 @@ impl Config {
             match key {
                 "background" => cfg.background = value.to_string(),
                 "sort" => match value {
-                    "name" => cfg.sort = SortOrder::Name,
-                    "date" => cfg.sort = SortOrder::Date,
+                    "name" => cfg.sort.order = SortOrder::Name,
+                    "date" => cfg.sort.order = SortOrder::Date,
                     _ => warn(origin, lineno, raw, "sort must be name|date"),
+                },
+                "sort-reverse" => match parse_bool(value) {
+                    Some(b) => cfg.sort.reverse = b,
+                    None => warn(origin, lineno, raw, "sort-reverse must be yes|no"),
+                },
+                "loop" => match parse_bool(value) {
+                    Some(b) => cfg.loop_video = b,
+                    None => warn(origin, lineno, raw, "loop must be yes|no"),
+                },
+                "start-fullscreen" => match parse_bool(value) {
+                    Some(b) => cfg.start_fullscreen = b,
+                    None => warn(origin, lineno, raw, "start-fullscreen must be yes|no"),
+                },
+                "volume" => match value.parse::<f64>() {
+                    Ok(v) if (0.0..=150.0).contains(&v) => cfg.volume = v / 100.0,
+                    _ => warn(origin, lineno, raw, "volume must be a percentage, 0-150"),
                 },
                 "wrap" => match parse_bool(value) {
                     Some(b) => cfg.wrap = b,
@@ -187,7 +225,8 @@ mod tests {
     fn defaults_on_empty() {
         let c = Config::parse("", "t");
         assert_eq!(c.background, "#121212");
-        assert_eq!(c.sort, SortOrder::Name);
+        assert_eq!(c.sort.order, SortOrder::Name);
+        assert!(!c.sort.reverse);
         assert!(!c.wrap);
         assert_eq!(c.fit, FitMode::Fit);
         assert_eq!(c.overlay_timeout, 2.0);
@@ -197,26 +236,34 @@ mod tests {
 
     #[test]
     fn parses_options_and_binds() {
-        let text = "\n# comment\nbackground = #000000\nsort=date\nwrap=yes\nfit=actual\noverlay-timeout=1.5\ncache-budget-mb=64\nbind=n next\nbind=BackSpace prev\n";
+        let text = "\n# comment\nbackground = #000000\nsort=date\nsort-reverse=yes\nwrap=yes\nfit=actual\noverlay-timeout=1.5\nhide-cursor=no\nloop=no\nstart-fullscreen=yes\nvolume=70\ncache-budget-mb=64\nbind=n next\nbind=BackSpace prev\n";
         let c = Config::parse(text, "t");
         assert_eq!(c.cache_budget_mb, 64);
         assert_eq!(c.background, "#000000");
-        assert_eq!(c.sort, SortOrder::Date);
+        assert_eq!(c.sort.order, SortOrder::Date);
         assert!(c.wrap);
         assert_eq!(c.fit, FitMode::Actual);
         assert_eq!(c.overlay_timeout, 1.5);
+        assert!(c.sort.reverse);
+        assert!(!c.hide_cursor);
+        assert!(!c.loop_video);
+        assert!(c.start_fullscreen);
+        assert_eq!(c.volume, 0.7);
         assert_eq!(c.binds.get("n").map(String::as_str), Some("next"));
         assert_eq!(c.binds.get("BackSpace").map(String::as_str), Some("prev"));
     }
 
     #[test]
     fn malformed_lines_are_skipped() {
-        let text = "nonsense\nsort=upside-down\nwrap=maybe\nbind=x\nunknown=1\ncache-budget-mb=lots\nsort=date\n";
+        let text = "nonsense\nsort=upside-down\nwrap=maybe\nbind=x\nunknown=1\ncache-budget-mb=lots\nvolume=999\nloop=perhaps\nsort=date\n";
         let c = Config::parse(text, "t");
         // The one valid line still applies; everything else falls back.
-        assert_eq!(c.sort, SortOrder::Date);
+        assert_eq!(c.sort.order, SortOrder::Date);
         assert_eq!(c.cache_budget_mb, 256);
         assert!(!c.wrap);
+        // Out-of-range and unparseable values keep their defaults.
+        assert_eq!(c.volume, 1.0);
+        assert!(c.loop_video);
         assert!(c.binds.is_empty());
     }
 

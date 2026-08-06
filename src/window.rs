@@ -26,11 +26,17 @@ use crate::viewer::ImageView;
 
 /// Default key → action map; config `bind=` lines override per key.
 const DEFAULT_BINDS: &[(&str, &str)] = &[
-    ("Right", "next"),
+    // The arrow keys are contextual (see `App::arrow`), which is why they
+    // bind to their own actions rather than straight to next/prev: Page
+    // Down must keep stepping through the folder even when a zoomed
+    // image has the arrows panning.
+    ("Right", "right"),
+    ("Left", "left"),
+    ("Up", "up"),
+    ("Down", "down"),
     // Space pauses video, flips to the next photo otherwise.
     ("space", "play-pause"),
     ("Page_Down", "next"),
-    ("Left", "prev"),
     ("BackSpace", "prev"),
     ("Page_Up", "prev"),
     ("Home", "first"),
@@ -50,8 +56,6 @@ const DEFAULT_BINDS: &[(&str, &str)] = &[
     ("j", "seek-back"),
     ("l", "seek-forward"),
     ("m", "mute"),
-    ("Up", "volume-up"),
-    ("Down", "volume-down"),
     ("Delete", "trash"),
     ("KP_Delete", "trash"),
     ("<Control>z", "undo"),
@@ -68,6 +72,10 @@ const DEFAULT_BINDS: &[(&str, &str)] = &[
 /// (FR-8.2). `escape` carries no description: its layered behaviour is
 /// spelled out in the footer instead.
 const ACTIONS: &[(&str, &str)] = &[
+    ("right", "Next image, or pan when zoomed in"),
+    ("left", "Previous image, or pan when zoomed in"),
+    ("up", "Volume up, or pan when zoomed in"),
+    ("down", "Volume down, or pan when zoomed in"),
     ("next", "Next image"),
     ("prev", "Previous image"),
     ("first", "First image"),
@@ -110,6 +118,9 @@ const RESIZE_MARGIN: f64 = 8.0;
 /// gives up and shows the error. A folder of unreadable files must not
 /// spin, and with wrap on it would otherwise loop forever.
 const SKIP_BUDGET: u32 = 32;
+
+/// How far one arrow-key press moves a zoomed image, in logical pixels.
+const PAN_STEP: f64 = 64.0;
 
 /// Why an image is being shown, which decides what a decode failure
 /// means: a file the user opened explicitly shows its error, while one
@@ -402,6 +413,10 @@ impl App {
         app.setup_controllers();
         app.build_help(gtk_app);
 
+        if app.cfg.start_fullscreen {
+            app.win.fullscreen();
+        }
+
         // Clicking or dragging the seek bar seeks. Proceed — not Stop —
         // because GtkRange only moves the thumb to the pointer in its
         // default handler, which a handled signal would suppress. There is
@@ -656,6 +671,7 @@ impl App {
         }) {
             Ok(p) => {
                 let p = Rc::new(p);
+                p.set_volume(self.cfg.volume);
                 *self.player.borrow_mut() = Some(p.clone());
                 Some(p)
             }
@@ -861,11 +877,13 @@ impl App {
     fn on_player_event(self: &Rc<Self>, event: player::Event) {
         match event {
             player::Event::EndOfStream => {
-                if self.is_video_showing() {
-                    // Loop like animated images do (FR-10.3).
-                    if let Some(p) = self.player.borrow().as_ref() {
-                        p.rewind();
-                    }
+                // Loop like animated images do, unless told not to
+                // (FR-10.3, `loop=no`) — then the last frame stays up.
+                if self.is_video_showing()
+                    && self.cfg.loop_video
+                    && let Some(p) = self.player.borrow().as_ref()
+                {
+                    p.rewind();
                 }
             }
             player::Event::Error(message) => {
@@ -1138,6 +1156,22 @@ impl App {
         self.name_label.set_tooltip_text(name.as_deref());
         self.win
             .set_title(Some(name.as_deref().unwrap_or("open-mpv")));
+    }
+
+    /// The arrow keys are contextual, like Space: a zoomed image has
+    /// somewhere to go, so they pan it (FR-4.3); a fitted one does not,
+    /// so sideways steps through the folder and vertical works the video
+    /// volume. `dx`/`dy` are the direction of travel in screen terms.
+    fn arrow(self: &Rc<Self>, dx: i32, dy: i32) {
+        if self.view.is_pannable() {
+            // Moving the view right means moving the image left.
+            self.view
+                .pan_by(-f64::from(dx) * PAN_STEP, -f64::from(dy) * PAN_STEP);
+        } else if dx != 0 {
+            self.navigate(dx);
+        } else {
+            self.change_volume(if dy < 0 { 0.1 } else { -0.1 });
+        }
     }
 
     fn update_pos_label(&self) {
@@ -1501,6 +1535,10 @@ impl App {
 
         add("next", Box::new(|a| a.navigate(1)));
         add("prev", Box::new(|a| a.navigate(-1)));
+        add("right", Box::new(|a| a.arrow(1, 0)));
+        add("left", Box::new(|a| a.arrow(-1, 0)));
+        add("up", Box::new(|a| a.arrow(0, -1)));
+        add("down", Box::new(|a| a.arrow(0, 1)));
         add(
             "first",
             Box::new(|a| {
@@ -1626,12 +1664,18 @@ impl App {
             .map(|(k, a)| (k.to_string(), a.to_string()))
             .collect();
         for (key, action) in &self.cfg.binds {
-            if !ACTIONS.iter().any(|(name, _)| name == action) {
-                eprintln!("open-mpv: config: unknown action `{action}` for bind `{key}`");
-                continue;
-            }
             if gtk::accelerator_parse(key).is_none() {
                 eprintln!("open-mpv: config: cannot parse key `{key}`");
+                continue;
+            }
+            // `bind=<key> none` takes a key away without replacing it —
+            // otherwise a default binding can only ever be overridden.
+            if action == "none" {
+                key_to_action.remove(key);
+                continue;
+            }
+            if !ACTIONS.iter().any(|(name, _)| name == action) {
+                eprintln!("open-mpv: config: unknown action `{action}` for bind `{key}`");
                 continue;
             }
             key_to_action.insert(key.clone(), action.clone());
@@ -2039,7 +2083,7 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 mod tests {
     use super::{Arrival, SKIP_BUDGET, format_time, nav_target, resize_edge_at, skip_target};
 
-    use crate::config::SortOrder;
+    use crate::config::{Sort, SortOrder};
     use crate::folder::Folder;
     use gtk4::gdk::SurfaceEdge;
 
@@ -2052,7 +2096,14 @@ mod tests {
         for f in files {
             std::fs::File::create(dir.join(f)).unwrap();
         }
-        let folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        let folder = Folder::scan(
+            &dir,
+            Sort {
+                order: SortOrder::Name,
+                reverse: false,
+            },
+        )
+        .unwrap();
         (dir, folder)
     }
 
@@ -2161,11 +2212,16 @@ mod tests {
                 "default bind `{key}` names `{action}`, which is not a known action"
             );
         }
-        // FR-6.5: an action nothing can reach from the keyboard is one
-        // the cheat sheet would list with no keys beside it.
+        // Reached through the contextual arrow actions rather than a key
+        // of their own, and still bindable by name (FR-8.2). Anything
+        // else without a binding is unreachable by keyboard (FR-6.5) and
+        // would show up in the cheat sheet with a blank key column.
+        const REACHED_CONTEXTUALLY: &[&str] = &["volume-up", "volume-down"];
+
         for (action, description) in ACTIONS {
             assert!(
-                DEFAULT_BINDS.iter().any(|(_, name)| name == action),
+                DEFAULT_BINDS.iter().any(|(_, name)| name == action)
+                    || REACHED_CONTEXTUALLY.contains(action),
                 "action `{action}` has no default binding"
             );
             assert!(

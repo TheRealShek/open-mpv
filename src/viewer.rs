@@ -434,22 +434,47 @@ impl ImageView {
         self.imp().state.borrow().rotation
     }
 
-    pub fn is_pannable(&self) -> bool {
+    /// On-screen size of the image in logical pixels, after zoom and
+    /// rotation. `None` when there is nothing to measure.
+    fn displayed_size(&self) -> Option<(f64, f64)> {
         let st = self.imp().state.borrow();
-        let Some(p) = st.paintable.as_ref() else {
-            return false;
-        };
+        let p = st.paintable.as_ref()?;
+        let (tw, th) = image_dims(&st, p);
+        if tw <= 0.0 || th <= 0.0 {
+            return None;
+        }
         let (w, h) = (self.width() as f64, self.height() as f64);
         let scale = self.surface_scale();
-        let (tw, th) = image_dims(&st, p);
         let z = effective_zoom(&st, w, h, scale, tw, th);
         let (dw, dh) = (tw * z / scale, th * z / scale);
-        let (rw, rh) = if st.rotation % 2 == 1 {
+        Some(if st.rotation % 2 == 1 {
             (dh, dw)
         } else {
             (dw, dh)
+        })
+    }
+
+    pub fn is_pannable(&self) -> bool {
+        let Some((rw, rh)) = self.displayed_size() else {
+            return false;
         };
-        rw > w + 0.5 || rh > h + 0.5
+        rw > self.width() as f64 + 0.5 || rh > self.height() as f64 + 0.5
+    }
+
+    /// Shift the view by a step in logical pixels (FR-4.3). Unlike the
+    /// drag path this clamps as it writes: an arrow key held against an
+    /// edge would otherwise bank offset the draw silently discards, and
+    /// the first press back would spend it instead of moving.
+    pub fn pan_by(&self, dx: f64, dy: f64) {
+        let Some((rw, rh)) = self.displayed_size() else {
+            return;
+        };
+        let (w, h) = (self.width() as f64, self.height() as f64);
+        {
+            let mut st = self.state();
+            st.offset = clamp_offset((st.offset.0 + dx, st.offset.1 + dy), rw, rh, w, h);
+        }
+        self.queue_draw();
     }
 
     pub fn zoom_fit(&self) {

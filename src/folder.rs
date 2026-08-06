@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::config::{SortOrder, is_supported};
+use crate::config::{Sort, SortOrder, is_supported};
 
 #[derive(Debug, Clone)]
 struct Entry {
@@ -18,12 +18,12 @@ struct Entry {
 #[derive(Debug)]
 pub struct Folder {
     entries: Vec<Entry>,
-    sort: SortOrder,
+    sort: Sort,
 }
 
 impl Folder {
     /// Scan `dir` for supported images. Unreadable entries are skipped.
-    pub fn scan(dir: &Path, sort: SortOrder) -> std::io::Result<Folder> {
+    pub fn scan(dir: &Path, sort: Sort) -> std::io::Result<Folder> {
         let mut entries = Vec::new();
         for res in std::fs::read_dir(dir)? {
             let Ok(de) = res else { continue };
@@ -109,8 +109,13 @@ impl Folder {
     }
 }
 
-fn folder_cmp(a: &Entry, b: &Entry, sort: SortOrder) -> Ordering {
-    match sort {
+fn folder_cmp(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
+    let ord = folder_cmp_forward(a, b, sort.order);
+    if sort.reverse { ord.reverse() } else { ord }
+}
+
+fn folder_cmp_forward(a: &Entry, b: &Entry, order: SortOrder) -> Ordering {
+    match order {
         SortOrder::Name => natural_cmp(
             &a.path.file_name().unwrap_or_default().to_string_lossy(),
             &b.path.file_name().unwrap_or_default().to_string_lossy(),
@@ -179,6 +184,13 @@ mod tests {
     use super::*;
     use std::fs::File;
 
+    fn by_name() -> Sort {
+        Sort {
+            order: SortOrder::Name,
+            reverse: false,
+        }
+    }
+
     fn tempdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("open-mpv-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -205,7 +217,7 @@ mod tests {
         for name in ["b10.jpg", "b2.jpg", "a.png", "notes.txt", "z.gif"] {
             File::create(dir.join(name)).unwrap();
         }
-        let folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        let folder = Folder::scan(&dir, by_name()).unwrap();
         let names: Vec<_> = (0..folder.len())
             .map(|i| {
                 folder
@@ -223,12 +235,45 @@ mod tests {
     }
 
     #[test]
+    fn reverse_flips_the_order_and_insertion_follows_it() {
+        let dir = tempdir("reverse");
+        for name in ["a.jpg", "b2.jpg", "b10.jpg"] {
+            File::create(dir.join(name)).unwrap();
+        }
+        let sort = Sort {
+            order: SortOrder::Name,
+            reverse: true,
+        };
+        let mut folder = Folder::scan(&dir, sort).unwrap();
+        let names = |f: &Folder| -> Vec<String> {
+            (0..f.len())
+                .map(|i| {
+                    f.get(i)
+                        .unwrap()
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        };
+        // Natural order reversed: b10 before b2, not lexical.
+        assert_eq!(names(&folder), ["b10.jpg", "b2.jpg", "a.jpg"]);
+        // A file appearing later lands in the reversed position too.
+        let c = dir.join("c.jpg");
+        File::create(&c).unwrap();
+        assert_eq!(folder.insert(&c), Some(0));
+        assert_eq!(names(&folder), ["c.jpg", "b10.jpg", "b2.jpg", "a.jpg"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn navigation_and_wrap() {
         let dir = tempdir("nav");
         for name in ["1.jpg", "2.jpg", "3.jpg"] {
             File::create(dir.join(name)).unwrap();
         }
-        let folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        let folder = Folder::scan(&dir, by_name()).unwrap();
         assert_eq!(folder.next(0, false), Some(1));
         assert_eq!(folder.next(2, false), None); // no wrap at end (FR-3.3)
         assert_eq!(folder.next(2, true), Some(0));
@@ -243,7 +288,7 @@ mod tests {
         for name in ["a.jpg", "c.jpg"] {
             File::create(dir.join(name)).unwrap();
         }
-        let mut folder = Folder::scan(&dir, SortOrder::Name).unwrap();
+        let mut folder = Folder::scan(&dir, by_name()).unwrap();
         let b = dir.join("b.jpg");
         File::create(&b).unwrap();
         assert_eq!(folder.insert(&b), Some(1)); // sorted position
