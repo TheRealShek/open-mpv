@@ -156,6 +156,11 @@ pub struct App {
     /// True while the pointer rests on the overlay controls, which must
     /// not fade out from under it (FR-6.2).
     pointer_on_chrome: Cell<bool>,
+    /// Last known pointer position, so the cursor can be re-decided when
+    /// the overlay fades on a timer rather than on movement.
+    pointer: Cell<(f64, f64)>,
+    /// Session idle-inhibit cookie; 0 when nothing is held.
+    inhibit_cookie: Cell<u32>,
     /// True once the window has been sized from the media on screen. A
     /// video presents before its dimensions are known, so its sizing
     /// arrives late and must still be applied once (FR-6.6).
@@ -332,6 +337,8 @@ impl App {
             transport_tick: RefCell::new(None),
             scrubbing: Cell::new(false),
             pointer_on_chrome: Cell::new(false),
+            pointer: Cell::new((0.0, 0.0)),
+            inhibit_cookie: Cell::new(0),
             sized_from_media: Cell::new(false),
             indicator,
             toast_revealer,
@@ -639,6 +646,7 @@ impl App {
             return;
         }
         crate::applog!("play: {}", path.display());
+        self.set_idle_inhibited(true);
         self.update_save_enabled();
         self.transport.set_visible(true);
         self.fit_seek_bar();
@@ -659,6 +667,7 @@ impl App {
         if let Some(p) = self.player.borrow().as_ref() {
             p.stop();
         }
+        self.set_idle_inhibited(false);
         self.transport.set_visible(false);
         // Hiding the bar mid-drag means no button release reaches it.
         self.scrubbing.set(false);
@@ -736,11 +745,48 @@ impl App {
 
     /// Show the grab as a resize cursor, so the border can be found
     /// without knowing it is there.
-    fn update_resize_cursor(&self, x: f64, y: f64) {
-        let name = self.resize_edge(x, y).map(edge_cursor_name);
+    ///
+    /// The single owner of the cursor: a resize arrow near an edge, hidden
+    /// once the overlay has faded (mpv-style, `hide-cursor`), the theme
+    /// default otherwise. Routing both through here keeps the resize
+    /// border and the idle-hide from overwriting each other.
+    fn update_cursor(&self) {
+        let (x, y) = self.pointer.get();
+        let name = cursor_name(
+            self.resize_edge(x, y),
+            self.chrome_visible(),
+            self.cfg.hide_cursor,
+        );
         let current = self.win.cursor().and_then(|c| c.name());
         if current.as_deref() != name {
             self.win.set_cursor_from_name(name);
+        }
+    }
+
+    /// Hold off the session's idle blanker while a video actually plays.
+    /// Nothing else stops GNOME from blanking the screen mid-film; the
+    /// inhibit is dropped on pause and on leaving the video so a paused
+    /// or image-only session never holds it (NFR-2.2).
+    fn set_idle_inhibited(&self, inhibited: bool) {
+        let cookie = self.inhibit_cookie.get();
+        if inhibited == (cookie != 0) {
+            return;
+        }
+        let Some(gtk_app) = self.win.application() else {
+            return;
+        };
+        if inhibited {
+            let cookie = gtk_app.inhibit(
+                Some(&self.win),
+                gtk::ApplicationInhibitFlags::IDLE,
+                Some("playing video"),
+            );
+            self.inhibit_cookie.set(cookie);
+            crate::applog!("idle inhibit: taken (cookie {cookie})");
+        } else {
+            gtk_app.uninhibit(cookie);
+            self.inhibit_cookie.set(0);
+            crate::applog!("idle inhibit: released");
         }
     }
 
@@ -1293,6 +1339,9 @@ impl App {
             w.add_css_class("invisible");
             w.set_can_target(false);
         }
+        // The pointer goes with them; the chrome had to be marked hidden
+        // first, since that is what update_cursor reads.
+        self.update_cursor();
         // A hidden overlay must not keep polling the pipeline.
         self.stop_transport_tick();
     }
@@ -1400,9 +1449,16 @@ impl App {
                 if a.is_video_showing() {
                     let mut playing = None;
                     a.with_video(|p| playing = Some(p.toggle_pause()));
+                    // A paused video must not keep the screen awake.
                     match playing {
-                        Some(true) => a.flash("Play"),
-                        Some(false) => a.flash("Paused"),
+                        Some(true) => {
+                            a.set_idle_inhibited(true);
+                            a.flash("Play");
+                        }
+                        Some(false) => {
+                            a.set_idle_inhibited(false);
+                            a.flash("Paused");
+                        }
                         None => {}
                     }
                 } else {
@@ -1543,16 +1599,19 @@ impl App {
             #[strong(rename_to = app)]
             self,
             move |_, x, y| {
+                app.pointer.set((x, y));
                 app.show_chrome();
-                app.update_resize_cursor(x, y);
+                app.update_cursor();
             }
         ));
         motion.connect_leave(clone!(
             #[strong(rename_to = app)]
             self,
             move |_| {
-                app.win.set_cursor_from_name(None);
+                // Order matters: hide_chrome re-decides the cursor from
+                // the last known position, so the reset goes after it.
                 app.hide_chrome();
+                app.win.set_cursor_from_name(None);
             }
         ));
         self.win.add_controller(motion);
@@ -1801,6 +1860,23 @@ fn resize_edge_at(x: f64, y: f64, w: f64, h: f64) -> Option<gdk::SurfaceEdge> {
     })
 }
 
+/// The cursor to show: the resize arrow wins wherever there is an edge to
+/// grab, so the border stays discoverable even after the overlay fades;
+/// otherwise the pointer goes away with the controls (mpv-style).
+fn cursor_name(
+    edge: Option<gdk::SurfaceEdge>,
+    chrome_visible: bool,
+    hide_cursor: bool,
+) -> Option<&'static str> {
+    match edge {
+        Some(edge) => Some(edge_cursor_name(edge)),
+        // Only once the controls are gone: a pointer that vanishes while
+        // there are still buttons to aim at is just lost.
+        None if hide_cursor && !chrome_visible => Some("none"),
+        None => None,
+    }
+}
+
 fn edge_cursor_name(edge: gdk::SurfaceEdge) -> &'static str {
     match edge {
         gdk::SurfaceEdge::NorthWest => "nw-resize",
@@ -1936,6 +2012,27 @@ mod tests {
         // Just inside the border is still the image, not a resize grab.
         assert_eq!(at(9.0, 150.0), None);
         assert_eq!(at(200.0, 291.0), None);
+    }
+
+    #[test]
+    fn the_pointer_hides_with_the_overlay_but_never_over_a_resize_edge() {
+        use super::cursor_name;
+        // Overlay up: ordinary pointer.
+        assert_eq!(cursor_name(None, true, true), None);
+        // Overlay faded: gone, mpv-style.
+        assert_eq!(cursor_name(None, false, true), Some("none"));
+        // Opted out via config.
+        assert_eq!(cursor_name(None, false, false), None);
+        // An edge always wins — hiding the pointer on the resize border
+        // would make a frameless window impossible to grab.
+        assert_eq!(
+            cursor_name(Some(SurfaceEdge::SouthEast), false, true),
+            Some("se-resize")
+        );
+        assert_eq!(
+            cursor_name(Some(SurfaceEdge::North), true, true),
+            Some("n-resize")
+        );
     }
 
     #[test]

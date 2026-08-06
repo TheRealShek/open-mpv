@@ -28,6 +28,9 @@ pub struct Config {
     pub fit: FitMode,
     /// Seconds of mouse inactivity before overlay controls fade out.
     pub overlay_timeout: f64,
+    /// Hide the pointer along with the overlay controls, the way mpv
+    /// does. Any pointer movement brings both back.
+    pub hide_cursor: bool,
     /// Megabytes of decoded frames the cache may hold *beyond* the
     /// image on screen (NFR-2.1). 0 disables neighbor preloading's
     /// memory entirely.
@@ -44,6 +47,7 @@ impl Default for Config {
             wrap: false,
             fit: FitMode::Fit,
             overlay_timeout: 2.0,
+            hide_cursor: true,
             cache_budget_mb: 256,
             binds: BTreeMap::new(),
         }
@@ -102,6 +106,10 @@ impl Config {
                 "overlay-timeout" => match value.parse::<f64>() {
                     Ok(t) if t >= 0.0 => cfg.overlay_timeout = t,
                     _ => warn(origin, lineno, raw, "overlay-timeout must be seconds"),
+                },
+                "hide-cursor" => match parse_bool(value) {
+                    Some(b) => cfg.hide_cursor = b,
+                    None => warn(origin, lineno, raw, "hide-cursor must be yes|no"),
                 },
                 "cache-budget-mb" => match value.parse::<u32>() {
                     Ok(mb) => cfg.cache_budget_mb = mb,
