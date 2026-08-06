@@ -100,6 +100,12 @@ Pair it with `OPEN_MPV_LOG=1` and assert against the trace. Prefer extracting a 
 
 ## State
 
-Last verified 2026-08-06: `cargo test` 39 pass, clippy and fmt clean, release build 4.7 MB, cold start ~110 ms. Video confirmed live on the iGPU (`vah264dec`), memory bounded across 32 video↔image cycles, lazy `gst::init` holding.
+Last verified 2026-08-06: `cargo test` 41 pass, clippy and fmt clean, release build 4.7 MB, cold start ~110 ms, folder scan 3.7 ms for 5001 entries.
 
-Known gap: `preload_neighbors` dedupes only against the cache, not against decodes already in flight, so the same image can occasionally decode twice. Harmless, unfixed.
+Resource audit on this machine — empty window 163 MB RSS / 54 MB PSS, 12 MP photo 203/93, video 251/129. No leak of memory, file descriptors, threads or loader processes across 200 navigations, 30 video↔image cycles, or a sustained playback soak: the resident set settles and descriptors and child processes come back down. Video decodes on the Intel iGPU through VA-API while EGL renders on Mesa. Paused video costs 0.1 % CPU. Lazy `gst::init` verified exact — an image-only session loads **zero** GStreamer plugins.
+
+**Measure with PSS, not RSS.** RSS charges every shared GTK/Mesa page to this process and is ~163 MB before a single pixel is decoded, which is why NFR-2.1 is written in PSS. An RSS budget below that is unmeetable regardless of what this code does.
+
+`gst-libav` is absent here, so video leans entirely on VA-API: a clip the iGPU cannot decode has no software fallback and fails as "missing plugin". That is a property of the machine, not a bug to chase in the app.
+
+Known gap: `preload_neighbors` dedupes against the cache but not against decodes already in flight, so a narrow timing window can decode one image twice. Measured at 202 decodes against 200 cache hits over 200 steady-state navigations — i.e. it essentially does not fire in practice. Left alone deliberately; fixing it means moving the apply guard off the generation counter, which is not worth the risk for this.

@@ -199,9 +199,18 @@ product; there is no version staging.
 
 ### NFR-2 — Footprint
 
-- **NFR-2.1** Idle memory (one 12 MP photo shown) ≤ 150 MB RSS; memory
-  is bounded while flipping through arbitrarily large folders (decoded
-  neighbors capped, not accumulated).
+- **NFR-2.1 Idle memory:** one 12 MP photo shown, ≤ 100 MB **PSS**.
+  Measured in PSS rather than RSS because RSS counts every shared page
+  of GTK4, Mesa and the GL renderer against us: an empty window with no
+  image loaded is already ~163 MB RSS but only ~54 MB PSS, so an RSS
+  budget below that is unmeetable no matter what this code does. On the
+  target machine a 12 MP photo sits at ~93 MB PSS / ~203 MB RSS.
+- **NFR-2.1a** Memory is bounded while flipping through arbitrarily
+  large folders: decoded neighbours are capped, not accumulated, and
+  the resident set settles rather than climbing. Verified over 200
+  navigations, 30 video↔image cycles and a sustained playback soak —
+  file descriptors, threads and loader processes must come back down
+  too, not just bytes.
 - **NFR-2.2** No background daemon, no network access, no telemetry —
   the process exists only while a window is open.
 - **NFR-2.3** Installed size (binary + assets, excluding shared system
