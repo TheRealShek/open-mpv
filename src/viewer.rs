@@ -735,8 +735,10 @@ mod tests {
 
     #[test]
     fn fit_accounts_for_rotation_and_scale_factor() {
-        let mut st = State::default();
-        st.rotation = 1;
+        let mut st = State {
+            rotation: 1,
+            ..Default::default()
+        };
         // 800x200 texture rotated 90° behaves as 200x800.
         let z = effective_zoom(&st, 400.0, 400.0, 1.0, 800.0, 200.0);
         assert!((z - 0.5).abs() < 1e-9);
