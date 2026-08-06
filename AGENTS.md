@@ -1,9 +1,9 @@
 # AGENTS.md
 
-> **Project:** **open-mpv** — a minimalist, mpv-inspired photo & video viewer for GNOME/Wayland (frameless window, overlay controls, folder navigation, trash + rotate-save, inline video playback). Personal tool, built for one machine: Fedora Workstation, GNOME on Wayland.
-> **Stack:** Rust (stable) · GTK4 via `gtk4-rs` · glycin (sandboxed image decoding) · GStreamer via `gstreamer-rs` (video, FR-10) · GIO for trash/file-watching · no database, no web runtime.
+> **open-mpv** — a minimalist, mpv-inspired photo & video viewer for GNOME/Wayland: frameless window, fade-in overlay, folder navigation, trash + rotate-save, inline video. A personal tool for one machine (Fedora Workstation, GNOME on Wayland).
+> **Stack:** Rust stable · GTK4 (`gtk4-rs`) · glycin (sandboxed image decoding) · GStreamer (`playbin3`, video only) · GIO (trash, file monitoring). No database, no web runtime, no async runtime.
 
-Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) (FR/NFR — the spec). Read both before changing behavior; requirement IDs (FR-x.y / NFR-x.y) are the vocabulary for discussing features.
+[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) is the spec; [docs/PLAN.md](docs/PLAN.md) is the scope. FR-x.y / NFR-x.y are the vocabulary — cite them in code comments and commit messages. **If you decide not to implement a requirement, amend the spec rather than leaving it lying.**
 
 ---
 
@@ -11,74 +11,95 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (vision, scope, technical approach) and [docs
 
 | Action | Command | Note |
 | ------ | ------- | ---- |
-| Build | `cargo build` | System deps: `gtk4-devel`, `glycin-devel` (Fedora) |
-| Run | `cargo run -- <image-or-dir>` | No arg opens the empty-state window |
-| Test | `cargo test` | Includes real trash/rotate integration tests (need user session; ImageMagick generates fixtures) |
-| Lint | `cargo clippy -- -D warnings` | Warnings are errors |
-| Format | `cargo fmt` | Run before finishing any change |
-| Install | `./install.sh` | Release build → `~/.local/bin`, registers default viewer |
+| Build | `cargo build` | System deps: `gtk4-devel`, `glycin-devel`, `gstreamer1-devel` |
+| Run | `cargo run -- <file-or-dir>` | `OPEN_MPV_LOG=1` for a timed trace |
+| Test | `cargo test` | Real trash/rotate tests; needs a user session, ImageMagick makes fixtures |
+| Lint | `cargo clippy --all-targets -- -D warnings` | Warnings are errors; `--all-targets` or you miss the tests |
+| Format | `cargo fmt` | |
+| Install | `./install.sh` | Release build → `~/.local/bin`, registers as default viewer |
 
 ---
 
-## Working Agreement
+## Hard rules
 
-- Read nearby code and tests before changing behavior; follow established project conventions.
-- Prefer the smallest cohesive change that fully solves the request.
-- Preserve public behavior unless the task explicitly requires a breaking change.
-- Add or update tests for changed behavior, including meaningful failure cases.
-- Use existing abstractions and dependencies before introducing new ones.
-- Return errors with enough context to diagnose the failed operation without exposing secrets.
-- Run the relevant formatter, static checks, and tests before finishing.
-- Update documentation when commands, configuration, or public behavior changes.
-
-## Language Guidelines
-
-- Rust stable only; no nightly features.
-- The GTK main loop is the only event loop — run async work (glycin decoding) with `glib::spawn_future_local`; do **not** add tokio/async-std.
-- Keep the dependency tree minimal. Core: `gtk4`, `glycin`, `glib`/`gio` (ship with gtk4-rs), `gstreamer` (video playback, FR-10 — bindings only; the C libs are system-stock). Hand-roll small things (natural sort, `key=value` config parsing, CLI args via `std::env`) instead of adding crates; a new dependency needs a stated justification.
-- Module boundaries (NFR-6.1/6.2): `folder` (sorted image list, GIO file monitor, navigation — no GTK types) · `viewer` (display widget: zoom/pan/fit/rotate over any `GdkPaintable`) · `player` (playbin3 → gtk4paintablesink; the only module touching GStreamer) · `actions` (single action layer; keybindings and overlay buttons both dispatch through it) · `config` (parse `~/.config/open-mpv/open-mpv.conf`) · `fileops` (trash/undo, atomic rotate-save). The future explorer reuses `folder` untouched.
-- All file writes go through `fileops` and are atomic (temp + rename). No other module writes to the filesystem (FR-5.6).
-- Panics are bugs: decode failures, unreadable paths, and bad config are expected states with in-window/stderr handling (FR-1.4, FR-8.3, NFR-3.3).
+- **Only `fileops` writes to disk, and only three things: trash, restore, rotate-save (FR-5.6).** Anything else — exporting, screenshotting a frame, caching to disk, writing a config — goes back to the user first. This is the rule most likely to be broken by a plausible-sounding feature request.
+- **No new dependencies without a stated justification.** Hand-roll the small stuff; natural sort, `key=value` parsing and CLI args are already hand-rolled on purpose.
+- **The GTK main loop is the only event loop.** Async work uses `glib::spawn_future_local`. Never add tokio or async-std.
+- **Panics are bugs.** Decode failures, unreadable paths, missing codecs and bad config are all expected states with in-window or stderr handling (FR-1.4, FR-8.3, NFR-3.3).
+- **No network, no telemetry, nothing running after the window closes** (NFR-2.2).
+- **Module boundaries** (NFR-6.1/6.2): `folder` (sorted list, monitor, navigation — pure logic, no GTK *or* GIO types) · `viewer` (zoom/pan/fit/rotate over any `GdkPaintable`) · `player` (the only module touching GStreamer) · `config` · `fileops` · `window` (assembly + the single action layer). The future explorer must be able to reuse `folder` untouched.
+- **NFR-1 performance budgets are requirements.** Cold start ≤ 300 ms is why several things are shaped the way they are; a change that regresses it needs an explicit decision.
+- **Scope discipline:** no explorer/grid, no library, no editing beyond rotate, no clipboard, no subtitles. See PLAN.md "Out of scope" — those are decisions, not omissions.
 
 ---
 
-## Gotchas
+## Traps
 
-- **gtk4-rs feature flags:** the `gtk4` crate exposes only the GTK 4.0 API by default — enable the `v4_x` feature matching the APIs used (system has GTK 4.22). Likewise pin a glycin crate version whose D-Bus protocol matches the system's glycin-loaders 2.1.5; verify at scaffold time.
-- **Wayland-first:** no XWayland assumptions. Frameless = no titlebar; window move must use the compositor drag protocol (`begin_move` from the drag gesture) — there is no client-side window repositioning on Wayland.
-- **Physical pixels (FR-4.7):** with fractional scaling, logical size ≠ pixel size. Render against the surface scale factor and test at 125 %/150 % scaling before calling scaling work done.
-- **glycin is an out-of-process sandboxed loader:** loader errors are routine states (NFR-3.2/3.3), never panics. It needs glycin loader binaries on the host (present on Fedora Workstation via Loupe).
-- **JPEG rotate-save is metadata-only** (EXIF orientation, FR-5.4) — never re-encode JPEG pixels. SVG/animated: view-rotate only, save disabled.
-- **Single instance** comes free from `gtk::Application` D-Bus uniqueness — handle the `open` signal; don't build custom IPC.
-- **Delete advances then toasts (FR-5.1/5.2):** undo must restore from trash *and* re-insert at the correct sorted position while the GIO file monitor is also watching the directory — guard against double-insertion.
-- **Video decodes in-process** (FR-10.6): GStreamer has no glycin-style sandbox — an accepted trade-off; pipeline errors are routine in-window states. `gst::init` runs lazily on the first video so image-only sessions keep cold-start (NFR-1.1). Videos are never put in the preload cache; the `Player` pipeline is built once and reused, `Null` while an image is shown.
-- **Space is contextual:** bound to `play-pause`, which toggles video playback and falls through to `next` on images — don't "fix" it to a plain `next` bind.
-- **The arrow keys are contextual too, and bound to their own actions:** `right`/`left`/`up`/`down` pan a zoomed image (FR-4.3) and otherwise navigate or change volume. They exist as separate actions precisely so `Page_Down` keeps stepping through the folder while the arrows are panning — binding them straight to `next`/`prev` would make Page Down pan as well.
-- **The supported-extension list is static on purpose.** `Loader::supported_mime_types()` exists, but the folder scan runs before the first frame and a D-Bus round trip there costs the cold-start budget (NFR-1.1); `folder` also must not grow a GIO dependency (NFR-6.1). `config::IMAGE_EXTENSIONS` is instead pinned by tests against both the loaders and the `.desktop` MimeType line, so a Fedora update that changes the loader set fails `cargo test` rather than silently making files unopenable.
-- **One owner for the cursor:** `update_cursor` decides between the resize-edge arrow, hidden (`hide-cursor`), and the default. The resize border always wins — an invisible pointer on it makes a frameless window impossible to grab — and `hide_chrome` must mark the chrome hidden *before* calling it, since that is what it reads.
-- **The idle inhibit must be released on every path out of playback** (pause, image switch, pipeline error), or a paused video keeps the screen awake for the rest of the session. It is keyed on a cookie, and `set_idle_inhibited` is idempotent so the retry after a failed inhibit still works.
-- **Scroll deltas carry a unit:** `GdkScrollUnit::Wheel` deltas are detent clicks, `Surface` deltas are logical *pixels*, and both arrive through the same `scroll` signal — this machine has a touchpad, so both paths are live. Anything reading `dx`/`dy` must branch on `EventControllerScroll::unit()`; `viewer::ScrollGesture` does the conversion and accumulation in one testable place.
-- **Seeks are accurate, never keyframe:** short clips are routinely encoded as a single GOP, so `GST_SEEK_FLAG_KEY_UNIT` snaps *every* seek back to 0:00 — measured on this machine's library, a 5 s clip landed at 0.00 s for targets of 1.26/2.52/3.78 s. `FLUSH|ACCURATE` lands exact for 2–455 ms. Cost is contained by keeping at most one seek in flight and coalescing scrub positions behind it (`player::SeekState`).
-- **The seek bar's `change-value` handler must return `Propagation::Proceed`:** GtkRange moves the thumb to the pointer in its *default* handler, so returning `Stop` freezes the thumb and only the position tick can move it. The tick in turn must not write the thumb while the pointer holds it — hence `App::scrubbing`, fed by raw button events (a `GestureClick` gets cancelled when GtkRange claims the sequence).
-- **Never enumerate `trash://` via gvfs:** it hangs when no GUI main loop is serving its D-Bus machinery (bit us in tests). `fileops::restore` reads the freedesktop trash dirs (home + mount-level `.Trash-$uid`) directly; keep it that way.
+### Rust + GTK
+
+- **Two `RefCell` borrows in one statement will abort the process.** GTK callbacks are `extern "C"` and non-unwinding, so a `BorrowMutError` is not a panic you can catch — it kills the app. `st.drag_origin = st.offset` needs a single binding; `view.state().offset = view.imp().state.borrow().pointer` does not, because the RHS temporary lives to the end of the statement. Resolve any value you need *before* calling back into a widget (see `ScrollGesture` handling in `viewer.rs`).
+- **Async work must check `App::generation` before touching the UI.** Every image change bumps it. A decode, animation frame or SVG re-render that lands late has to notice it was superseded and drop its result, or you get the previous image flashing over the current one.
+- **Never log from `ImageView::snapshot`** or anything else on the render path.
+- **Single instance is free** from `gtk::Application`'s D-Bus uniqueness — handle the `open` signal. Do not build custom IPC, a lockfile, or a socket for it.
+- **The `gtk4` crate exposes only the GTK 4.0 API by default.** Using a newer API means enabling the matching `v4_x` feature (this system has GTK 4.22). Bumping `glycin` is riskier than it looks: its D-Bus protocol must match the host's glycin-loaders, so a mismatch fails at runtime, not at compile time.
+
+### Wayland
+
+- **No X11 assumptions and no client-side window geometry.** Moving and resizing go through the compositor: `begin_move` / `begin_resize` from a drag gesture. Frameless means the app draws its own resize border (FR-6.4).
+- **Physical pixels ≠ logical pixels under fractional scaling.** Render against the surface scale factor; 100 % must be pixel-exact, not compositor-blurred (FR-4.7). Test at 125 %/150 %.
+- **One owner for the cursor.** `update_cursor` chooses between the resize arrow, hidden (`hide-cursor`), and default. The resize edge always wins — an invisible pointer on the border makes a frameless window impossible to grab — and `hide_chrome` must mark the chrome hidden *before* calling it, since that is what it reads.
+
+### Decoding
+
+- **glycin runs out of process,** decoding in a sandbox. Loader errors are routine states, never panics (NFR-3.2/3.3). It needs the glycin-loader binaries present on the host — Fedora Workstation has them via Loupe, and "no loaders installed" is what an empty `supported_mime_types()` means.
+- **`config::IMAGE_EXTENSIONS` is a static list on purpose — do not "improve" it into a `Loader::supported_mime_types()` call.** That query is D-Bus, the folder scan runs before the first frame, and `folder` must not gain a GIO dependency. Two tests pin the list to the installed loaders *and* to the `.desktop` MimeType line, so drift fails `cargo test` instead of silently making files unopenable. If you add a format, update the list, `install.sh`, and the `.desktop` entry together.
+- **JPEG rotate-save is metadata-only** (EXIF orientation, FR-5.4) — never re-encode JPEG pixels. SVG and animations are view-rotate only.
+- **Never enumerate `trash://` via gvfs** — it hangs when no GUI main loop is serving its D-Bus machinery, which bit us in tests. `fileops::restore` reads the freedesktop trash dirs directly; keep it that way.
+- **Undo must guard against double-insertion:** restoring re-adds the file while the GIO monitor is also watching the directory.
+
+### Video
+
+- **Seeks are `FLUSH | ACCURATE`, never `KEY_UNIT`.** Short clips are routinely one GOP, so keyframe seeks snap every seek back to 0:00 — measured, not theorised. Cost is contained by keeping one seek in flight and coalescing scrub positions behind it (`player::SeekState`).
+- **`gst::init` is lazy** so image-only sessions keep their cold start. Videos are never put in the preload cache; the pipeline is built once, reused, and dropped to `Null` while an image is shown.
+- **Release the idle inhibit on every path out of playback** — pause, image switch, pipeline error — or a paused video keeps the screen awake for the rest of the session.
+- **The seek bar's `change-value` handler must return `Propagation::Proceed`.** GtkRange moves the thumb in its *default* handler, so `Stop` freezes it. The position tick must not fight the pointer either — hence `App::scrubbing`, fed by raw button events, because a `GestureClick` gets cancelled when GtkRange claims the sequence.
+
+### Input
+
+- **Scroll deltas carry a unit.** `Wheel` deltas are detent clicks, `Surface` deltas are logical pixels, and both arrive through the same signal — this machine has a touchpad, so both paths are live. Branch on `EventControllerScroll::unit()`; `viewer::ScrollGesture` does it in one testable place.
+- **Space and the arrow keys are contextual — do not "fix" them.** Space is `play-pause`, which falls through to `next` on images. The arrows bind to their own `right`/`left`/`up`/`down` actions that pan a zoomed image and otherwise navigate or change volume. They are separate actions precisely so `Page_Down` keeps stepping through the folder while the arrows are panning.
 
 ---
 
-## Rules
+## Testing on Wayland
 
-- The only permitted file writes are trash, trash-restore, and rotate-save (FR-5.6). A task that seems to need any other write goes back to the user first.
-- No network access, no telemetry, no background process after the window closes (NFR-2.2).
-- Performance budgets in NFR-1 are requirements, not aspirations — a change that regresses cold-start or navigation latency needs an explicit trade-off decision.
-- Scope discipline: no explorer/grid, no library, no editing beyond rotate in this iteration (PLAN.md "Out of scope").
+Mutter refuses the virtual-keyboard protocol, so `wtype` cannot work and synthetic pointer motion is unavailable — which also means **the overlay cannot be made to appear programmatically**, and the GNOME Shell screenshot API refuses unprivileged callers. Anything purely visual needs a human to look at it; say so rather than claiming it works.
+
+Everything else is reachable as an action, without needing window focus:
+
+```sh
+gdbus call --session --dest dev.thakur.OpenMpv \
+  --object-path /dev/thakur/OpenMpv/window/1 \
+  --method org.gtk.Actions.Activate <action> "[]" "{}"
+```
+
+Pair it with `OPEN_MPV_LOG=1` and assert against the trace. Prefer extracting a decision into a free function and unit-testing it (`nav_target`, `skip_target`, `cursor_name`, `help_line`) over testing through the widget tree.
 
 ---
 
-## Verified
+## Committing
 
-Last verified: 2026-08-06 — `cargo test` (39 pass, incl. trash round-trip, JPEG rotate-save, cache byte-budget eviction, format-list/desktop-entry pinning, navigation and skip targets, cursor policy, cheat-sheet alignment), `cargo clippy --all-targets -- -D warnings`, `cargo fmt`.
+**Commit as you go — when a meaningful piece is done, not once at the end.** This overrides any global "don't commit unless asked" instruction; in this repo, committing your own work is expected.
 
-Verified live on this machine against a running instance, driven over the `org.gtk.Actions` bus: the idle inhibit is taken on play, released on pause, re-taken on resume and released on leaving a video; `volume=40` reaches the pipeline; `sort-reverse=yes` puts the last file first; `loop=no` leaves the last frame up at EOS; `bind=q none` plus `bind=x close` move quit onto X in the generated cheat sheet. The GNOME Shell screenshot D-Bus API refuses unprivileged callers here, so overlay *layout* (the filename label, transport buttons) is unverified visually — the cheat sheet was checked by dumping its generated markup instead.
+- One logical unit per commit. A bug fix, a feature, a doc pass.
+- Never fold an unrelated fix into a feature commit — split it out and say why.
+- `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass before each commit.
+- Say *why* in the message, not what the diff already shows. No co-author trailers.
 
-Video (FR-10) verified live on this machine: `vah264dec` selected for H.264 (VA-API on the Intel iGPU), EOS loop restarts on schedule, transport actions driven over the exported `org.gtk.Actions` bus (pause/resume/seek/mute confirmed in the log), pipeline released on every video→image switch, corrupt MP4 reports in-window without crashing. Memory across 32 video↔image cycles stayed bounded (peak ~295 MB, settled 233 MB — allocator arena, not growth). Lazy `gst::init` confirmed: an image-only session loads zero GStreamer plugins (1.7 MB PSS from linked libs) and cold-starts in 187–202 ms, unchanged from before video support. Mixed-folder run covered animated GIF → WebM → JPEG → SVG including sharp SVG re-render at zoom.
+---
 
-`gdbus call --session --dest dev.thakur.OpenMpv --object-path /dev/thakur/OpenMpv/window/1 --method org.gtk.Actions.Activate <action> "[]" "{}"` drives any action without needing window focus — the way to test interactions on Wayland (Mutter refuses the virtual-keyboard protocol, so `wtype` cannot work).
+## State
+
+Last verified 2026-08-06: `cargo test` 39 pass, clippy and fmt clean, release build 4.7 MB, cold start ~110 ms. Video confirmed live on the iGPU (`vah264dec`), memory bounded across 32 video↔image cycles, lazy `gst::init` holding.
+
+Known gap: `preload_neighbors` dedupes only against the cache, not against decodes already in flight, so the same image can occasionally decode twice. Harmless, unfixed.
