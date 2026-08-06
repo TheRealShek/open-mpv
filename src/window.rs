@@ -62,31 +62,36 @@ const DEFAULT_BINDS: &[(&str, &str)] = &[
     ("Escape", "escape"),
 ];
 
-const ACTION_NAMES: &[&str] = &[
-    "next",
-    "prev",
-    "first",
-    "last",
-    "zoom-in",
-    "zoom-out",
-    "zoom-fit",
-    "zoom-actual",
-    "zoom-toggle",
-    "rotate-cw",
-    "rotate-ccw",
-    "play-pause",
-    "seek-back",
-    "seek-forward",
-    "mute",
-    "volume-up",
-    "volume-down",
-    "save",
-    "trash",
-    "undo",
-    "fullscreen",
-    "close",
-    "help",
-    "escape",
+/// Every action, paired with the description the cheat sheet shows
+/// (NFR-5.2). One list, so an action cannot be added without being
+/// documented, and config binds are validated against the same names
+/// (FR-8.2). `escape` carries no description: its layered behaviour is
+/// spelled out in the footer instead.
+const ACTIONS: &[(&str, &str)] = &[
+    ("next", "Next image"),
+    ("prev", "Previous image"),
+    ("first", "First image"),
+    ("last", "Last image"),
+    ("play-pause", "Pause video, or next image"),
+    ("seek-back", "Seek back 5 seconds"),
+    ("seek-forward", "Seek forward 5 seconds"),
+    ("mute", "Mute audio"),
+    ("volume-up", "Volume up"),
+    ("volume-down", "Volume down"),
+    ("zoom-in", "Zoom in"),
+    ("zoom-out", "Zoom out"),
+    ("zoom-fit", "Fit to window"),
+    ("zoom-actual", "Actual size, 100%"),
+    ("zoom-toggle", "Toggle fit and 100%"),
+    ("rotate-cw", "Rotate right"),
+    ("rotate-ccw", "Rotate left"),
+    ("save", "Save rotation to the file"),
+    ("trash", "Move to trash"),
+    ("undo", "Undo the delete"),
+    ("fullscreen", "Fullscreen"),
+    ("help", "This list"),
+    ("close", "Quit"),
+    ("escape", ""),
 ];
 
 /// Seek bar width when the window has room for it: wide enough that a
@@ -140,8 +145,12 @@ pub struct App {
     presented: Cell<bool>,
     // Widgets and timers.
     status: gtk::Label,
+    name_label: gtk::Label,
     pos_label: gtk::Label,
     transport: gtk::Box,
+    play_btn: gtk::Button,
+    mute_btn: gtk::Button,
+    save_btn: gtk::Button,
     /// The bottom control bar; measured to size the seek bar to the room
     /// left over beside the labels and buttons.
     control_bar: gtk::Box,
@@ -225,6 +234,17 @@ impl App {
         bar.add_css_class("osd-bar");
         bar.set_halign(gtk::Align::Center);
         bar.set_valign(gtk::Align::End);
+        // What you are actually looking at. A frameless window has no
+        // titlebar to carry the filename, so without this the name of the
+        // file on screen appears nowhere in the UI at all.
+        let name_label = gtk::Label::new(None);
+        name_label.add_css_class("dim");
+        name_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        // Bounds the natural width so a long name cannot push the bar
+        // wider than the window; ellipsizing keeps its *minimum* small,
+        // which is what fit_seek_bar measures against.
+        name_label.set_max_width_chars(28);
+        bar.append(&name_label);
         let pos_label = gtk::Label::new(None);
         pos_label.add_css_class("dim");
         bar.append(&pos_label);
@@ -239,27 +259,41 @@ impl App {
         seek_bar.set_round_digits(-1);
         let time_label = gtk::Label::new(None);
         time_label.add_css_class("dim");
+        // A seek bar with no play button was the clearest hole in the
+        // overlay: pausing was keyboard-only (FR-6.5). Icons track the
+        // pipeline in update_transport.
+        let play_btn = bar_button(
+            "media-playback-pause-symbolic",
+            "win.play-pause",
+            "Play / pause",
+        );
+        let mute_btn = bar_button("audio-volume-high-symbolic", "win.mute", "Mute");
         let transport = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        transport.append(&play_btn);
         transport.append(&seek_bar);
         transport.append(&time_label);
+        transport.append(&mute_btn);
         transport.set_visible(false);
         bar.append(&transport);
+        bar.append(&bar_button(
+            "object-rotate-left-symbolic",
+            "win.rotate-ccw",
+            "Rotate left",
+        ));
+        bar.append(&bar_button(
+            "object-rotate-right-symbolic",
+            "win.rotate-cw",
+            "Rotate right",
+        ));
+        // Held onto: a disabled save button has to be able to say why
+        // (FR-5.4), which update_save_enabled writes into its tooltip.
+        let save_btn = bar_button(
+            "document-save-symbolic",
+            "win.save",
+            "Save rotation to file",
+        );
+        bar.append(&save_btn);
         for (icon, action, tip) in [
-            (
-                "object-rotate-left-symbolic",
-                "win.rotate-ccw",
-                "Rotate left",
-            ),
-            (
-                "object-rotate-right-symbolic",
-                "win.rotate-cw",
-                "Rotate right",
-            ),
-            (
-                "document-save-symbolic",
-                "win.save",
-                "Save rotation to file",
-            ),
             ("user-trash-symbolic", "win.trash", "Move to trash"),
             ("view-fullscreen-symbolic", "win.fullscreen", "Fullscreen"),
         ] {
@@ -329,8 +363,12 @@ impl App {
             pending_undo: RefCell::new(None),
             presented: Cell::new(false),
             status,
+            name_label,
             pos_label,
             transport,
+            play_btn,
+            mute_btn,
+            save_btn,
             control_bar: bar.clone(),
             seek_bar,
             time_label,
@@ -525,11 +563,7 @@ impl App {
         };
         *self.showing.borrow_mut() = Some(path.clone());
         self.cache.pin(&path);
-        self.win.set_title(
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .as_deref(),
-        );
+        self.set_current_name(Some(&path));
         self.update_pos_label();
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
@@ -694,6 +728,26 @@ impl App {
         // Cheap to re-assert every tick: GTK ignores an unchanged
         // request, and this is the one place that sees every resize.
         self.fit_seek_bar();
+        // Button icons before the progress bail-out below: a video whose
+        // duration is not known yet still has a truthful play state.
+        if let Some(p) = self.player.borrow().as_ref() {
+            set_icon(
+                &self.play_btn,
+                if p.is_playing() {
+                    "media-playback-pause-symbolic"
+                } else {
+                    "media-playback-start-symbolic"
+                },
+            );
+            set_icon(
+                &self.mute_btn,
+                if p.is_muted() {
+                    "audio-volume-muted-symbolic"
+                } else {
+                    "audio-volume-high-symbolic"
+                },
+            );
+        }
         let progress = self.player.borrow().as_ref().and_then(|p| p.progress());
         let Some((pos, dur)) = progress else {
             return;
@@ -997,7 +1051,7 @@ impl App {
         *self.current_decoded.borrow_mut() = None;
         *self.current_mime.borrow_mut() = None;
         *self.showing.borrow_mut() = None;
-        self.win.set_title(Some("open-mpv"));
+        self.set_current_name(None);
         self.status.set_text(message);
         self.status.set_visible(true);
         self.update_pos_label();
@@ -1073,6 +1127,19 @@ impl App {
         }
     }
 
+    /// The window title and the overlay's name label go together: on a
+    /// frameless window the title is invisible, so the label is the only
+    /// place the filename is ever shown.
+    fn set_current_name(&self, path: Option<&Path>) {
+        let name = path
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy());
+        self.name_label.set_text(name.as_deref().unwrap_or(""));
+        self.name_label.set_tooltip_text(name.as_deref());
+        self.win
+            .set_title(Some(name.as_deref().unwrap_or("open-mpv")));
+    }
+
     fn update_pos_label(&self) {
         let text = {
             let folder = self.folder.borrow();
@@ -1121,11 +1188,7 @@ impl App {
                             folder.insert(&new);
                             if showing.as_deref() == Some(p.as_path()) {
                                 *self.showing.borrow_mut() = Some(new.clone());
-                                self.win.set_title(
-                                    new.file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .as_deref(),
-                                );
+                                self.set_current_name(Some(&new));
                             }
                         }
                     }
@@ -1293,17 +1356,36 @@ impl App {
     /// still raster images in formats the sandboxed editor can rewrite;
     /// SVG and animations stay view-only (FR-5.4).
     fn update_save_enabled(&self) {
-        let editable = match (
+        // Why, not just whether: a greyed-out button that never says what
+        // is wrong reads as a bug (FR-5.4).
+        let reason = match (
             self.current_decoded.borrow().as_deref(),
             self.current_mime.borrow().as_deref(),
         ) {
             (Some(Decoded::Static { .. }), Some(mime)) => {
-                self.editable_mimes.borrow().contains(mime)
+                if self.editable_mimes.borrow().contains(mime) {
+                    None
+                } else {
+                    Some(format!("{mime} images cannot be written back"))
+                }
             }
-            _ => false,
+            (Some(Decoded::Svg { .. }), _) => {
+                Some("SVG rotation is view-only — the file is never rewritten".into())
+            }
+            (Some(Decoded::Animated { .. }), _) => {
+                Some("Animated images can only be rotated in the view".into())
+            }
+            _ if self.is_video_showing() => Some("Video cannot be rotated and saved".into()),
+            _ => Some("Nothing to save".into()),
         };
-        self.save_action
-            .set_enabled(editable && self.view.rotation() != 0);
+        let enabled = reason.is_none() && self.view.rotation() != 0;
+        self.save_action.set_enabled(enabled);
+        self.save_btn.set_tooltip_text(Some(&match reason {
+            Some(why) => why,
+            None if enabled => "Save rotation to file".into(),
+            // Editable, but nothing has been rotated yet.
+            None => "Rotate the image first".into(),
+        }));
     }
 
     // ----- overlay chrome, toasts, indicator (FR-6.2) -------------------
@@ -1544,7 +1626,7 @@ impl App {
             .map(|(k, a)| (k.to_string(), a.to_string()))
             .collect();
         for (key, action) in &self.cfg.binds {
-            if !ACTION_NAMES.contains(&action.as_str()) {
+            if !ACTIONS.iter().any(|(name, _)| name == action) {
                 eprintln!("open-mpv: config: unknown action `{action}` for bind `{key}`");
                 continue;
             }
@@ -1567,22 +1649,36 @@ impl App {
     }
 
     fn build_help(&self, gtk_app: &gtk::Application) {
-        let mut lines = vec!["<b>Keys</b>".to_string(), String::new()];
-        for action in ACTION_NAMES {
-            if *action == "escape" {
+        let mut rows: Vec<(String, &str)> = Vec::new();
+        for (action, description) in ACTIONS {
+            if description.is_empty() {
                 continue;
             }
             let accels = gtk_app.accels_for_action(&format!("win.{action}"));
             if accels.is_empty() {
                 continue;
             }
-            let keys: Vec<String> = accels.iter().map(|a| a.to_string()).collect();
-            lines.push(format!(
-                "<tt>{:<24}</tt> {}",
-                glib::markup_escape_text(&keys.join(", ")),
-                action
-            ));
+            // "<Control>z" is the binding syntax, not something to read;
+            // GTK renders it the way the rest of the desktop writes it.
+            let keys: Vec<String> = accels
+                .iter()
+                .map(|a| match gtk::accelerator_parse(a) {
+                    Some((key, mods)) => gtk::accelerator_get_label(key, mods).to_string(),
+                    None => a.to_string(),
+                })
+                .collect();
+            rows.push((keys.join(", "), description));
         }
+        let width = rows
+            .iter()
+            .map(|(keys, _)| keys.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut lines = vec!["<b>Keys</b>".to_string(), String::new()];
+        lines.extend(
+            rows.iter()
+                .map(|(keys, description)| help_line(keys, description, width)),
+        );
         lines.push(String::new());
         lines.push("<tt>Escape</tt> leaves fullscreen, then closes".to_string());
         lines.push("Scroll: zoom · horizontal scroll: navigate".to_string());
@@ -1769,6 +1865,26 @@ fn osd_button(icon: &str, action: &str, tooltip: &str) -> gtk::Button {
     b.set_margin_top(12);
     b.set_margin_bottom(12);
     b
+}
+
+/// One cheat-sheet row, padded to `width`. The keys are padded *before*
+/// escaping, so markup entities never count toward the column — `&lt;` is
+/// one character on screen and four in the string. The width is measured
+/// from the rows themselves rather than fixed, so a long accelerator
+/// list widens the column instead of spilling out of it.
+fn help_line(keys: &str, description: &str, width: usize) -> String {
+    format!(
+        "<tt>{}</tt> {description}",
+        glib::markup_escape_text(&format!("{keys:<width$}"))
+    )
+}
+
+/// Set a button's icon only when it actually changes — this runs from the
+/// per-frame transport tick.
+fn set_icon(button: &gtk::Button, icon: &str) {
+    if button.icon_name().as_deref() != Some(icon) {
+        button.set_icon_name(icon);
+    }
 }
 
 fn bar_button(icon: &str, action: &str, tooltip: &str) -> gtk::Button {
@@ -2032,6 +2148,64 @@ mod tests {
         assert_eq!(
             cursor_name(Some(SurfaceEdge::North), true, true),
             Some("n-resize")
+        );
+    }
+
+    #[test]
+    fn every_action_is_documented_and_reachable_by_key() {
+        use super::{ACTIONS, DEFAULT_BINDS};
+
+        for (key, action) in DEFAULT_BINDS {
+            assert!(
+                ACTIONS.iter().any(|(name, _)| name == action),
+                "default bind `{key}` names `{action}`, which is not a known action"
+            );
+        }
+        // FR-6.5: an action nothing can reach from the keyboard is one
+        // the cheat sheet would list with no keys beside it.
+        for (action, description) in ACTIONS {
+            assert!(
+                DEFAULT_BINDS.iter().any(|(_, name)| name == action),
+                "action `{action}` has no default binding"
+            );
+            assert!(
+                !description.is_empty() || *action == "escape",
+                "action `{action}` has no description for the cheat sheet"
+            );
+        }
+    }
+
+    #[test]
+    fn cheat_sheet_rows_align_regardless_of_markup_escaping() {
+        use super::help_line;
+
+        // What the user actually sees in the key column, entities
+        // resolved back to the one character each stands for.
+        let visible = |s: &str| {
+            s.split("<tt>")
+                .nth(1)
+                .unwrap()
+                .split("</tt>")
+                .next()
+                .unwrap()
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+                .chars()
+                .count()
+        };
+        let plain = help_line("Right", "Next image", 22);
+        let escaped = help_line("<Control>z", "Undo", 22);
+        assert!(plain.ends_with("</tt> Next image"), "{plain}");
+        assert!(
+            escaped.contains("&lt;Control&gt;z"),
+            "markup must be escaped: {escaped}"
+        );
+        assert_eq!(visible(&plain), 22);
+        assert_eq!(
+            visible(&escaped),
+            22,
+            "an escaped key must occupy the same column: {escaped}"
         );
     }
 

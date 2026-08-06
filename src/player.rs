@@ -187,14 +187,30 @@ impl Player {
         self.duration.set(None);
     }
 
-    /// Toggle pause; returns true when now playing.
-    pub fn toggle_pause(&self) -> bool {
+    /// Where the pipeline is heading: the pending state while a
+    /// transition is in flight, otherwise the current one. Asking for the
+    /// current state alone would report the state being left behind.
+    fn target_state(&self) -> gst::State {
         let (_, current, pending) = self.playbin.state(gst::ClockTime::ZERO);
-        let target = if pending == gst::State::VoidPending {
+        if pending == gst::State::VoidPending {
             current
         } else {
             pending
-        };
+        }
+    }
+
+    /// True when playback is running or about to be.
+    pub fn is_playing(&self) -> bool {
+        self.target_state() == gst::State::Playing
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.playbin.property::<bool>("mute")
+    }
+
+    /// Toggle pause; returns true when now playing.
+    pub fn toggle_pause(&self) -> bool {
+        let target = self.target_state();
         if target == gst::State::Playing {
             let _ = self.playbin.set_state(gst::State::Paused);
             crate::applog!("player: paused");
