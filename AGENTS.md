@@ -11,15 +11,12 @@ flow.
 GStreamer (`playbin3`, video only) · GIO (trash and file monitoring). There is
 no database, web runtime or async runtime.
 
-The author is **Abhishek**. Address him as **Sir**.
-
 Read these sources before changing behavior:
 
 1. [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) is the product specification.
 2. [docs/PLAN.md](docs/PLAN.md) defines current scope and deliberate exclusions.
-3. A GitHub issue, when one exists, defines the requested outcome and open
-   decisions for that piece of work.
-4. This file defines engineering constraints and known traps.
+3. This file defines repository-specific engineering constraints and known
+   traps.
 
 Use FR-x.y and NFR-x.y as the project vocabulary in relevant code comments and
 commit messages. If an approved change alters a requirement or moves something
@@ -84,8 +81,6 @@ Important architectural rules:
   behavior paths.
 - The GTK main loop is the only event loop. Use `glib::spawn_future_local` for
   async work. Never add Tokio or async-std.
-- Reuse an existing helper or pattern when it fits. Search callers before
-  changing shared behavior.
 
 ---
 
@@ -109,8 +104,6 @@ Important architectural rules:
 - **Performance budgets are requirements.** Cold start must stay at or below
   300 ms and common neighbor navigation at or below 100 ms. Do not move lazy
   work into image startup or add unbounded caches without an explicit decision.
-- Keep changes scoped. Do not combine unrelated cleanup, refactoring,
-  formatting or upgrades with requested work.
 
 ---
 
@@ -215,7 +208,7 @@ Important architectural rules:
 
 ## Verification
 
-Start with the narrowest relevant test, then run the complete required checks:
+Run the complete required checks:
 
 ```sh
 cargo fmt --check
@@ -223,11 +216,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Test the expected path, important failures and relevant edge cases. For bugs,
-add regression coverage when practical. For concurrency or async changes,
-verify cancellation/stale-result guards and bounded resource use. Report only
-checks actually run; distinguish automated checks, code inspection and human
-visual testing.
+Async media changes must verify cancellation/stale-result guards and bounded
+resource use. The report must distinguish automated checks from the human
+Wayland checks described below.
 
 ### Testing on Wayland
 
@@ -272,14 +263,12 @@ separate request. It does not grant permission to push.
 - Before every commit, ensure `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings` and `cargo test` pass.
 - Explain why in the commit message. Never add co-author trailers.
-- Never create a branch, rebase, reset or push unless the author explicitly
-  asks for that operation.
 
-### Author gate for major issues
+### Author validation gate
 
-**Before work for any major issue is pushed, Abhishek must either personally
+**Before work for any major issue is pushed, the author must either personally
 test the completed behavior and confirm it, or explicitly approve pushing it
-without his personal test.**
+without personal testing.**
 
 - Apply this gate to substantial features and to changes with meaningful UI,
   playback, file-operation, data-safety, compatibility or performance impact.
@@ -287,8 +276,6 @@ without his personal test.**
 - Implementation, local verification and commits may be completed first. Then
   report what passed, what still needs human testing and any remaining risk.
 - A request to implement or commit is not permission to push.
-- Minor documentation or maintenance work does not need personal testing, but
-  pushing it still requires explicit permission.
 
 ---
 
