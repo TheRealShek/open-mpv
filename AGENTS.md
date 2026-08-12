@@ -61,6 +61,7 @@
 
 - **Seeks are `FLUSH | ACCURATE`, never `KEY_UNIT`.** Short clips are routinely one GOP, so keyframe seeks snap every seek back to 0:00 — measured, not theorised. Cost is contained by keeping one seek in flight and coalescing scrub positions behind it (`player::SeekState`).
 - **`gst::init` is lazy** so image-only sessions keep their cold start. Videos are never put in the preload cache; the pipeline is built once, reused, and dropped to `Null` while an image is shown.
+- **libav is the software fallback, not the default video path.** `Player::new` raises the installed QSV decoder factories to `Primary + 1` only after lazy `gst::init`. Do not move that work into image startup, override an explicit `Rank::None`, or globally change GStreamer ranks. Streams outside a QSV factory's advertised caps then fall through to libav without making ordinary video use the CPU.
 - **Release the idle inhibit on every path out of playback** — pause, image switch, pipeline error — or a paused video keeps the screen awake for the rest of the session.
 - **The seek bar's `change-value` handler must return `Propagation::Proceed`.** GtkRange moves the thumb in its *default* handler, so `Stop` freezes it. The position tick must not fight the pointer either — hence `App::scrubbing`, fed by raw button events, because a `GestureClick` gets cancelled when GtkRange claims the sequence.
 
@@ -106,6 +107,6 @@ Resource audit on this machine — empty window 163 MB RSS / 54 MB PSS, 12 MP ph
 
 **Measure with PSS, not RSS.** RSS charges every shared GTK/Mesa page to this process and is ~163 MB before a single pixel is decoded, which is why NFR-2.1 is written in PSS. An RSS budget below that is unmeetable regardless of what this code does.
 
-`gst-libav` is absent here, so video leans entirely on VA-API: a clip the iGPU cannot decode has no software fallback and fails as "missing plugin". That is a property of the machine, not a bug to chase in the app.
+Fedora's optional `gstreamer1-plugin-libav` package supplies the software fallback for streams outside the iGPU's limits. The motivating file was H.264 High at 4382×3500 while declaring Level 4: QSV advertises a 4096-pixel dimension limit, OpenH264 rejected every frame, and FFmpeg decoded it. Compatible video must still select QSV; do not trade the measured hardware path for blanket software decoding.
 
 Known gap: `preload_neighbors` dedupes against the cache but not against decodes already in flight, so a narrow timing window can decode one image twice. Measured at 202 decodes against 200 cache hits over 200 steady-state navigations — i.e. it essentially does not fire in practice. Left alone deliberately; fixing it means moving the apply guard off the generation counter, which is not worth the risk for this.

@@ -157,9 +157,12 @@ product; there is no version staging.
 
 - **FR-10.1** Plays MP4, MKV, WebM, MOV and AVI containers through the
   system GStreamer stack (`playbin3` → `gtk4paintablesink`), hardware
-  decoding via VA-API where available; frames reach GTK as dmabufs
-  with no CPU pixel copies. GStreamer initializes lazily on the first
-  video so image-only sessions keep NFR-1.1.
+  decoding via VA-API where available. Compatible hardware-decoded frames
+  reach GTK as dmabufs with no CPU pixel copies; streams outside the
+  iGPU's codec or dimension limits may fall back to an installed software
+  decoder. Compatible streams keep hardware priority. GStreamer
+  initializes lazily on the first video so image-only sessions keep
+  NFR-1.1.
 - **FR-10.2** Videos appear in the same folder navigation as images
   (FR-3). They are streamed on show, never pre-decoded into the
   neighbor cache.

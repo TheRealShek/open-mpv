@@ -27,6 +27,11 @@ use gtk4::glib;
 /// and at most one is ever in flight (see `SeekState`).
 const SEEK_FLAGS: gst::SeekFlags = gst::SeekFlags::FLUSH.union(gst::SeekFlags::ACCURATE);
 const VOLUME_MAX: f64 = 1.5;
+/// Hardware decoders proven on the target machine. GStreamer's libav
+/// decoders rank at `Primary`, while these QSV factories normally rank
+/// lower. Prefer QSV for streams its caps accept and leave libav as the
+/// automatic fallback for streams the iGPU cannot decode (FR-10.1).
+const INTEL_VIDEO_DECODERS: &[&str] = &["qsvh264dec", "qsvh265dec", "qsvvp9dec", "qsvjpegdec"];
 /// Safety net: if a seek never gets its `AsyncDone` (broken file, stalled
 /// demuxer), stop reporting its target and fall back to real queries.
 const SEEK_SETTLE: Duration = Duration::from_millis(1500);
@@ -88,6 +93,7 @@ impl Player {
     /// Build the pipeline. `on_event` fires on the GTK main loop.
     pub fn new(on_event: impl Fn(Event) + 'static) -> Result<Player, String> {
         gst::init().map_err(|e| format!("GStreamer init failed: {e}"))?;
+        prefer_intel_video_decoders();
         let sink = gst::ElementFactory::make("gtk4paintablesink")
             .build()
             .map_err(|e| format!("gtk4paintablesink unavailable: {e}"))?;
@@ -313,6 +319,32 @@ impl Player {
     }
 }
 
+/// Give a working hardware decoder priority over the `Primary` software
+/// fallback. `None` means preserve an explicit disable (`Rank::None`) or
+/// a choice already ranked above ours.
+fn preferred_hardware_rank(current: gst::Rank) -> Option<gst::Rank> {
+    let preferred = gst::Rank::PRIMARY + 1;
+    (current != gst::Rank::NONE && current < preferred).then_some(preferred)
+}
+
+/// Change only this process's registry. Missing factories are expected on
+/// other Intel generations, and an explicitly disabled factory stays off.
+/// This remains after lazy `gst::init` so image-only startup does not load
+/// GStreamer (NFR-1.1).
+fn prefer_intel_video_decoders() {
+    for name in INTEL_VIDEO_DECODERS {
+        let Some(factory) = gst::ElementFactory::find(name) else {
+            continue;
+        };
+        let current = factory.rank();
+        let Some(preferred) = preferred_hardware_rank(current) else {
+            continue;
+        };
+        factory.set_rank(preferred);
+        crate::applog!("player: prefer {name} ({current} -> {preferred})");
+    }
+}
+
 /// GStreamer can keep playing the audio half of a file when its video
 /// decoder is missing. That is a successful pipeline state rather than
 /// an `Error` message, so recognise the accompanying `missing-plugin`
@@ -365,7 +397,12 @@ impl Drop for Player {
 
 #[cfg(test)]
 mod tests {
-    use super::{Instant, SEEK_SETTLE, SeekState, gst, missing_video_decoder};
+    use gstreamer::prelude::PluginFeatureExtManual;
+
+    use super::{
+        INTEL_VIDEO_DECODERS, Instant, SEEK_SETTLE, SeekState, gst, missing_video_decoder,
+        prefer_intel_video_decoders, preferred_hardware_rank,
+    };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
     fn issued(state: &mut SeekState, secs: f64, ago: std::time::Duration) {
@@ -397,6 +434,31 @@ mod tests {
         issued(&mut state, 12.0, SEEK_SETTLE);
         assert_eq!(state.pending(), None);
         assert!(state.request(20.0));
+    }
+
+    #[test]
+    fn hardware_preference_preserves_explicit_rank_choices() {
+        assert_eq!(
+            preferred_hardware_rank(gst::Rank::MARGINAL),
+            Some(gst::Rank::PRIMARY + 1)
+        );
+        assert_eq!(preferred_hardware_rank(gst::Rank::NONE), None);
+        assert_eq!(preferred_hardware_rank(gst::Rank::PRIMARY + 2), None);
+    }
+
+    #[test]
+    fn installed_intel_video_decoders_outrank_software_fallbacks() {
+        gst::init().unwrap();
+        prefer_intel_video_decoders();
+
+        for name in INTEL_VIDEO_DECODERS {
+            let Some(factory) = gst::ElementFactory::find(name) else {
+                continue;
+            };
+            if factory.rank() != gst::Rank::NONE {
+                assert!(factory.rank() > gst::Rank::PRIMARY, "{name}");
+            }
+        }
     }
 
     #[test]

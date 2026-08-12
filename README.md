@@ -34,6 +34,7 @@ daemon. See [docs/PLAN.md](docs/PLAN.md) and
 
 ```sh
 sudo dnf install gtk4-devel glycin-devel gstreamer1-devel   # build deps; runtime is stock
+sudo dnf install gstreamer1-plugin-libav     # optional fallback for videos the GPU cannot decode
 ./install.sh                               # user install + default image/video viewer
 ./uninstall.sh                             # revert to Loupe (images) and mpv (videos)
 ```
