@@ -340,7 +340,7 @@ mod tests {
 
         let desktop = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/data/dev.thakur.OpenMpv.desktop"
+            "/data/io.github.TheRealShek.OpenMpv.desktop"
         ))
         .expect("desktop entry must be readable");
         let registered: BTreeSet<&str> = desktop

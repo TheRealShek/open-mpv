@@ -1,127 +1,148 @@
 # open-mpv
 
-A minimalist, mpv-inspired photo viewer for GNOME on Wayland. One
-frameless window, just the image; controls fade in when the mouse
-moves and get out of the way when it stops.
+open-mpv is a fast, distraction-free photo and video viewer for GNOME on
+Wayland. Open a file and the window gets out of the way: no library to set up,
+no database, and no toolbar covering your picture.
 
-Built in Rust on GTK4, with all image decoding sandboxed through
-[glycin](https://gitlab.gnome.org/GNOME/glycin) — the loader stack
-GNOME's own viewer uses. No library, no database, no network, no
-daemon. See [docs/PLAN.md](docs/PLAN.md) and
-[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for the full spec.
+It takes its cues from [mpv](https://mpv.io/): simple by default, quick from
+the keyboard, and configurable with a plain-text file when you want it to be.
 
-## Features
+> open-mpv currently targets Fedora Workstation with GNOME on Wayland. It is
+> usable today, but installation still requires building it from source. See
+> [Distribution and updates](docs/DISTRIBUTION.md) for the path to packaged
+> releases.
 
-- Every format the installed glycin loaders decode: JPEG, PNG, WebP,
-  AVIF, BMP, HEIF/HEIC, JPEG XL, TIFF, JPEG 2000, ICO, TGA, QOI, EXR,
-  DDS, PNM, XBM/XPM; animated GIF/WebP/APNG; SVG (re-rendered sharply at
-  any zoom).
-- Video (MP4, MKV, WebM, MOV, AVI) inline in the same folder flow:
-  hardware-decoded (VA-API), looped, with pause/seek/volume and a seek
-  bar in the overlay. Codec support is the system's GStreamer set.
-- Flip through the folder of the opened image, natural filename order,
-  live updates when files appear or vanish.
-- Fit / 100% / free zoom anchored at the cursor; pixel-exact at 100%
-  under fractional scaling. Arrow keys pan once you are zoomed in.
-- The filename, position and zoom live in the fade-in overlay; the
-  pointer fades with it, mpv-style.
-- Delete to trash instantly, with an Undo toast. Rotate and save —
-  lossless metadata-only for JPEG, atomic rewrite otherwise.
-- Single instance: opening another image reuses the window.
-- `?` shows the key cheat sheet.
+## What you can do
 
-## Install (Fedora / GNOME)
+- Open a photo, video, or folder and move through every supported file in that
+  folder.
+- View common image formats, animated images, SVGs, and videos in one window.
+- Zoom at the pointer, pan large images, switch between fit and actual size,
+  and use fullscreen mode.
+- Rotate an image while viewing it, then save the rotation when the format
+  supports it. JPEG rotation is lossless.
+- Move a file to the system trash and undo the action from the viewer.
+- Control video playback, seeking, volume, and looping without switching apps.
+- Use the mouse, touchpad, on-screen controls, or keyboard shortcuts.
+- Change the background, sorting, navigation, playback, and key bindings in a
+  small configuration file.
+
+Images are decoded in a separate sandbox through
+[glycin](https://gitlab.gnome.org/GNOME/glycin). The app does not use the
+network, collect telemetry, build a media library, or keep running after its
+window closes.
+
+## Supported files
+
+open-mpv supports JPEG, PNG, WebP, AVIF, HEIF/HEIC, JPEG XL, TIFF, SVG, GIF,
+and many other image formats provided by the installed glycin loaders.
+Animated GIF, WebP, and PNG files play automatically.
+
+MP4, MKV, WebM, MOV, and AVI videos play through the system's GStreamer
+codecs. Hardware decoding is used when available. The optional
+`gstreamer1-plugin-libav` package provides a software fallback for some
+videos.
+
+## Install on Fedora
+
+Packaged releases are not available yet. To install the current version for
+your user account:
 
 ```sh
-sudo dnf install gtk4-devel glycin-devel gstreamer1-devel   # build deps; runtime is stock
-sudo dnf install gstreamer1-plugin-libav     # optional fallback for videos the GPU cannot decode
-./install.sh                               # user install + default image/video viewer
-./uninstall.sh                             # revert to Loupe (images) and mpv (videos)
+git clone https://github.com/TheRealShek/open-mpv.git
+cd open-mpv
+sudo dnf install gtk4-devel glycin-devel gstreamer1-devel
+sudo dnf install gstreamer1-plugin-libav # optional video fallback
+./install.sh
 ```
 
-## Keys (defaults)
+The install script builds a release binary, installs it under `~/.local`, and
+makes open-mpv the default viewer for supported photos and videos. Run
+`./uninstall.sh` from the same checkout to remove it and restore Loupe and mpv
+as the defaults.
 
-| Key | Action |
-| --- | ------ |
-| Right / Page Down | next image (Right pans when zoomed in) |
-| space | pause video · next image otherwise |
-| Left / Backspace / Page Up | previous image (Left pans when zoomed in) |
-| j / l | video seek −5 s / +5 s |
-| m | video mute |
-| Up / Down | video volume (pans when zoomed in) |
-| Home / End | first / last image |
-| scroll | zoom at cursor |
-| horizontal scroll | navigate |
-| + / − | zoom in / out |
-| 0 / 1 / z | fit / 100% / toggle |
-| r / R | rotate view right / left |
-| s | save rotation to file |
-| Delete | move to trash |
-| Ctrl+Z | undo trash (while toast shows) |
-| f / F11 / double-click | fullscreen |
-| middle-click | fit / 100% toggle |
-| q | quit |
-| Escape | leave fullscreen, then quit |
-| ? | key cheat sheet |
+After installation, open a supported file from Files or run:
+
+```sh
+open-mpv ~/Pictures/photo.jpg
+open-mpv ~/Pictures
+```
+
+You can also launch open-mpv with no file and drag a file into its window.
+
+## Everyday controls
+
+Press `?` inside the app to see the complete shortcut guide.
+
+| Key or gesture | Action |
+| --- | --- |
+| `Right` / `Page Down` | Next file; `Right` pans a zoomed image |
+| `Left` / `Page Up` | Previous file; `Left` pans a zoomed image |
+| Scroll / pinch | Zoom at the pointer |
+| Horizontal scroll | Previous or next file |
+| `0` / `1` / `Z` | Fit / actual size / toggle between them |
+| `R` / `Shift+R` | Rotate right / left |
+| `S` | Save the current rotation |
+| `Delete` | Move the current file to trash |
+| `Ctrl+Z` | Undo the most recent trash action while offered |
+| `Space` | Pause or resume video; next file for an image |
+| `J` / `L` | Seek video back / forward 5 seconds |
+| `M` | Mute video |
+| `F` / `F11` / double-click | Toggle fullscreen |
+| `Q` | Quit |
+| `Escape` | Leave fullscreen, then quit |
 
 ## Configuration
 
-Optional, mpv-style: `~/.config/open-mpv/open-mpv.conf`.
+Configuration is optional. Create `~/.config/open-mpv/open-mpv.conf` only if
+you want to change a default:
 
 ```ini
-# defaults shown
 background = #121212
-sort = name            # name | date (newest first)
-sort-reverse = no      # flip whichever order `sort` picked
-wrap = no              # wrap around at folder ends
-fit = fit              # fit | actual — zoom when an image opens
-overlay-timeout = 2.0  # seconds before controls fade out
-hide-cursor = yes      # pointer fades with the overlay controls
-start-fullscreen = no  # open fullscreen instead of sized to the media
-loop = yes             # replay video at end of stream
-volume = 100           # starting playback volume, 0-150 %
-cache-budget-mb = 256  # decoded frames kept beyond the shown image
-                       # (preloaded neighbors); lower it to trade RAM
-                       # for a short decode wait on next/prev with
-                       # very large photos
+sort = name            # name | date
+sort-reverse = no
+wrap = no
+fit = fit              # fit | actual
+overlay-timeout = 2.0
+hide-cursor = yes
+start-fullscreen = no
+loop = yes
+volume = 100           # 0-150
+cache-budget-mb = 256
 
-# rebind keys: bind = <key> <action>
-# actions: right left up down next prev first last zoom-in zoom-out
-#          zoom-fit zoom-actual zoom-toggle rotate-cw rotate-ccw
-#          play-pause seek-back seek-forward mute volume-up volume-down
-#          save trash undo fullscreen close help
-# right/left/up/down are the contextual arrow actions: they pan a
-# zoomed image and otherwise navigate or change volume.
+# Add or replace key bindings.
 bind = n next
 bind = <Shift>d trash
-bind = q none          # `none` removes a default binding outright
+bind = q none          # remove a default binding
 ```
 
-## Logs
+Unknown or invalid settings are ignored with a warning, so a broken config
+does not prevent the viewer from opening.
 
-Diagnostic logging is on by default. The trace on stderr records what
-was opened, every decode with dimensions and duration, cache hits,
-preloads, trash/restore/save results, and the cold-start time to first
-frame. Set `OPEN_MPV_LOG=0` to disable it:
+## Troubleshooting
+
+open-mpv writes a diagnostic trace to stderr. When it was opened from Files,
+view the log with:
 
 ```sh
-OPEN_MPV_LOG=0 open-mpv ~/Pictures
+journalctl --user -t open-mpv -b
 ```
 
-When launched from Files (desktop), stderr goes to the journal:
-
-```sh
-journalctl --user -t open-mpv -b   # or: journalctl --user -g open-mpv
-```
-
-Disabled logging is free (a single flag check per site — nothing is
-formatted or written) and logging never runs on the frame-rendering path.
-Genuine errors (failed decode, failed trash/save) always print to
-stderr, log enabled or not.
+Disable routine diagnostic logging with `OPEN_MPV_LOG=0`. Errors are still
+reported.
 
 ## Development
 
+The product requirements are in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md),
+and deliberate scope decisions are in [docs/PLAN.md](docs/PLAN.md).
+
 ```sh
-cargo run -- <image-or-folder>
-cargo test && cargo clippy -- -D warnings && cargo fmt
+cargo run -- <file-or-folder>
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
+
+## License
+
+open-mpv is available under the [MIT License](LICENSE).

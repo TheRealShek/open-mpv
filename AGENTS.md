@@ -80,8 +80,8 @@ Mutter refuses the virtual-keyboard protocol, so `wtype` cannot work and synthet
 Everything else is reachable as an action, without needing window focus:
 
 ```sh
-gdbus call --session --dest dev.thakur.OpenMpv \
-  --object-path /dev/thakur/OpenMpv/window/1 \
+gdbus call --session --dest io.github.TheRealShek.OpenMpv \
+  --object-path /io/github/TheRealShek/OpenMpv/window/1 \
   --method org.gtk.Actions.Activate <action> "[]" "{}"
 ```
 

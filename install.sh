@@ -3,7 +3,8 @@
 # image viewer (FR-9). Re-run after changes; run uninstall.sh to revert.
 set -eu
 
-APP_ID="dev.thakur.OpenMpv"
+APP_ID="io.github.TheRealShek.OpenMpv"
+LEGACY_APP_ID="dev.thakur.OpenMpv"
 BIN_DIR="${HOME}/.local/bin"
 APP_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor/scalable/apps"
@@ -16,6 +17,11 @@ install -m 755 "${SRC_DIR}/target/release/open-mpv" "${BIN_DIR}/open-mpv"
 install -m 644 "${SRC_DIR}/data/${APP_ID}.svg" "${ICON_DIR}/${APP_ID}.svg"
 sed "s|@BINDIR@|${BIN_DIR}|" "${SRC_DIR}/data/${APP_ID}.desktop" \
     > "${APP_DIR}/${APP_ID}.desktop"
+
+# Remove the pre-release application ID so upgrading an existing source
+# install does not leave a duplicate launcher behind.
+rm -f "${APP_DIR}/${LEGACY_APP_ID}.desktop" \
+    "${ICON_DIR}/${LEGACY_APP_ID}.svg"
 
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
 gtk-update-icon-cache -q "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true

@@ -17,7 +17,7 @@ use gtk::prelude::*;
 fn main() -> gtk::glib::ExitCode {
     log::init();
     let app = gtk::Application::builder()
-        .application_id("dev.thakur.OpenMpv")
+        .application_id("io.github.TheRealShek.OpenMpv")
         .flags(gtk::gio::ApplicationFlags::HANDLES_OPEN)
         .build();
 
