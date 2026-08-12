@@ -24,6 +24,7 @@
 
 - **Only `fileops` writes to disk, and only three things: trash, restore, rotate-save (FR-5.6).** Anything else — exporting, screenshotting a frame, caching to disk, writing a config — goes back to the user first. This is the rule most likely to be broken by a plausible-sounding feature request.
 - **No new dependencies without a stated justification.** Hand-roll the small stuff; natural sort, `key=value` parsing and CLI args are already hand-rolled on purpose.
+- **Write Rust in Rust's own nature.** Model valid states with types and enums, make ownership explicit, and prefer `Option`/`Result` over sentinels or out-parameters; use C/Java-shaped patterns only where a framework boundary requires them.
 - **The GTK main loop is the only event loop.** Async work uses `glib::spawn_future_local`. Never add tokio or async-std.
 - **Panics are bugs.** Decode failures, unreadable paths, missing codecs and bad config are all expected states with in-window or stderr handling (FR-1.4, FR-8.3, NFR-3.3).
 - **No network, no telemetry, nothing running after the window closes** (NFR-2.2).
