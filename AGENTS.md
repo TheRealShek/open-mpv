@@ -2,57 +2,26 @@
 
 ## Start here
 
-**open-mpv** is a minimalist, mpv-inspired photo and video viewer for one
-machine: Fedora Workstation, GNOME and Wayland. The window is frameless, the
-controls fade away, and local images and videos share one folder-navigation
-flow.
+**open-mpv** is a minimalist local photo and video viewer for Fedora
+Workstation, GNOME and Wayland. It uses Rust, GTK4, glycin, GStreamer and GIO.
 
-**Stack:** Rust stable · GTK4 (`gtk4-rs`) · glycin (sandboxed image decoding) ·
-GStreamer (`playbin3`, video only) · GIO (trash and file monitoring). There is
-no database, web runtime or async runtime.
+Use each document for one purpose:
 
-Read these sources before changing behavior:
-
-1. [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) is the product specification.
-2. [docs/PLAN.md](docs/PLAN.md) defines current scope and deliberate exclusions.
-3. This file defines repository-specific engineering constraints and known
-   traps.
+- [README.md](README.md): current user-facing capabilities, installation,
+  controls and configuration.
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md): the authoritative, testable
+  product behavior and performance budgets. Read it before changing behavior.
+- [docs/PLAN.md](docs/PLAN.md): product intent, scope boundaries and deliberate
+  exclusions. Read it before adding or expanding a capability.
+- [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md): packaging, release and update
+  decisions. Read it for distribution work.
+- This file: code ownership, engineering constraints, known implementation
+  traps, verification and repository workflow.
 
 Use FR-x.y and NFR-x.y as the project vocabulary in relevant code comments and
 commit messages. If an approved change alters a requirement or moves something
 into scope, update the requirements and plan in the same logical change. Never
 leave the documents knowingly contradicting the product.
-
----
-
-## Product intent and boundaries
-
-The product should feel **instant, invisible and predictable**:
-
-- Open a local file or folder and show media quickly.
-- Keep the media edge-to-edge; reveal only contextual overlay controls.
-- Make mouse, touchpad and keyboard equally usable.
-- Keep optional configuration in one small mpv-style text file.
-- Never surprise the user with file changes.
-
-The current product includes folder navigation, broad glycin image support,
-animations, sharp SVG rendering, inline local video, embedded and local
-SRT/WebVTT subtitles, zoom/pan/fit/rotate, lossless JPEG rotation, trash with
-undo, fullscreen, configurable actions and GNOME desktop integration.
-
-The product is a viewer, not a manager or editor. Unless the author explicitly
-changes the scope, do not add:
-
-- a media library, indexing, tagging, ratings, search or cloud features;
-- editing beyond rotate-save;
-- network access, telemetry, background services or an in-app updater;
-- clipboard/export/screenshot writes;
-- subtitle downloading, editing, timing/style controls or dual subtitles;
-- general media-player growth such as playlists or online playback;
-- support for non-Linux platforms.
-
-Do not treat a plausible feature as permission to expand scope. Explain the
-trade-off and ask first when it would change the product boundary.
 
 ---
 
@@ -93,17 +62,11 @@ Important architectural rules:
 - **No new dependency without a stated justification.** Prefer the standard
   library and existing GTK/GIO/Glycin/GStreamer capabilities. Natural sort,
   `key=value` parsing and CLI handling are deliberately hand-rolled.
-- **Write Rust as Rust.** Model valid states with enums and types, keep
-  ownership explicit, and use `Option`/`Result` instead of sentinels or
-  out-parameters.
 - **Panics are bugs.** Broken media, unreadable paths, missing codecs, invalid
   configuration and failed file operations are normal error states. Report
   them in-window or on stderr as specified (FR-1.4, FR-8.3, NFR-3.3).
-- **No network, telemetry or lingering process** after the window closes
-  (NFR-2.2).
-- **Performance budgets are requirements.** Cold start must stay at or below
-  300 ms and common neighbor navigation at or below 100 ms. Do not move lazy
-  work into image startup or add unbounded caches without an explicit decision.
+- **NFR-1 performance budgets are requirements.** Do not move lazy work into
+  image startup or add unbounded caches without an explicit decision.
 
 ---
 
@@ -154,6 +117,9 @@ Important architectural rules:
   main loop. Restore reads freedesktop trash directories directly.
 - Undo must tolerate the same file being reintroduced by restore and by the
   directory monitor.
+- `preload_neighbors` deliberately deduplicates cached images but not decodes
+  already in flight. The rare duplicate decode measured cheaper and safer than
+  moving its apply guard off `App::generation`; revisit only with new evidence.
 
 ### Video and subtitles
 
@@ -193,19 +159,6 @@ Important architectural rules:
 
 ---
 
-## Commands
-
-| Action | Command | Note |
-| ------ | ------- | ---- |
-| Build | `cargo build` | Needs `gtk4-devel`, `glycin-devel`, `gstreamer1-devel` |
-| Run | `cargo run -- <file-or-dir>` | Timed trace is on; `OPEN_MPV_LOG=0` disables routine logging |
-| Test | `cargo test` | Includes real trash/rotate tests; needs a user session; ImageMagick creates fixtures |
-| Lint | `cargo clippy --all-targets -- -D warnings` | `--all-targets` is required to cover tests |
-| Format | `cargo fmt --check` | Use `cargo fmt` to apply formatting |
-| Install | `./install.sh` | Release build to `~/.local/bin`; registers default MIME handlers |
-
----
-
 ## Verification
 
 Run the complete required checks:
@@ -216,17 +169,18 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+`cargo test` includes real trash and rotate-save tests, requires a user
+session, and uses ImageMagick to create fixtures.
+
 Async media changes must verify cancellation/stale-result guards and bounded
 resource use. The report must distinguish automated checks from the human
 Wayland checks described below.
 
 ### Testing on Wayland
 
-Mutter rejects the virtual-keyboard protocol, so `wtype` cannot drive the app
-and synthetic pointer motion is unavailable. The overlay therefore cannot be
-revealed programmatically, and GNOME Shell's screenshot API refuses
-unprivileged callers. **Anything purely visual needs a human to inspect it.**
-Never claim automated visual verification.
+The target GNOME/Wayland session cannot automate keyboard, pointer or
+screenshots reliably. **Anything purely visual needs human inspection.** Never
+claim automated visual verification.
 
 Actions can be invoked without window focus:
 
@@ -276,37 +230,3 @@ without personal testing.**
 - Implementation, local verification and commits may be completed first. Then
   report what passed, what still needs human testing and any remaining risk.
 - A request to implement or commit is not permission to push.
-
----
-
-## Current measured state
-
-Last performance and resource audit: **2026-08-06**. The release binary was
-4.7 MB, cold start was about 110 ms, and scanning 5001 entries took 3.7 ms.
-The automated suite had grown to 69 passing tests by **2026-08-12**, with
-clippy and formatting clean.
-
-Measured on the target machine:
-
-- empty window: 163 MB RSS / 54 MB PSS;
-- 12 MP photo: 203 MB RSS / 93 MB PSS;
-- video: 251 MB RSS / 129 MB PSS;
-- paused video: 0.1% CPU;
-- image-only session: zero GStreamer plugins loaded.
-
-No sustained leak was found across 200 navigations, 30 video/image cycles or a
-playback soak: memory settled and descriptors, threads and loader processes
-returned. Compatible video decoded on the Intel iGPU through VA-API while EGL
-rendered through Mesa.
-
-Fedora's optional `gstreamer1-plugin-libav` package provides the software
-fallback. The motivating failure was H.264 High at 4382×3500 while declaring
-Level 4: QSV advertises a 4096-pixel limit, OpenH264 rejected every frame and
-FFmpeg decoded it. Do not replace the measured hardware-first path with blanket
-software decoding.
-
-Known accepted gap: `preload_neighbors` deduplicates against cached images but
-not decodes already in flight. It measured 202 decodes for 200 cache hits over
-200 steady-state navigations. Fixing it would require moving the apply guard
-off the generation counter, and the risk is not justified by the measured
-cost.

@@ -1,8 +1,9 @@
 # Distribution and updates
 
-This document records how open-mpv should become easy to install and keep up
-to date. It is a decision guide, not a promise that the listed packages exist
-today.
+This document owns packaging, release and update decisions. It is a decision
+guide, not a promise that the listed packages exist today. Product behavior
+and scope remain authoritative in [REQUIREMENTS.md](REQUIREMENTS.md) and
+[PLAN.md](PLAN.md).
 
 ## The outcome we want
 
@@ -12,26 +13,19 @@ A user should be able to:
 2. receive updates through the same trusted tool that installed it;
 3. remove it cleanly;
 4. choose whether it becomes the default viewer; and
-5. keep the current guarantees: native Wayland, fast startup, sandboxed image
-   decoding, hardware video decoding, no network access, and safe file
-   operations.
+5. retain every applicable product requirement after packaging.
 
-The application should not contain its own updater. Package managers already
-handle download verification, rollback or downgrade workflows, and unattended
-updates. Avoiding an in-app updater also preserves NFR-2.2: open-mpv itself
-never needs network access or a background process.
+The application must not contain its own updater. Package managers own update
+delivery and rollback, preserving NFR-2.2.
 
 ## Constraints that affect packaging
 
 - The supported platform today is Fedora Workstation with GNOME on Wayland.
 - The code currently requires GTK 4.22, glycin and its matching loader
   protocol, GStreamer, and `gtk4paintablesink`.
-- Image decoding must remain isolated through glycin (NFR-3.2).
-- Video should retain working VA-API hardware decoding and the optional libav
-  fallback (FR-10.1).
-- Folder navigation, trash/restore, rotate-save, configuration, desktop file
-  associations, and single-instance activation must behave the same after
-  packaging.
+- A package must satisfy [REQUIREMENTS.md](REQUIREMENTS.md), including glycin
+  isolation, the video decoding path, file operations, desktop integration and
+  the performance budgets.
 - The current `install.sh` deliberately changes default file associations.
   A package must not do that during installation; the user or desktop should
   make that choice.
@@ -42,79 +36,52 @@ never needs network access or a background process.
 
 | Method | Easy install and updates | Reach | Fit for open-mpv | Decision |
 | --- | --- | --- | --- | --- |
-| Fedora RPM in Copr | Yes, through DNF | Fedora users | Best match for the current host libraries, codecs, and hardware path | Start here |
-| Flatpak / a Flatpak repository | Yes, through Flatpak and software centers | Most desktop Linux distributions | Strong reach, but filesystem access, trash/restore, glycin loaders, codecs, and hardware decode need validation | Evaluate second |
-| Standalone archive | Manual | Many distributions in theory | Dynamic GTK/glycin/GStreamer compatibility remains the user's problem; no automatic updates | Debug builds only |
-| AppImage | Usually manual | Many distributions in theory | Awkward fit for system codecs, glycin loaders, desktop integration, and Wayland graphics drivers | Do not prioritize |
-| Build from source | Rebuild manually | Developers | Works now but is not a consumer distribution method | Keep as a contributor path |
+| Fedora RPM in Copr | DNF | Fedora | Matches the target host stack | Start here |
+| Flatpak repository | Flatpak | Desktop Linux | Needs sandbox and media-path validation | Evaluate second |
+| Standalone archive | Manual | Theoretical | Leaves dynamic-library compatibility to users | Debug builds only |
+| AppImage | Usually manual | Theoretical | Poor fit for system codecs and graphics drivers | Do not prioritize |
+| Build from source | Manual rebuild | Developers | Current contributor workflow | Keep for contributors |
 
 ### Why Copr first
 
-An RPM keeps open-mpv on the same Fedora library and media stack on which it is
-developed and measured. A Copr repository makes installation reproducible and
-lets normal DNF updates deliver new versions. It is the smallest step from the
-current source install to a real user installation.
-
-This first package should target only Fedora releases that provide the required
-GTK and glycin versions. Supporting an older Fedora release by bundling core
-desktop libraries would add risk and defeat the main advantage of an RPM.
+An RPM preserves the Fedora library and media stack used for development while
+Copr supplies reproducible installation and DNF updates. Target only Fedora
+releases with the required GTK and glycin versions; do not bundle core desktop
+libraries merely to support older releases.
 
 ### Why Flatpak needs a prototype
 
-Flatpak is the strongest candidate for reaching users beyond Fedora, but it
-changes the app's filesystem and runtime boundaries. Before choosing it, build
-a disposable manifest and verify all of these on a real Wayland session:
-
-- opening a file from Files and loading the rest of its folder;
-- live folder updates;
-- trash followed by undo/restore;
-- atomic rotate-save for files outside the sandbox;
-- loading every advertised image format through compatible glycin loaders;
-- video playback, seeking, audio, VA-API decoding, and libav fallback;
-- reading configuration from the expected Flatpak-specific location;
-- single-instance activation and opening a second file; and
-- cold-start, PSS, and installed-size budgets.
+Flatpak broadens reach but changes filesystem and runtime boundaries. Prototype
+a disposable manifest on real Wayland and run the requirements with particular
+attention to folder access and monitoring, trash/restore and atomic saves,
+glycin loaders, codecs and VA-API/libav, configuration location,
+single-instance activation, cold start, PSS and installed size.
 
 The result should use the narrowest permissions that preserve the product. If
 folder navigation or file operations require broad host filesystem access, make
 that trade-off explicit before publishing.
 
-Flathub is not currently an available host for this project. Its requirements,
-checked on 12 August 2026, reject applications containing AI-assisted code or
-documentation except when a discretionary exception is granted to a mature,
-well-maintained project. This documentation was produced with AI assistance.
-Do not prepare or open a Flathub submission unless the policy changes or
-Flathub confirms an exception. A technically successful Flatpak can instead be
-published from a project-controlled repository, but that has less discovery
-than Flathub.
+At the last review on 12 August 2026, Flathub's requirements made this
+AI-assisted repository ineligible without a discretionary exception. Recheck
+the linked policy before any submission; absent eligibility or a confirmed
+exception, use a project-controlled Flatpak repository instead.
 
 ## Permanent application ID
 
-The application ID is an internal identity, not the name shown to users.
-open-mpv can keep its current product name regardless of this choice. GTK uses
-the ID as the application's D-Bus name, which is how a second launch finds the
-existing window. The desktop entry, icon, AppStream metadata, and any future
-Flatpak must use the same ID.
+The permanent ID is `io.github.TheRealShek.OpenMpv`. GTK uses it for D-Bus
+single-instance identity, and the desktop entry, icon, AppStream metadata and
+any future Flatpak must match it. The repository's `open-mpv` spelling may
+require separate ownership proof, but a hyphenated ID is avoided because GLib
+discourages hyphens in application IDs.
 
-The permanent ID is `io.github.TheRealShek.OpenMpv`. It connects the identity
-to the GitHub account that owns the repository and is easier to verify than an
-unrelated domain. The repository is named
-`open-mpv`, rather than `OpenMpv`, so a service that calculates the repository
-URL directly from the ID may require separate proof of ownership. Using a
-hyphen in the ID to mirror the repository would avoid that mismatch, but GLib
-discourages hyphens because they cause trouble in related D-Bus object paths
-and desktop specifications. The CamelCase product component is the safer
-technical choice.
-
-This ID must remain stable after the first public package. A later change would
-leave old desktop entries, icons, MIME associations, and package data behind
-and make the new build look like a different application.
+Keep this ID stable after public packaging; changing it would strand desktop,
+MIME and package data under the old identity.
 
 ## Release and update model
 
-Use semantic versions from `Cargo.toml` and make immutable signed Git tags such
-as `v0.1.0`. Each public release should have short release notes that explain
-user-visible changes, fixes, known issues, and any configuration change.
+Use the semantic version from `Cargo.toml` in immutable signed tags such as
+`v0.1.0`. Release notes cover user-visible changes, fixes, known issues and
+configuration changes.
 
 The update flow should be:
 
@@ -123,13 +90,11 @@ version + changelog -> signed source tag -> automated package build
                     -> package repository -> DNF or Flatpak update
 ```
 
-Stable packages should build only from a tag, never directly from the moving
-`main` branch. Package repositories should retain at least the previous build
-so a broken release can be downgraded while a fixed version is prepared.
+Build stable packages only from tags and retain at least the previous package
+for downgrade.
 
-There is no need for a fixed release calendar. Publish when a user-visible
-improvement or important fix is ready. For a security or data-safety issue,
-publish a patch release promptly and explain its impact plainly.
+Use no fixed calendar. Release meaningful improvements when ready; publish
+security or data-safety fixes promptly with a plain impact statement.
 
 ## Work required before the first package
 
@@ -144,8 +109,7 @@ publish a patch release promptly and explain its impact plainly.
 
 ## Decision checkpoints
 
-After the first RPM is tested, answer these with measurements rather than
-assumptions:
+After testing the first RPM, answer with measurements:
 
 - Does the package work on every Fedora release we claim to support?
 - Do upgrades preserve config and file associations?

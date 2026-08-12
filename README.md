@@ -12,27 +12,18 @@ the keyboard, and configurable with a plain-text file when you want it to be.
 > [Distribution and updates](docs/DISTRIBUTION.md) for the path to packaged
 > releases.
 
+![open-mpv displaying a landscape with its overlay controls visible](docs/assets/open-mpv.webp)
+
 ## What you can do
 
-- Open a photo, video, or folder and move through every supported file in that
-  folder.
-- View common image formats, animated images, SVGs, and videos in one window.
-- Zoom at the pointer, pan large images, switch between fit and actual size,
-  and use fullscreen mode.
-- Rotate an image while viewing it, then save the rotation when the format
-  supports it. JPEG rotation is lossless.
-- Move a file to the system trash and undo the action from the viewer.
-- Control video playback, seeking, volume, and looping without switching apps.
-- Show embedded subtitles or local SRT/WebVTT files, select tracks, and add a
-  subtitle through the CC/right-click menu or by dropping it on a video.
-- Use the mouse, touchpad, on-screen controls, or keyboard shortcuts.
-- Change the background, sorting, navigation, playback, and key bindings in a
-  small configuration file.
+- Browse supported photos and videos in one folder-navigation flow.
+- Zoom, pan, fit, rotate and use fullscreen with mouse, touchpad or keyboard.
+- Trash files with undo and save supported image rotations losslessly for JPEG.
+- Control local video and subtitles, with optional mpv-style configuration.
 
-Images are decoded in a separate sandbox through
-[glycin](https://gitlab.gnome.org/GNOME/glycin). The app does not use the
-network, collect telemetry, build a media library, or keep running after its
-window closes.
+Images are sandbox-decoded through
+[glycin](https://gitlab.gnome.org/GNOME/glycin). The app has no network,
+telemetry, media library or background service.
 
 ## Supported files
 
@@ -47,8 +38,7 @@ videos.
 
 ## Install on Fedora
 
-Packaged releases are not available yet. To install the current version for
-your user account:
+To install the current version for your user account:
 
 ```sh
 git clone https://github.com/TheRealShek/open-mpv.git
@@ -76,13 +66,9 @@ You can also launch open-mpv with no file and drag a file into its window.
 
 Press `?` inside the app to see the complete shortcut guide.
 
-Moving the pointer reveals a filename and folder-position pill at the
-top-left, fullscreen and close at the top-right, navigation arrows at the
-side edges, and media-specific controls at the bottom. Photos show rotate,
-conditional Save rotation, and Trash; videos show playback, timeline, time,
-subtitles, mute, and Trash. Less frequent view and navigation actions live in
-the More menu, available from either its three-dot button or a right-click on
-the photo or video.
+Moving the pointer reveals file information, navigation and media-specific
+controls. Less frequent actions live in the More menu, available from its
+three-dot button or by right-clicking the media.
 
 | Key or gesture | Action |
 | --- | --- |
@@ -149,8 +135,9 @@ reported.
 
 ## Development
 
-The product requirements are in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md),
-and deliberate scope decisions are in [docs/PLAN.md](docs/PLAN.md).
+Start with [AGENTS.md](AGENTS.md), which routes contributors to the
+authoritative requirements, scope and distribution documents and records the
+repository's engineering constraints.
 
 ```sh
 cargo run -- <file-or-folder>
