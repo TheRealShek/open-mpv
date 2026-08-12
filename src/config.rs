@@ -29,6 +29,12 @@ pub enum FitMode {
     Actual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtitleMode {
+    Auto,
+    Off,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub background: String,
@@ -41,6 +47,9 @@ pub struct Config {
     pub start_fullscreen: bool,
     /// Starting playback volume, 0.0..=1.5.
     pub volume: f64,
+    /// Whether each video starts with GStreamer's automatic subtitle
+    /// selection or with text streams disabled (FR-10.7).
+    pub subtitles: SubtitleMode,
     pub fit: FitMode,
     /// Seconds of mouse inactivity before overlay controls fade out.
     pub overlay_timeout: f64,
@@ -67,6 +76,7 @@ impl Default for Config {
             loop_video: true,
             start_fullscreen: false,
             volume: 1.0,
+            subtitles: SubtitleMode::Auto,
             fit: FitMode::Fit,
             overlay_timeout: 2.0,
             hide_cursor: true,
@@ -131,6 +141,11 @@ impl Config {
                 "volume" => match value.parse::<f64>() {
                     Ok(v) if (0.0..=150.0).contains(&v) => cfg.volume = v / 100.0,
                     _ => warn(origin, lineno, raw, "volume must be a percentage, 0-150"),
+                },
+                "subtitles" => match value {
+                    "auto" => cfg.subtitles = SubtitleMode::Auto,
+                    "off" => cfg.subtitles = SubtitleMode::Off,
+                    _ => warn(origin, lineno, raw, "subtitles must be auto|off"),
                 },
                 "wrap" => match parse_bool(value) {
                     Some(b) => cfg.wrap = b,
@@ -198,6 +213,12 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
 /// GStreamer plugins decode.
 pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov", "avi"];
 
+/// Text sidecars whose rendering is supplied by the base GStreamer stack
+/// on the target Fedora installation (FR-10.7). They are deliberately not
+/// part of `is_supported`: subtitles attach to a video and never enter the
+/// folder navigation set.
+pub const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "vtt"];
+
 /// True if the path has an extension we try to open (FR-2, FR-10).
 pub fn is_supported(path: &Path) -> bool {
     is_image(path) || is_video(path)
@@ -209,6 +230,10 @@ pub fn is_image(path: &Path) -> bool {
 
 pub fn is_video(path: &Path) -> bool {
     has_extension(path, VIDEO_EXTENSIONS)
+}
+
+pub fn is_subtitle(path: &Path) -> bool {
+    has_extension(path, SUBTITLE_EXTENSIONS)
 }
 
 /// Case-insensitive extension match, without lowercasing into a fresh
@@ -238,12 +263,13 @@ mod tests {
         assert_eq!(c.fit, FitMode::Fit);
         assert_eq!(c.overlay_timeout, 2.0);
         assert_eq!(c.cache_budget_mb, 256);
+        assert_eq!(c.subtitles, SubtitleMode::Auto);
         assert!(c.binds.is_empty());
     }
 
     #[test]
     fn parses_options_and_binds() {
-        let text = "\n# comment\nbackground = #000000\nsort=date\nsort-reverse=yes\nwrap=yes\nfit=actual\noverlay-timeout=1.5\nhide-cursor=no\nloop=no\nstart-fullscreen=yes\nvolume=70\ncache-budget-mb=64\nbind=n next\nbind=BackSpace prev\n";
+        let text = "\n# comment\nbackground = #000000\nsort=date\nsort-reverse=yes\nwrap=yes\nfit=actual\noverlay-timeout=1.5\nhide-cursor=no\nloop=no\nstart-fullscreen=yes\nvolume=70\nsubtitles=off\ncache-budget-mb=64\nbind=n next\nbind=BackSpace prev\n";
         let c = Config::parse(text, "t");
         assert_eq!(c.cache_budget_mb, 64);
         assert_eq!(c.background, "#000000");
@@ -256,13 +282,14 @@ mod tests {
         assert!(!c.loop_video);
         assert!(c.start_fullscreen);
         assert_eq!(c.volume, 0.7);
+        assert_eq!(c.subtitles, SubtitleMode::Off);
         assert_eq!(c.binds.get("n").map(String::as_str), Some("next"));
         assert_eq!(c.binds.get("BackSpace").map(String::as_str), Some("prev"));
     }
 
     #[test]
     fn malformed_lines_are_skipped() {
-        let text = "nonsense\nsort=upside-down\nwrap=maybe\nbind=x\nunknown=1\ncache-budget-mb=lots\nvolume=999\nloop=perhaps\nsort=date\n";
+        let text = "nonsense\nsort=upside-down\nwrap=maybe\nbind=x\nunknown=1\ncache-budget-mb=lots\nvolume=999\nsubtitles=maybe\nloop=perhaps\nsort=date\n";
         let c = Config::parse(text, "t");
         // The one valid line still applies; everything else falls back.
         assert_eq!(c.sort.order, SortOrder::Date);
@@ -270,6 +297,7 @@ mod tests {
         assert!(!c.wrap);
         // Out-of-range and unparseable values keep their defaults.
         assert_eq!(c.volume, 1.0);
+        assert_eq!(c.subtitles, SubtitleMode::Auto);
         assert!(c.loop_video);
         assert!(c.binds.is_empty());
     }
@@ -376,5 +404,13 @@ mod tests {
         assert!(!is_image(Path::new("clip.mp4")));
         // Videos are supported paths, but never images.
         assert!(is_supported(Path::new("clip.mp4")));
+    }
+
+    #[test]
+    fn subtitle_extensions_attach_but_never_enter_navigation() {
+        assert!(is_subtitle(Path::new("clip.en.SRT")));
+        assert!(is_subtitle(Path::new("clip.vtt")));
+        assert!(!is_subtitle(Path::new("clip.ass")));
+        assert!(!is_supported(Path::new("clip.srt")));
     }
 }

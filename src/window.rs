@@ -18,11 +18,11 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::prelude::*;
 
-use crate::config::{self, Config, FitMode};
+use crate::config::{self, Config, FitMode, SubtitleMode};
 use crate::fileops;
 use crate::folder::Folder;
 use crate::loader::{self, Decoded};
-use crate::player::{self, Player};
+use crate::player::{self, Player, SubtitleChoice, SubtitleSnapshot};
 use crate::viewer::ImageView;
 
 const SEEK_STEP_SECONDS: f64 = 10.0;
@@ -41,6 +41,8 @@ enum Action {
     SeekBack,
     SeekForward,
     Mute,
+    SubtitleToggle,
+    SubtitleCycle,
     VolumeUp,
     VolumeDown,
     ZoomIn,
@@ -74,6 +76,8 @@ impl Action {
             Action::SeekBack => "seek-back",
             Action::SeekForward => "seek-forward",
             Action::Mute => "mute",
+            Action::SubtitleToggle => "subtitle-toggle",
+            Action::SubtitleCycle => "subtitle-cycle",
             Action::VolumeUp => "volume-up",
             Action::VolumeDown => "volume-down",
             Action::ZoomIn => "zoom-in",
@@ -134,6 +138,10 @@ const DEFAULT_BINDS: &[(&str, Action)] = &[
     ("<Shift>Left", Action::SeekBack),
     ("<Shift>Right", Action::SeekForward),
     ("m", Action::Mute),
+    // `v` follows mpv. Its subtitle-cycle `j` is already open-mpv's
+    // backward seek, so Shift+V keeps the two actions adjacent (FR-10.7).
+    ("v", Action::SubtitleToggle),
+    ("<Shift>v", Action::SubtitleCycle),
     ("Delete", Action::Trash),
     ("KP_Delete", Action::Trash),
     ("<Control>z", Action::Undo),
@@ -162,6 +170,8 @@ const ACTIONS: &[(Action, &str)] = &[
     (Action::SeekBack, "Seek back 10 seconds"),
     (Action::SeekForward, "Seek forward 10 seconds"),
     (Action::Mute, "Mute audio"),
+    (Action::SubtitleToggle, "Show or hide subtitles"),
+    (Action::SubtitleCycle, "Next subtitle track"),
     (Action::VolumeUp, "Volume up"),
     (Action::VolumeDown, "Volume down"),
     (Action::ZoomIn, "Zoom in"),
@@ -289,6 +299,10 @@ pub struct App {
     transport: gtk::Box,
     play_btn: gtk::Button,
     mute_btn: gtk::Button,
+    subtitle_btn: gtk::MenuButton,
+    subtitle_menu: gio::Menu,
+    subtitle_available: Cell<bool>,
+    subtitle_action: gio::SimpleAction,
     save_btn: gtk::Button,
     /// (window width, transport shown, time length) the video controls
     /// were last fitted for.
@@ -431,10 +445,19 @@ impl App {
             "Play / pause",
         );
         let mute_btn = bar_button("audio-volume-high-symbolic", "win.mute", "Mute");
+        let subtitle_menu = gio::Menu::new();
+        let subtitle_btn = gtk::MenuButton::builder()
+            .icon_name("media-view-subtitles-symbolic")
+            .menu_model(&subtitle_menu)
+            .tooltip_text("Subtitles")
+            .build();
+        subtitle_btn.add_css_class("flat");
+        subtitle_btn.set_visible(false);
         let transport = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         transport.append(&play_btn);
         transport.append(&seek_bar);
         transport.append(&time_label);
+        transport.append(&subtitle_btn);
         transport.append(&mute_btn);
         transport.set_visible(false);
         bar.append(&transport);
@@ -546,6 +569,11 @@ impl App {
             w.set_can_target(false);
         }
 
+        let subtitle_action = gio::SimpleAction::new_stateful(
+            "subtitle",
+            Some(glib::VariantTy::STRING),
+            &"auto".to_variant(),
+        );
         let app = Rc::new(App {
             win: win.clone(),
             view: view.clone(),
@@ -566,6 +594,10 @@ impl App {
             transport,
             play_btn,
             mute_btn,
+            subtitle_btn: subtitle_btn.clone(),
+            subtitle_menu,
+            subtitle_available: Cell::new(false),
+            subtitle_action,
             save_btn,
             fitted_for: Cell::new(None),
             control_bar: bar.clone(),
@@ -613,6 +645,14 @@ impl App {
                 // leave handler. Reveal again after that race; while open,
                 // menu_open blocks every later fade. Closing starts a fresh
                 // timeout in the same call.
+                app.show_chrome();
+            }
+        ));
+        subtitle_btn.connect_active_notify(clone!(
+            #[strong(rename_to = app)]
+            app,
+            move |button| {
+                app.menu_open.set(button.is_active());
                 app.show_chrome();
             }
         ));
@@ -917,6 +957,7 @@ impl App {
             Ok(p) => {
                 let p = Rc::new(p);
                 p.set_volume(self.cfg.volume);
+                p.set_subtitles_default(self.cfg.subtitles == SubtitleMode::Auto);
                 *self.player.borrow_mut() = Some(p.clone());
                 Ok(p)
             }
@@ -938,6 +979,7 @@ impl App {
             self.show_error(path, &e.to_string());
             return;
         }
+        self.update_subtitles(player.subtitle_snapshot());
         *self.media.borrow_mut() = MediaState::Video(path.to_path_buf());
         self.update_control_mode();
         crate::applog!("play: {}", path.display());
@@ -958,13 +1000,38 @@ impl App {
     }
 
     fn stop_video(&self) {
-        if let Some(p) = self.player.borrow().as_ref() {
+        let snapshot = if let Some(p) = self.player.borrow().as_ref() {
             p.stop();
+            Some(p.subtitle_snapshot())
+        } else {
+            None
+        };
+        if let Some(snapshot) = snapshot {
+            self.update_subtitles(snapshot);
         }
         self.set_idle_inhibited(false);
         // Hiding the bar mid-drag means no button release reaches it.
         self.scrubbing.set(false);
         self.stop_transport_tick();
+    }
+
+    fn attach_subtitle(self: &Rc<Self>, path: &Path) {
+        if !self.is_video_showing() {
+            self.show_toast("Open a video before adding subtitles", false);
+            return;
+        }
+        let Some(player) = self.player.borrow().clone() else {
+            self.show_toast("Video player is unavailable", false);
+            return;
+        };
+        match player.attach_subtitle(path) {
+            Ok(()) => {
+                self.update_subtitles(player.subtitle_snapshot());
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                self.flash(&format!("Subtitles: {name}"));
+            }
+            Err(error) => self.show_toast(&error.to_string(), false),
+        }
     }
 
     // ----- video transport (FR-10.5) ------------------------------------
@@ -998,6 +1065,7 @@ impl App {
         self.seek_bar.set_size_request(0, -1);
         self.time_label.set_visible(true);
         self.mute_btn.set_visible(true);
+        self.subtitle_btn.set_visible(self.subtitle_available.get());
         let others = |s: &Self| s.control_bar.measure(gtk::Orientation::Horizontal, -1).0;
 
         let mut room = width - others(self);
@@ -1009,8 +1077,46 @@ impl App {
             self.mute_btn.set_visible(false);
             room = width - others(self);
         }
+        if room < SEEK_BAR_MIN_WIDTH {
+            self.subtitle_btn.set_visible(false);
+            room = width - others(self);
+        }
         self.seek_bar
             .set_size_request(room.clamp(0, SEEK_BAR_MAX_WIDTH), -1);
+    }
+
+    fn update_subtitles(&self, snapshot: SubtitleSnapshot) {
+        self.subtitle_menu.remove_all();
+        append_subtitle_item(&self.subtitle_menu, "Automatic", "auto");
+        append_subtitle_item(&self.subtitle_menu, "Off", "off");
+        for track in &snapshot.tracks {
+            append_subtitle_item(&self.subtitle_menu, &track.label, &track.id);
+        }
+        self.subtitle_action
+            .set_state(&snapshot.choice.action_target().to_variant());
+        let available = !snapshot.tracks.is_empty();
+        self.subtitle_available.set(available);
+        self.subtitle_btn.set_visible(available);
+        self.fitted_for.set(None);
+    }
+
+    fn flash_subtitle_choice(self: &Rc<Self>, snapshot: &SubtitleSnapshot) {
+        let text = match &snapshot.choice {
+            SubtitleChoice::Off => "Subtitles off".to_string(),
+            SubtitleChoice::Automatic => snapshot.active_label.as_ref().map_or_else(
+                || "Subtitles: Automatic".to_string(),
+                |label| format!("Subtitles: {label}"),
+            ),
+            SubtitleChoice::Track(id) => snapshot
+                .tracks
+                .iter()
+                .find(|track| track.id == *id)
+                .map_or_else(
+                    || "Subtitles changed".to_string(),
+                    |track| format!("Subtitles: {}", track.label),
+                ),
+        };
+        self.flash(&text);
     }
 
     fn update_transport(&self) {
@@ -1188,6 +1294,16 @@ impl App {
                 self.stop_video();
                 if let Some(path) = path {
                     self.show_error(&path, &format!("video decoder unavailable: {description}"));
+                }
+            }
+            player::Event::SubtitleError(description) => {
+                if self.is_video_showing() {
+                    self.show_toast(&description, false);
+                }
+            }
+            player::Event::SubtitlesChanged(snapshot) => {
+                if self.is_video_showing() {
+                    self.update_subtitles(snapshot);
                 }
             }
         }
@@ -1975,6 +2091,28 @@ impl App {
                 None => {}
             }),
         );
+        add(
+            Action::SubtitleToggle,
+            Box::new(|a| {
+                if let Some(snapshot) = a.with_video(Player::toggle_subtitles)
+                    && !snapshot.tracks.is_empty()
+                {
+                    a.update_subtitles(snapshot.clone());
+                    a.flash_subtitle_choice(&snapshot);
+                }
+            }),
+        );
+        add(
+            Action::SubtitleCycle,
+            Box::new(|a| {
+                if let Some(snapshot) = a.with_video(Player::cycle_subtitles)
+                    && !snapshot.tracks.is_empty()
+                {
+                    a.update_subtitles(snapshot.clone());
+                    a.flash_subtitle_choice(&snapshot);
+                }
+            }),
+        );
         add(Action::VolumeUp, Box::new(|a| a.change_volume(0.1)));
         add(Action::VolumeDown, Box::new(|a| a.change_volume(-0.1)));
         add(Action::Trash, Box::new(|a| a.trash_current()));
@@ -2018,6 +2156,26 @@ impl App {
         self.undo_action
             .connect_activate(move |_, _| app.undo_trash());
         self.win.add_action(&self.undo_action);
+
+        let app = self.clone();
+        self.subtitle_action.connect_activate(move |_, parameter| {
+            let Some(target) = parameter.and_then(glib::Variant::str) else {
+                return;
+            };
+            let choice = match target {
+                "auto" => SubtitleChoice::Automatic,
+                "off" => SubtitleChoice::Off,
+                id => SubtitleChoice::Track(id.to_string()),
+            };
+            let Some(changed) = app.with_video(|player| player.choose_subtitle(choice)) else {
+                return;
+            };
+            if changed && let Some(snapshot) = app.with_video(Player::subtitle_snapshot) {
+                app.update_subtitles(snapshot.clone());
+                app.flash_subtitle_choice(&snapshot);
+            }
+        });
+        self.win.add_action(&self.subtitle_action);
 
         // Defaults merged with user binds (FR-8.2); a user bind takes
         // the key over from the default action.
@@ -2240,7 +2398,8 @@ impl App {
         ));
         self.win.add_controller(drag);
 
-        // Drag-and-drop a file onto the window (FR-1.5).
+        // Media drops open normally; subtitle drops attach to the video
+        // already on screen without changing its folder context (FR-10.7).
         let drop = gtk::DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
         drop.connect_drop(clone!(
             #[strong(rename_to = app)]
@@ -2249,7 +2408,13 @@ impl App {
                 if let Ok(file) = value.get::<gio::File>()
                     && let Some(path) = file.path()
                 {
-                    app.open_path(&path);
+                    if config::is_subtitle(&path) {
+                        app.attach_subtitle(&path);
+                    } else if looks_like_subtitle(&path) {
+                        app.show_toast("Only SRT and WebVTT subtitles are supported", false);
+                    } else {
+                        app.open_path(&path);
+                    }
                     return true;
                 }
                 false
@@ -2328,6 +2493,25 @@ fn bar_button(icon: &str, action: &str, tooltip: &str) -> gtk::Button {
     b.set_tooltip_text(Some(tooltip));
     b.add_css_class("flat");
     b
+}
+
+fn append_subtitle_item(menu: &gio::Menu, label: &str, target: &str) {
+    let item = gio::MenuItem::new(Some(label), None);
+    item.set_action_and_target_value(Some("win.subtitle"), Some(&target.to_variant()));
+    menu.append_item(&item);
+}
+
+/// Recognise common subtitle extensions that are deliberately outside the
+/// supported SRT/WebVTT boundary, so dropping one reports non-modally rather
+/// than replacing the current video with an unsupported-file error.
+fn looks_like_subtitle(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["ass", "ssa", "sub", "smi", "sami", "ttml"]
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
 }
 
 fn apply_css(background: &str) {
@@ -2516,8 +2700,8 @@ mod tests {
     use super::{
         ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SEEK_STEP_SECONDS,
         SKIP_BUDGET, cache_budget_bytes, chrome_is_held, excluded_path_message, format_time,
-        nav_target, position_text, resize_edge_at, save_control_visible, skip_target,
-        svg_render_dimension, window_dimension,
+        looks_like_subtitle, nav_target, position_text, resize_edge_at, save_control_visible,
+        skip_target, svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -2597,6 +2781,13 @@ mod tests {
         assert_eq!(excluded_path_message(&missing), "file does not exist");
         assert_eq!(excluded_path_message(&unsupported), "unsupported file type");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unsupported_subtitle_drops_are_kept_non_modal() {
+        assert!(looks_like_subtitle(&PathBuf::from("movie.ASS")));
+        assert!(looks_like_subtitle(&PathBuf::from("movie.ssa")));
+        assert!(!looks_like_subtitle(&PathBuf::from("movie.mkv")));
     }
 
     #[test]
@@ -2721,6 +2912,14 @@ mod tests {
             DEFAULT_BINDS.contains(&("<Shift>Right", Action::SeekForward)),
             "Shift+Right must seek without taking plain Right away from folder navigation"
         );
+    }
+
+    #[test]
+    fn subtitle_keys_keep_mpv_visibility_without_stealing_seek() {
+        assert!(DEFAULT_BINDS.contains(&("v", Action::SubtitleToggle)));
+        assert!(DEFAULT_BINDS.contains(&("<Shift>v", Action::SubtitleCycle)));
+        assert!(DEFAULT_BINDS.contains(&("j", Action::SeekBack)));
+        assert!(DEFAULT_BINDS.contains(&("l", Action::SeekForward)));
     }
 
     #[test]

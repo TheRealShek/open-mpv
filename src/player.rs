@@ -10,7 +10,10 @@
 //! `Null`, freeing decoder state while an image is shown.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -21,6 +24,8 @@ use gstreamer::prelude::*;
 
 use gtk4::gdk;
 use gtk4::glib;
+
+use crate::config;
 
 /// Seeks land on the exact target, not on the nearest keyframe. Keyframe
 /// seeks are cheaper, but short clips are routinely encoded as a single
@@ -48,6 +53,39 @@ pub enum Event {
     EndOfStream,
     Error(glib::Error),
     MissingVideoDecoder(String),
+    SubtitleError(String),
+    SubtitlesChanged(SubtitleSnapshot),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitleTrack {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SubtitleChoice {
+    #[default]
+    Automatic,
+    Off,
+    Track(String),
+}
+
+impl SubtitleChoice {
+    pub fn action_target(&self) -> &str {
+        match self {
+            SubtitleChoice::Automatic => "auto",
+            SubtitleChoice::Off => "off",
+            SubtitleChoice::Track(id) => id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitleSnapshot {
+    pub tracks: Vec<SubtitleTrack>,
+    pub choice: SubtitleChoice,
+    pub active_label: Option<String>,
 }
 
 #[derive(Debug)]
@@ -64,6 +102,10 @@ pub enum PlayerError {
     Playback {
         path: PathBuf,
         source: gst::StateChangeError,
+    },
+    SubtitleFile {
+        path: PathBuf,
+        source: io::Error,
     },
 }
 
@@ -85,6 +127,9 @@ impl fmt::Display for PlayerError {
             PlayerError::Playback { path, source } => {
                 write!(f, "cannot start playback of {}: {source}", path.display())
             }
+            PlayerError::SubtitleFile { path, source } => {
+                write!(f, "cannot read subtitle {}: {source}", path.display())
+            }
         }
     }
 }
@@ -97,8 +142,55 @@ impl std::error::Error for PlayerError {
             | PlayerError::PlaybinUnavailable(source)
             | PlayerError::BusWatch(source) => Some(source),
             PlayerError::Playback { source, .. } => Some(source),
+            PlayerError::SubtitleFile { source, .. } => Some(source),
             PlayerError::MissingBus => None,
         }
+    }
+}
+
+#[derive(Default)]
+struct SubtitleState {
+    collection: Option<gst::StreamCollection>,
+    selected: BTreeSet<String>,
+    tracks: Vec<SubtitleTrack>,
+    choice: SubtitleChoice,
+    external: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ResumeStage {
+    Preroll,
+    Seek,
+}
+
+#[derive(Debug, PartialEq)]
+enum ResumeAction {
+    Seek { position: f64, resume_playing: bool },
+    Finish { resume_playing: bool },
+    None,
+}
+
+struct ResumeState {
+    position: f64,
+    play_after_seek: bool,
+    stage: ResumeStage,
+}
+
+fn advance_resume(pending: &mut Option<ResumeState>) -> ResumeAction {
+    match pending.as_mut() {
+        Some(state) if matches!(state.stage, ResumeStage::Preroll) => {
+            state.stage = ResumeStage::Seek;
+            ResumeAction::Seek {
+                position: state.position,
+                resume_playing: state.play_after_seek,
+            }
+        }
+        Some(state) => {
+            let resume_playing = state.play_after_seek;
+            *pending = None;
+            ResumeAction::Finish { resume_playing }
+        }
+        None => ResumeAction::None,
     }
 }
 
@@ -237,6 +329,10 @@ pub struct Player {
     /// Cached so the per-frame transport update does not re-query the
     /// demuxer; invalidated on `DurationChanged` and on every new video.
     duration: Rc<Cell<Option<f64>>>,
+    subtitles: Rc<RefCell<SubtitleState>>,
+    current_video: Rc<RefCell<Option<PathBuf>>>,
+    subtitles_default_on: Cell<bool>,
+    resume: Rc<RefCell<Option<ResumeState>>>,
     decoder_fallback: Arc<Mutex<DecoderFallback>>,
     /// Keeps the bus watch alive; dropping it detaches the watch.
     _bus_watch: gst::bus::BusWatchGuard,
@@ -259,6 +355,9 @@ impl Player {
 
         let seek = Rc::new(RefCell::new(SeekState::default()));
         let duration = Rc::new(Cell::new(None));
+        let subtitles = Rc::new(RefCell::new(SubtitleState::default()));
+        let resume = Rc::new(RefCell::new(None::<ResumeState>));
+        let current_video = Rc::new(RefCell::new(None::<PathBuf>));
         let decoder_fallback = Arc::new(Mutex::new(DecoderFallback::default()));
         playbin.connect_closure(
             "element-setup",
@@ -314,6 +413,9 @@ impl Player {
                 let playbin = playbin.clone();
                 let seek = seek.clone();
                 let duration = duration.clone();
+                let subtitles = subtitles.clone();
+                let resume = resume.clone();
+                let current_video = current_video.clone();
                 let decoder_fallback = decoder_fallback.clone();
                 move |_bus, msg| {
                     match msg.view() {
@@ -326,19 +428,63 @@ impl Player {
                                 e.debug()
                             );
                             lock_decoder_fallback(&decoder_fallback).restore();
-                            on_event(Event::Error(e.error()));
-                        }
-                        gst::MessageView::Element(e) => {
-                            if let Some(description) = e.structure().and_then(missing_video_decoder)
-                            {
-                                crate::applog!("player: missing video decoder: {description}");
-                                on_event(Event::MissingVideoDecoder(description));
+                            if recover_without_external(
+                                &playbin,
+                                &current_video,
+                                &subtitles,
+                                &resume,
+                                &seek,
+                                &duration,
+                            ) {
+                                on_event(Event::SubtitleError(e.error().to_string()));
+                            } else {
+                                on_event(Event::Error(e.error()));
                             }
                         }
-                        // The seek landed: real positions are truthful
-                        // again, and the newest scrub position that piled
-                        // up behind it can go out now.
+                        gst::MessageView::Element(e) => {
+                            let structure = e.structure();
+                            if let Some(description) = structure.and_then(missing_video_decoder) {
+                                crate::applog!("player: missing video decoder: {description}");
+                                on_event(Event::MissingVideoDecoder(description));
+                            } else if let Some(description) =
+                                structure.and_then(missing_subtitle_decoder)
+                            {
+                                crate::applog!("player: missing subtitle decoder: {description}");
+                                on_event(Event::SubtitleError(format!(
+                                    "subtitle decoder unavailable: {description}"
+                                )));
+                            }
+                        }
                         gst::MessageView::AsyncDone(_) => {
+                            // Replacing an external sidecar rebuilds the
+                            // same URI in Paused, then restores position and
+                            // the former playback state without blocking the
+                            // GTK main loop (FR-10.7).
+                            let resume_action = advance_resume(&mut resume.borrow_mut());
+                            match resume_action {
+                                ResumeAction::Seek {
+                                    position,
+                                    resume_playing,
+                                } => {
+                                    if position <= f64::EPSILON
+                                        || !issue_seek(&playbin, &seek, position)
+                                    {
+                                        *resume.borrow_mut() = None;
+                                        if resume_playing {
+                                            let _ = playbin.set_state(gst::State::Playing);
+                                        }
+                                    }
+                                    return glib::ControlFlow::Continue;
+                                }
+                                ResumeAction::Finish { resume_playing } if resume_playing => {
+                                    let _ = playbin.set_state(gst::State::Playing);
+                                }
+                                ResumeAction::Finish { .. } | ResumeAction::None => {}
+                            }
+
+                            // The seek landed: real positions are truthful
+                            // again, and the newest scrub position that piled
+                            // up behind it can go out now.
                             let next = {
                                 let mut state = seek.borrow_mut();
                                 state.in_flight = None;
@@ -347,6 +493,42 @@ impl Player {
                             if let Some(secs) = next {
                                 issue_seek(&playbin, &seek, secs);
                             }
+                        }
+                        gst::MessageView::StreamCollection(streams) => {
+                            let collection = streams.stream_collection();
+                            let choice = {
+                                let mut state = subtitles.borrow_mut();
+                                state.collection = Some(collection);
+                                refresh_subtitle_tracks(&mut state);
+                                if matches!(
+                                    &state.choice,
+                                    SubtitleChoice::Track(id)
+                                        if !state.tracks.iter().any(|track| track.id == *id)
+                                ) {
+                                    state.choice = SubtitleChoice::Automatic;
+                                }
+                                state.choice.clone()
+                            };
+                            crate::applog!(
+                                "player: discovered {} subtitle track(s)",
+                                subtitles.borrow().tracks.len()
+                            );
+                            if choice != SubtitleChoice::Automatic {
+                                apply_subtitle_choice(&playbin, &subtitles, &choice);
+                            }
+                            on_event(Event::SubtitlesChanged(subtitle_snapshot(
+                                &subtitles.borrow(),
+                            )));
+                        }
+                        gst::MessageView::StreamsSelected(streams) => {
+                            let selected = streams
+                                .streams()
+                                .filter_map(|stream| stream.stream_id().map(|id| id.to_string()))
+                                .collect();
+                            subtitles.borrow_mut().selected = selected;
+                            on_event(Event::SubtitlesChanged(subtitle_snapshot(
+                                &subtitles.borrow(),
+                            )));
                         }
                         gst::MessageView::DurationChanged(_) => duration.set(None),
                         _ => {}
@@ -361,6 +543,10 @@ impl Player {
             paintable,
             seek,
             duration,
+            subtitles,
+            current_video,
+            subtitles_default_on: Cell::new(true),
+            resume,
             decoder_fallback,
             _bus_watch: bus_watch,
         })
@@ -373,13 +559,18 @@ impl Player {
     /// Start playing `path` from the beginning, replacing any current
     /// video. The pipeline object is reused; only its state cycles.
     pub fn play(&self, path: &Path) -> Result<(), PlayerError> {
-        let uri = glib::filename_to_uri(path, None).map_err(|source| PlayerError::Uri {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let subtitle = matching_sidecar(path);
+        if let Some(subtitle) = subtitle.as_ref() {
+            crate::applog!("player: matched subtitle {}", subtitle.display());
+        }
+        let uri = file_uri(path)?;
+        let suburi = subtitle.as_deref().map(file_uri).transpose()?;
         let _ = self.playbin.set_state(gst::State::Null);
         self.forget_stream();
+        *self.current_video.borrow_mut() = Some(path.to_path_buf());
+        self.subtitles.borrow_mut().external = subtitle;
         self.playbin.set_property("uri", uri.as_str());
+        self.playbin.set_property("suburi", suburi.as_deref());
         self.playbin
             .set_state(gst::State::Playing)
             .map_err(|source| PlayerError::Playback {
@@ -402,9 +593,152 @@ impl Player {
     /// Drop everything that describes the outgoing stream so the next
     /// video never reports the previous one's duration or seek target.
     fn forget_stream(&self) {
+        self.forget_timing();
+        *self.current_video.borrow_mut() = None;
+        *self.resume.borrow_mut() = None;
+        let choice = if self.subtitles_default_on.get() {
+            SubtitleChoice::Automatic
+        } else {
+            SubtitleChoice::Off
+        };
+        *self.subtitles.borrow_mut() = SubtitleState {
+            choice,
+            ..SubtitleState::default()
+        };
+    }
+
+    fn forget_timing(&self) {
         lock_decoder_fallback(&self.decoder_fallback).restore();
         *self.seek.borrow_mut() = SeekState::default();
         self.duration.set(None);
+    }
+
+    /// Set the initial subtitle policy applied independently to every
+    /// newly opened video (FR-8.2/10.7).
+    pub fn set_subtitles_default(&self, enabled: bool) {
+        self.subtitles_default_on.set(enabled);
+        if self.current_video.borrow().is_none() {
+            self.subtitles.borrow_mut().choice = if enabled {
+                SubtitleChoice::Automatic
+            } else {
+                SubtitleChoice::Off
+            };
+        }
+    }
+
+    /// Attach a local SRT/WebVTT file to the current video. `playbin3`
+    /// consumes one external `suburi`, so a later drop replaces it. The
+    /// pipeline is re-prerolled asynchronously and resumes at the same
+    /// position and play/pause state (FR-10.7).
+    pub fn attach_subtitle(&self, path: &Path) -> Result<(), PlayerError> {
+        fs::File::open(path).map_err(|source| PlayerError::SubtitleFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let video =
+            self.current_video
+                .borrow()
+                .clone()
+                .ok_or_else(|| PlayerError::SubtitleFile {
+                    path: path.to_path_buf(),
+                    source: io::Error::new(io::ErrorKind::InvalidInput, "no video is playing"),
+                })?;
+        let uri = file_uri(&video)?;
+        let suburi = file_uri(path)?;
+        let position = self.progress().map_or_else(
+            || {
+                self.playbin
+                    .query_position::<gst::ClockTime>()
+                    .map_or(0.0, gst::ClockTime::seconds_f64)
+            },
+            |(position, _)| position,
+        );
+        let play_after_seek = self.is_playing();
+
+        let _ = self.playbin.set_state(gst::State::Null);
+        self.forget_timing();
+        {
+            let mut subtitles = self.subtitles.borrow_mut();
+            subtitles.collection = None;
+            subtitles.selected.clear();
+            subtitles.tracks.clear();
+            subtitles.choice = SubtitleChoice::Automatic;
+            subtitles.external = Some(path.to_path_buf());
+        }
+        *self.resume.borrow_mut() = Some(ResumeState {
+            position,
+            play_after_seek,
+            stage: ResumeStage::Preroll,
+        });
+        self.playbin.set_property("uri", uri.as_str());
+        self.playbin.set_property("suburi", suburi.as_str());
+        crate::applog!("player: attached subtitle {}", path.display());
+        if let Err(source) = self.playbin.set_state(gst::State::Paused) {
+            *self.resume.borrow_mut() = None;
+            return Err(PlayerError::Playback {
+                path: video,
+                source,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn subtitle_snapshot(&self) -> SubtitleSnapshot {
+        subtitle_snapshot(&self.subtitles.borrow())
+    }
+
+    pub fn choose_subtitle(&self, choice: SubtitleChoice) -> bool {
+        if let SubtitleChoice::Track(id) = &choice
+            && !self
+                .subtitles
+                .borrow()
+                .tracks
+                .iter()
+                .any(|track| track.id == *id)
+        {
+            return false;
+        }
+        let sent = apply_subtitle_choice(&self.playbin, &self.subtitles, &choice);
+        if sent {
+            crate::applog!("player: subtitle selection {}", choice.action_target());
+            self.subtitles.borrow_mut().choice = choice;
+        }
+        sent
+    }
+
+    pub fn toggle_subtitles(&self) -> SubtitleSnapshot {
+        if self.subtitles.borrow().tracks.is_empty() {
+            return self.subtitle_snapshot();
+        }
+        let choice = if self.subtitles.borrow().choice == SubtitleChoice::Off {
+            SubtitleChoice::Automatic
+        } else {
+            SubtitleChoice::Off
+        };
+        self.choose_subtitle(choice);
+        self.subtitle_snapshot()
+    }
+
+    pub fn cycle_subtitles(&self) -> SubtitleSnapshot {
+        let state = self.subtitles.borrow();
+        if state.tracks.is_empty() {
+            return subtitle_snapshot(&state);
+        }
+        let choice = if state.choice == SubtitleChoice::Off {
+            state.tracks.first().map_or(SubtitleChoice::Off, |track| {
+                SubtitleChoice::Track(track.id.clone())
+            })
+        } else {
+            selected_text_id(&state)
+                .and_then(|id| state.tracks.iter().position(|track| track.id == id))
+                .and_then(|index| state.tracks.get(index + 1))
+                .map_or(SubtitleChoice::Off, |track| {
+                    SubtitleChoice::Track(track.id.clone())
+                })
+        };
+        drop(state);
+        self.choose_subtitle(choice);
+        self.subtitle_snapshot()
     }
 
     /// Where the pipeline is heading: the pending state while a
@@ -530,6 +864,270 @@ impl Player {
     }
 }
 
+fn file_uri(path: &Path) -> Result<String, PlayerError> {
+    glib::filename_to_uri(path, None)
+        .map(String::from)
+        .map_err(|source| PlayerError::Uri {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// If an external subtitle makes an otherwise-working pipeline fail, remove
+/// only that auxiliary URI and asynchronously restore the video. The external
+/// marker is cleared before retrying, so a genuine video failure on the retry
+/// follows the normal fatal path instead of looping (FR-10.7).
+fn recover_without_external(
+    playbin: &gst::Element,
+    current_video: &RefCell<Option<PathBuf>>,
+    subtitles: &RefCell<SubtitleState>,
+    resume: &RefCell<Option<ResumeState>>,
+    seek: &RefCell<SeekState>,
+    duration: &Cell<Option<f64>>,
+) -> bool {
+    let had_external = subtitles.borrow().external.is_some();
+    if !had_external {
+        return false;
+    }
+    let Some(video) = current_video.borrow().clone() else {
+        return false;
+    };
+    let Ok(uri) = glib::filename_to_uri(&video, None) else {
+        return false;
+    };
+    let (position, play_after_seek) = resume.borrow().as_ref().map_or_else(
+        || {
+            let position = playbin
+                .query_position::<gst::ClockTime>()
+                .map_or(0.0, gst::ClockTime::seconds_f64);
+            let (_, current, pending) = playbin.state(gst::ClockTime::ZERO);
+            let target = if pending == gst::State::VoidPending {
+                current
+            } else {
+                pending
+            };
+            (position, target == gst::State::Playing)
+        },
+        |state| (state.position, state.play_after_seek),
+    );
+
+    let _ = playbin.set_state(gst::State::Null);
+    *seek.borrow_mut() = SeekState::default();
+    duration.set(None);
+    {
+        let mut state = subtitles.borrow_mut();
+        state.collection = None;
+        state.selected.clear();
+        state.tracks.clear();
+        state.choice = SubtitleChoice::Automatic;
+        state.external = None;
+    }
+    *resume.borrow_mut() = Some(ResumeState {
+        position,
+        play_after_seek,
+        stage: ResumeStage::Preroll,
+    });
+    playbin.set_property("uri", uri.as_str());
+    playbin.set_property("suburi", Option::<&str>::None);
+    if playbin.set_state(gst::State::Paused).is_err() {
+        *resume.borrow_mut() = None;
+        return false;
+    }
+    crate::applog!("player: external subtitle failed; restoring video without it");
+    true
+}
+
+/// Find one deterministic automatic sidecar without involving the folder
+/// model or GIO. Exact `video.srt` wins, then SRT over WebVTT, then lexical
+/// order among language/role suffixes (FR-10.7).
+fn matching_sidecar(video: &Path) -> Option<PathBuf> {
+    let stem = video.file_stem()?.to_str()?;
+    let parent = video.parent()?;
+    let mut matches: Vec<PathBuf> = fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && config::is_subtitle(path))
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|candidate| candidate.to_str())
+                .is_some_and(|candidate| {
+                    candidate == stem
+                        || candidate
+                            .strip_prefix(stem)
+                            .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
+                })
+        })
+        .collect();
+    matches.sort_by_key(|path| {
+        let candidate = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let exact = candidate != stem;
+        let webvtt = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("vtt"));
+        (
+            exact,
+            webvtt,
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase(),
+        )
+    });
+    matches.into_iter().next()
+}
+
+fn refresh_subtitle_tracks(state: &mut SubtitleState) {
+    let Some(collection) = state.collection.as_ref() else {
+        state.tracks.clear();
+        return;
+    };
+    let mut external_label = state.external.as_ref().and_then(|path| {
+        path.file_name()
+            .map(|name| format!("External — {}", name.to_string_lossy()))
+    });
+    state.tracks = (0..collection.size())
+        .filter_map(|index| collection.stream(index))
+        .filter(|stream| stream.stream_type().contains(gst::StreamType::TEXT))
+        .enumerate()
+        .filter_map(|(index, stream)| {
+            let id = stream.stream_id()?.to_string();
+            let tags = stream.tags();
+            let label = tags
+                .as_ref()
+                .and_then(|tags| tags.get::<gst::tags::Title>())
+                .map(|value| value.get().to_string())
+                .or_else(|| {
+                    tags.as_ref()
+                        .and_then(|tags| tags.get::<gst::tags::LanguageName>())
+                        .map(|value| value.get().to_string())
+                })
+                .or_else(|| {
+                    tags.as_ref()
+                        .and_then(|tags| tags.get::<gst::tags::LanguageCode>())
+                        .map(|value| value.get().to_string())
+                })
+                .or_else(|| external_label.take())
+                .unwrap_or_else(|| format!("Subtitle {}", index + 1));
+            Some(SubtitleTrack { id, label })
+        })
+        .collect();
+}
+
+fn subtitle_snapshot(state: &SubtitleState) -> SubtitleSnapshot {
+    let active_label = selected_text_id(state).and_then(|id| {
+        state
+            .tracks
+            .iter()
+            .find(|track| track.id == id)
+            .map(|track| track.label.clone())
+    });
+    SubtitleSnapshot {
+        tracks: state.tracks.clone(),
+        choice: state.choice.clone(),
+        active_label,
+    }
+}
+
+fn selected_text_id(state: &SubtitleState) -> Option<&str> {
+    state
+        .tracks
+        .iter()
+        .find(|track| state.selected.contains(&track.id))
+        .map(|track| track.id.as_str())
+}
+
+fn apply_subtitle_choice(
+    playbin: &gst::Element,
+    subtitles: &RefCell<SubtitleState>,
+    choice: &SubtitleChoice,
+) -> bool {
+    let state = subtitles.borrow();
+    let selected = subtitle_selection_ids(&state, choice);
+    drop(state);
+
+    if selected.is_empty() {
+        return false;
+    }
+    let event = gst::event::SelectStreams::new(selected.iter().map(String::as_str));
+    playbin.send_event(event)
+}
+
+fn subtitle_selection_ids(state: &SubtitleState, choice: &SubtitleChoice) -> Vec<String> {
+    let Some(collection) = state.collection.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut selected: Vec<String> = (0..collection.size())
+        .filter_map(|index| collection.stream(index))
+        .filter(|stream| !stream.stream_type().contains(gst::StreamType::TEXT))
+        .filter_map(|stream| {
+            let id = stream.stream_id()?.to_string();
+            state.selected.contains(&id).then_some(id)
+        })
+        .collect();
+
+    // A collection can arrive before StreamsSelected. Preserve its default
+    // audio/video choices rather than sending a text-only selection event.
+    for kind in [gst::StreamType::VIDEO, gst::StreamType::AUDIO] {
+        let already_selected = selected.iter().any(|id| {
+            stream_by_id(collection, id).is_some_and(|stream| stream.stream_type().contains(kind))
+        });
+        if already_selected {
+            continue;
+        }
+        let candidate = streams_of_type(collection, kind)
+            .find(|stream| stream.stream_flags().contains(gst::StreamFlags::SELECT))
+            .or_else(|| {
+                streams_of_type(collection, kind)
+                    .find(|stream| !stream.stream_flags().contains(gst::StreamFlags::UNSELECT))
+            });
+        if let Some(id) = candidate.and_then(|stream| stream.stream_id()) {
+            selected.push(id.to_string());
+        }
+    }
+
+    let text_id: Option<String> = match choice {
+        SubtitleChoice::Off => None,
+        SubtitleChoice::Track(id) => state
+            .tracks
+            .iter()
+            .any(|track| track.id == *id)
+            .then(|| id.clone()),
+        SubtitleChoice::Automatic => streams_of_type(collection, gst::StreamType::TEXT)
+            .find(|stream| stream.stream_flags().contains(gst::StreamFlags::SELECT))
+            .or_else(|| {
+                streams_of_type(collection, gst::StreamType::TEXT)
+                    .find(|stream| !stream.stream_flags().contains(gst::StreamFlags::UNSELECT))
+            })
+            .and_then(|stream| stream.stream_id())
+            .map(String::from),
+    };
+    if let Some(id) = text_id {
+        selected.push(id);
+    }
+    selected
+}
+
+fn streams_of_type(
+    collection: &gst::StreamCollection,
+    kind: gst::StreamType,
+) -> impl Iterator<Item = gst::Stream> + '_ {
+    (0..collection.size())
+        .filter_map(|index| collection.stream(index))
+        .filter(move |stream| stream.stream_type().contains(kind))
+}
+
+fn stream_by_id(collection: &gst::StreamCollection, id: &str) -> Option<gst::Stream> {
+    (0..collection.size())
+        .filter_map(|index| collection.stream(index))
+        .find(|stream| stream.stream_id().as_deref() == Some(id))
+}
+
 /// Give a working hardware decoder priority over the `Primary` software
 /// fallback. `None` means preserve an explicit disable (`Rank::None`) or
 /// a choice already ranked above ours.
@@ -562,6 +1160,22 @@ fn prefer_intel_video_decoders() {
 /// element message and surface the broken video playback (FR-10.6).
 /// Missing audio and subtitle decoders do not make the picture unusable.
 fn missing_video_decoder(structure: &gst::StructureRef) -> Option<String> {
+    missing_decoder_matching(structure, |media_type| media_type.starts_with("video/"))
+}
+
+fn missing_subtitle_decoder(structure: &gst::StructureRef) -> Option<String> {
+    missing_decoder_matching(structure, |media_type| {
+        media_type.starts_with("text/")
+            || media_type.starts_with("subpicture/")
+            || media_type.starts_with("closedcaption/")
+            || media_type.starts_with("application/x-subtitle")
+    })
+}
+
+fn missing_decoder_matching(
+    structure: &gst::StructureRef,
+    matches_media_type: impl Fn(&str) -> bool,
+) -> Option<String> {
     if structure.name() != "missing-plugin"
         || structure.get::<String>("type").ok().as_deref() != Some("decoder")
     {
@@ -571,7 +1185,7 @@ fn missing_video_decoder(structure: &gst::StructureRef) -> Option<String> {
     let caps = structure.get::<gst::Caps>("detail").ok()?;
     if !caps
         .iter()
-        .any(|candidate| candidate.name().starts_with("video/"))
+        .any(|candidate| matches_media_type(candidate.name().as_str()))
     {
         return None;
     }
@@ -587,19 +1201,25 @@ fn missing_video_decoder(structure: &gst::StructureRef) -> Option<String> {
 
 /// Send the seek and record it as in flight. Free-standing because the
 /// bus watch flushes queued scrub positions without holding a `Player`.
-fn issue_seek(playbin: &gst::Element, seek: &RefCell<SeekState>, secs: f64) {
+fn issue_seek(playbin: &gst::Element, seek: &RefCell<SeekState>, secs: f64) -> bool {
     let secs = secs.max(0.0);
     let Ok(target) = gst::ClockTime::try_from_seconds_f64(secs) else {
         crate::applog!("player: refusing invalid seek target {secs}");
-        return;
+        return false;
     };
     {
         let mut state = seek.borrow_mut();
         state.in_flight = Some((secs, Instant::now()));
         state.queued = None;
     }
-    let _ = playbin.seek_simple(SEEK_FLAGS, target);
-    crate::applog!("player: seek to {secs:.1}s");
+    let sent = playbin.seek_simple(SEEK_FLAGS, target).is_ok();
+    if sent {
+        crate::applog!("player: seek to {secs:.1}s");
+    } else {
+        seek.borrow_mut().in_flight = None;
+        crate::applog!("player: seek to {secs:.1}s was refused");
+    }
+    sent
 }
 
 impl Drop for Player {
@@ -614,9 +1234,11 @@ mod tests {
     use gstreamer::prelude::PluginFeatureExtManual;
 
     use super::{
-        DecoderFallback, INTEL_VIDEO_DECODERS, Instant, SEEK_SETTLE, SeekState, gst,
-        h264_exceeds_declared_level, missing_video_decoder, prefer_intel_video_decoders,
-        preferred_hardware_rank,
+        DecoderFallback, INTEL_VIDEO_DECODERS, Instant, ResumeAction, ResumeStage, ResumeState,
+        SEEK_SETTLE, SeekState, SubtitleChoice, SubtitleState, advance_resume, gst,
+        h264_exceeds_declared_level, matching_sidecar, missing_subtitle_decoder,
+        missing_video_decoder, prefer_intel_video_decoders, preferred_hardware_rank,
+        refresh_subtitle_tracks, subtitle_selection_ids,
     };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
@@ -641,6 +1263,114 @@ mod tests {
         assert_eq!(state.queued, Some(31.0));
         // The UI follows the pointer, not the seek still on its way.
         assert_eq!(state.pending(), Some(31.0));
+    }
+
+    #[test]
+    fn exact_srt_sidecar_wins_over_language_and_webvtt_variants() {
+        let dir =
+            std::env::temp_dir().join(format!("open-mpv-sidecar-exact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["movie.mkv", "movie.en.srt", "movie.vtt", "movie.srt"] {
+            std::fs::write(dir.join(name), []).unwrap();
+        }
+
+        assert_eq!(
+            matching_sidecar(&dir.join("movie.mkv")),
+            Some(dir.join("movie.srt"))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sidecar_matching_rejects_prefix_collisions() {
+        let dir =
+            std::env::temp_dir().join(format!("open-mpv-sidecar-prefix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["movie.mkv", "movie2.srt", "movie.en.vtt"] {
+            std::fs::write(dir.join(name), []).unwrap();
+        }
+
+        assert_eq!(
+            matching_sidecar(&dir.join("movie.mkv")),
+            Some(dir.join("movie.en.vtt"))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subtitle_selection_preserves_default_video_and_audio() {
+        gst::init().unwrap();
+        let video = gst::Stream::new(
+            Some("video"),
+            None,
+            gst::StreamType::VIDEO,
+            gst::StreamFlags::SELECT,
+        );
+        let audio = gst::Stream::new(
+            Some("audio"),
+            None,
+            gst::StreamType::AUDIO,
+            gst::StreamFlags::SELECT,
+        );
+        let english = gst::Stream::new(
+            Some("english"),
+            None,
+            gst::StreamType::TEXT,
+            gst::StreamFlags::SELECT,
+        );
+        let hindi = gst::Stream::new(
+            Some("hindi"),
+            None,
+            gst::StreamType::TEXT,
+            gst::StreamFlags::empty(),
+        );
+        let collection = gst::StreamCollection::builder(None)
+            .streams([video, audio, english, hindi])
+            .build();
+        let mut state = SubtitleState {
+            collection: Some(collection),
+            ..SubtitleState::default()
+        };
+        refresh_subtitle_tracks(&mut state);
+
+        assert_eq!(
+            subtitle_selection_ids(&state, &SubtitleChoice::Off),
+            ["video", "audio"]
+        );
+        assert_eq!(
+            subtitle_selection_ids(&state, &SubtitleChoice::Automatic),
+            ["video", "audio", "english"]
+        );
+        assert_eq!(
+            subtitle_selection_ids(&state, &SubtitleChoice::Track("hindi".into())),
+            ["video", "audio", "hindi"]
+        );
+    }
+
+    #[test]
+    fn sidecar_reload_prerolls_seeks_then_restores_playback() {
+        let mut resume = Some(ResumeState {
+            position: 42.5,
+            play_after_seek: true,
+            stage: ResumeStage::Preroll,
+        });
+        assert_eq!(
+            advance_resume(&mut resume),
+            ResumeAction::Seek {
+                position: 42.5,
+                resume_playing: true,
+            }
+        );
+        assert_eq!(
+            advance_resume(&mut resume),
+            ResumeAction::Finish {
+                resume_playing: true,
+            }
+        );
+        assert!(resume.is_none());
+        assert_eq!(advance_resume(&mut resume), ResumeAction::None);
     }
 
     #[test]
@@ -746,5 +1476,21 @@ mod tests {
 
             assert_eq!(missing_video_decoder(&message), None);
         }
+    }
+
+    #[test]
+    fn missing_text_decoder_is_reported_as_a_subtitle_failure() {
+        gst::init().unwrap();
+        let message = gst::Structure::builder("missing-plugin")
+            .field("type", "decoder")
+            .field("detail", gst::Caps::builder("text/x-raw").build())
+            .field("name", "subtitle decoder")
+            .build();
+
+        assert_eq!(
+            missing_subtitle_decoder(&message),
+            Some("subtitle decoder".to_string())
+        );
+        assert_eq!(missing_video_decoder(&message), None);
     }
 }
