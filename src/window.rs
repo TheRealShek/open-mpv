@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -129,9 +130,15 @@ const PAN_STEP: f64 = 64.0;
 /// means: a file the user opened explicitly shows its error, while one
 /// merely stepped over on the way through a folder is skipped (FR-2.5).
 #[derive(Clone, Copy)]
+enum Direction {
+    Previous,
+    Next,
+}
+
+#[derive(Clone, Copy)]
 enum Arrival {
     Direct,
-    Step { dir: i32, budget: u32 },
+    Step { direction: Direction, budget: u32 },
 }
 
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -191,8 +198,8 @@ pub struct App {
     /// Last known pointer position, so the cursor can be re-decided when
     /// the overlay fades on a timer rather than on movement.
     pointer: Cell<(f64, f64)>,
-    /// Session idle-inhibit cookie; 0 when nothing is held.
-    inhibit_cookie: Cell<u32>,
+    /// Session idle-inhibit cookie; `None` when nothing is held.
+    inhibit_cookie: Cell<Option<NonZeroU32>>,
     /// True once the window has been sized from the media on screen. A
     /// video presents before its dimensions are known, so its sizing
     /// arrives late and must still be applied once (FR-6.6).
@@ -410,7 +417,7 @@ impl App {
             scrubbing: Cell::new(false),
             pointer_on_chrome: Cell::new(false),
             pointer: Cell::new((0.0, 0.0)),
-            inhibit_cookie: Cell::new(0),
+            inhibit_cookie: Cell::new(None),
             sized_from_media: Cell::new(false),
             indicator,
             toast_revealer,
@@ -506,7 +513,13 @@ impl App {
         app.view.connect_navigate(clone!(
             #[strong]
             app,
-            move |dir| app.navigate(dir)
+            move |dir| {
+                app.navigate(if dir > 0 {
+                    Direction::Next
+                } else {
+                    Direction::Previous
+                });
+            }
         ));
         // A video is on screen before the pipeline knows how big it is;
         // the size arrives with preroll (FR-6.6).
@@ -651,7 +664,7 @@ impl App {
     /// than a wall; a file opened directly shows its error, so the user
     /// learns why nothing appeared (FR-2.5).
     fn on_decode_failed(self: &Rc<Self>, path: &Path, message: &str, idx: usize, arrival: Arrival) {
-        let Arrival::Step { dir, budget } = arrival else {
+        let Arrival::Step { direction, budget } = arrival else {
             self.show_error(path, message);
             return;
         };
@@ -667,7 +680,7 @@ impl App {
                 self.show_index(
                     next,
                     Arrival::Step {
-                        dir,
+                        direction,
                         budget: budget - 1,
                     },
                 );
@@ -903,8 +916,7 @@ impl App {
     /// inhibit is dropped on pause and on leaving the video so a paused
     /// or image-only session never holds it (NFR-2.2).
     fn set_idle_inhibited(&self, inhibited: bool) {
-        let cookie = self.inhibit_cookie.get();
-        if inhibited == (cookie != 0) {
+        if inhibited == self.inhibit_cookie.get().is_some() {
             return;
         }
         let Some(gtk_app) = self.win.application() else {
@@ -916,11 +928,13 @@ impl App {
                 gtk::ApplicationInhibitFlags::IDLE,
                 Some("playing video"),
             );
-            self.inhibit_cookie.set(cookie);
+            let Some(cookie) = NonZeroU32::new(cookie) else {
+                return;
+            };
+            self.inhibit_cookie.set(Some(cookie));
             crate::applog!("idle inhibit: taken (cookie {cookie})");
-        } else {
-            gtk_app.uninhibit(cookie);
-            self.inhibit_cookie.set(0);
+        } else if let Some(cookie) = self.inhibit_cookie.take() {
+            gtk_app.uninhibit(cookie.get());
             crate::applog!("idle inhibit: released");
         }
     }
@@ -963,14 +977,12 @@ impl App {
 
     /// Run `f` on the player when a video is on screen; used by the
     /// transport actions so they are no-ops on images.
-    fn with_video(self: &Rc<Self>, f: impl FnOnce(&Player)) {
+    fn with_video<T>(&self, f: impl FnOnce(&Player) -> T) -> Option<T> {
         if !self.is_video_showing() {
-            return;
+            return None;
         }
         let player = self.player.borrow().clone();
-        if let Some(p) = player {
-            f(&p);
-        }
+        player.as_deref().map(f)
     }
 
     fn apply_decoded(self: &Rc<Self>, decoded: Rc<Decoded>, mime: String, generation: u64) {
@@ -1218,26 +1230,25 @@ impl App {
         folder.as_ref()?.index_of(showing.as_deref()?)
     }
 
-    fn navigate(self: &Rc<Self>, delta: i32) {
+    fn navigate(self: &Rc<Self>, direction: Direction) {
         let target = {
             let folder = self.folder.borrow();
             let current = self.current_index();
             folder
                 .as_ref()
-                .and_then(|f| nav_target(f, current, delta, self.cfg.wrap))
+                .and_then(|f| nav_target(f, current, direction, self.cfg.wrap))
         };
         match target {
             Some(idx) => self.show_index(
                 idx,
                 Arrival::Step {
-                    dir: delta,
+                    direction,
                     budget: SKIP_BUDGET,
                 },
             ),
-            None => self.flash(if delta > 0 {
-                "Last image"
-            } else {
-                "First image"
+            None => self.flash(match direction {
+                Direction::Next => "Last image",
+                Direction::Previous => "First image",
             }),
         }
     }
@@ -1265,7 +1276,11 @@ impl App {
             self.view
                 .pan_by(-f64::from(dx) * PAN_STEP, -f64::from(dy) * PAN_STEP);
         } else if dx != 0 {
-            self.navigate(dx);
+            self.navigate(if dx > 0 {
+                Direction::Next
+            } else {
+                Direction::Previous
+            });
         } else {
             self.change_volume(if dy < 0 { 0.1 } else { -0.1 });
         }
@@ -1561,17 +1576,13 @@ impl App {
 
     /// Flash the current video position after a seek (FR-10.5).
     fn flash_progress(self: &Rc<Self>) {
-        let mut progress = None;
-        self.with_video(|p| progress = p.progress());
-        if let Some((pos, dur)) = progress {
+        if let Some((pos, dur)) = self.with_video(Player::progress).flatten() {
             self.flash(&format!("{} / {}", format_time(pos), format_time(dur)));
         }
     }
 
     fn change_volume(self: &Rc<Self>, delta: f64) {
-        let mut vol = None;
-        self.with_video(|p| vol = Some(p.add_volume(delta)));
-        if let Some(v) = vol {
+        if let Some(v) = self.with_video(|p| p.add_volume(delta)) {
             self.flash(&format!("Volume {:.0}%", v * 100.0));
         }
     }
@@ -1630,8 +1641,8 @@ impl App {
             action
         };
 
-        add("next", Box::new(|a| a.navigate(1)));
-        add("prev", Box::new(|a| a.navigate(-1)));
+        add("next", Box::new(|a| a.navigate(Direction::Next)));
+        add("prev", Box::new(|a| a.navigate(Direction::Previous)));
         add("right", Box::new(|a| a.arrow(1, 0)));
         add("left", Box::new(|a| a.arrow(-1, 0)));
         add("up", Box::new(|a| a.arrow(0, -1)));
@@ -1664,10 +1675,8 @@ impl App {
             "play-pause",
             Box::new(|a| {
                 if a.is_video_showing() {
-                    let mut playing = None;
-                    a.with_video(|p| playing = Some(p.toggle_pause()));
                     // A paused video must not keep the screen awake.
-                    match playing {
+                    match a.with_video(Player::toggle_pause) {
                         Some(true) => {
                             a.set_idle_inhibited(true);
                             a.flash("Play");
@@ -1680,7 +1689,7 @@ impl App {
                     }
                 } else {
                     // Space keeps its photo-flipping habit on images.
-                    a.navigate(1);
+                    a.navigate(Direction::Next);
                 }
             }),
         );
@@ -1700,14 +1709,10 @@ impl App {
         );
         add(
             "mute",
-            Box::new(|a| {
-                let mut muted = None;
-                a.with_video(|p| muted = Some(p.toggle_mute()));
-                match muted {
-                    Some(true) => a.flash("Muted"),
-                    Some(false) => a.flash("Sound on"),
-                    None => {}
-                }
+            Box::new(|a| match a.with_video(Player::toggle_mute) {
+                Some(true) => a.flash("Muted"),
+                Some(false) => a.flash("Sound on"),
+                None => {}
             }),
         );
         add("volume-up", Box::new(|a| a.change_volume(0.1)));
@@ -2072,30 +2077,35 @@ fn apply_css(background: &str) {
 /// an unsupported file was opened directly, so the folder loaded but
 /// never landed on an image — the folder is entered from whichever end
 /// the key points at, rather than leaving the arrows inert.
-fn nav_target(folder: &Folder, current: Option<usize>, delta: i32, wrap: bool) -> Option<usize> {
+fn nav_target(
+    folder: &Folder,
+    current: Option<usize>,
+    direction: Direction,
+    wrap: bool,
+) -> Option<usize> {
     if folder.is_empty() {
         return None;
     }
-    match current {
-        Some(current) if delta > 0 => folder.next(current, wrap),
-        Some(current) => folder.prev(current, wrap),
-        None => Some(if delta > 0 { 0 } else { folder.len() - 1 }),
+    match (current, direction) {
+        (Some(current), Direction::Next) => folder.next(current, wrap),
+        (Some(current), Direction::Previous) => folder.prev(current, wrap),
+        (None, Direction::Next) => Some(0),
+        (None, Direction::Previous) => Some(folder.len() - 1),
     }
 }
 
 /// Where a decode failure at `idx` sends us: onward in the direction of
 /// travel, or `None` to stop and show the error (FR-2.5).
 fn skip_target(folder: &Folder, idx: usize, arrival: Arrival, wrap: bool) -> Option<usize> {
-    let Arrival::Step { dir, budget } = arrival else {
+    let Arrival::Step { direction, budget } = arrival else {
         return None;
     };
     if budget == 0 {
         return None;
     }
-    if dir > 0 {
-        folder.next(idx, wrap)
-    } else {
-        folder.prev(idx, wrap)
+    match direction {
+        Direction::Next => folder.next(idx, wrap),
+        Direction::Previous => folder.prev(idx, wrap),
     }
 }
 
@@ -2191,8 +2201,8 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arrival, SKIP_BUDGET, excluded_path_message, format_time, nav_target, resize_edge_at,
-        skip_target,
+        Arrival, Direction, SKIP_BUDGET, excluded_path_message, format_time, nav_target,
+        resize_edge_at, skip_target,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -2226,19 +2236,22 @@ mod tests {
         // navigate() bailed out on the missing current index.
         let (dir, folder) = folder_of("nav", &["a.jpg", "b.jpg", "c.jpg"]);
         assert_eq!(
-            nav_target(&folder, None, 1, false),
+            nav_target(&folder, None, Direction::Next, false),
             Some(0),
             "right enters at the first image"
         );
         assert_eq!(
-            nav_target(&folder, None, -1, false),
+            nav_target(&folder, None, Direction::Previous, false),
             Some(2),
             "left enters at the last"
         );
         // Normal stepping is unchanged.
-        assert_eq!(nav_target(&folder, Some(0), 1, false), Some(1));
-        assert_eq!(nav_target(&folder, Some(2), 1, false), None);
-        assert_eq!(nav_target(&folder, Some(2), 1, true), Some(0));
+        assert_eq!(
+            nav_target(&folder, Some(0), Direction::Next, false),
+            Some(1)
+        );
+        assert_eq!(nav_target(&folder, Some(2), Direction::Next, false), None);
+        assert_eq!(nav_target(&folder, Some(2), Direction::Next, true), Some(0));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2256,33 +2269,42 @@ mod tests {
     #[test]
     fn an_empty_folder_has_nowhere_to_enter() {
         let (dir, folder) = folder_of("empty", &["notes.txt"]);
-        assert_eq!(nav_target(&folder, None, 1, false), None);
-        assert_eq!(nav_target(&folder, None, -1, true), None);
+        assert_eq!(nav_target(&folder, None, Direction::Next, false), None);
+        assert_eq!(nav_target(&folder, None, Direction::Previous, true), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn undecodable_files_are_stepped_over_only_while_navigating() {
         let (dir, folder) = folder_of("skip", &["a.jpg", "b.jpg", "c.jpg"]);
-        let step = |dir, budget| Arrival::Step { dir, budget };
+        let step = |direction, budget| Arrival::Step { direction, budget };
 
         // Opened directly: the error is the answer (FR-2.5).
         assert_eq!(skip_target(&folder, 1, Arrival::Direct, false), None);
         // Stepping: carry on the way the user was already going.
         assert_eq!(
-            skip_target(&folder, 1, step(1, SKIP_BUDGET), false),
+            skip_target(&folder, 1, step(Direction::Next, SKIP_BUDGET), false),
             Some(2)
         );
         assert_eq!(
-            skip_target(&folder, 1, step(-1, SKIP_BUDGET), false),
+            skip_target(&folder, 1, step(Direction::Previous, SKIP_BUDGET), false),
             Some(0)
         );
         // Nowhere further to step.
-        assert_eq!(skip_target(&folder, 2, step(1, SKIP_BUDGET), false), None);
+        assert_eq!(
+            skip_target(&folder, 2, step(Direction::Next, SKIP_BUDGET), false),
+            None
+        );
         // A folder of unreadable files must stop, not spin — especially
         // with wrap on, where there is always a next index.
-        assert_eq!(skip_target(&folder, 1, step(1, 1), true), Some(2));
-        assert_eq!(skip_target(&folder, 1, step(1, 0), true), None);
+        assert_eq!(
+            skip_target(&folder, 1, step(Direction::Next, 1), true),
+            Some(2)
+        );
+        assert_eq!(
+            skip_target(&folder, 1, step(Direction::Next, 0), true),
+            None
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
