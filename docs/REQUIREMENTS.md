@@ -147,8 +147,9 @@ product; there is no version staging.
 - **FR-8.2** Configurable at minimum: background color, sort order
   (name/date) and direction, navigation wrap, default fit mode, overlay
   fade delay, pointer hiding, video looping, starting volume, opening
-  fullscreen, and keybindings (any action rebindable; `bind=<key> none`
-  removes a default rather than overriding it).
+  fullscreen, initial subtitle mode (`auto`/`off`), and keybindings (any
+  action rebindable; `bind=<key> none` removes a default rather than
+  overriding it).
 - **FR-8.3** Unknown or malformed lines are ignored with a warning on
   stderr — a bad config never prevents startup.
 
@@ -193,6 +194,20 @@ product; there is no version staging.
   in-window error message, never a crash. Unlike images (NFR-3.2),
   video decoding runs in-process — an accepted trade-off recorded in
   AGENTS.md.
+- **FR-10.7 Subtitles:** embedded subtitle tracks and local SRT/WebVTT
+  sidecars render through GStreamer. A same-directory sidecar whose name is
+  the video stem, optionally followed by dot-separated language or role
+  components, is discovered only when its video opens; subtitles never enter
+  the FR-3 navigation set. Automatic selection respects the container's
+  default and a matching sidecar, while a conditional subtitle menu offers
+  Automatic, Off and every available track. `V` toggles visibility and
+  `Shift+V` cycles tracks through the single action layer. Dropping a local
+  subtitle on a playing video attaches and selects it for that video only;
+  another drop replaces that external attachment. Navigating away forgets a
+  manually attached subtitle. An unreadable, malformed or unsupported
+  subtitle reports non-modally and never stops otherwise playable video.
+  Subtitle downloads, audio-track selection, dual subtitles and timing/style
+  controls remain out of scope.
 
 ---
 

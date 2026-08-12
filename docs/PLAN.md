@@ -37,6 +37,9 @@ replacing Loupe as the system default image viewer.
 - Video (MP4/MKV/WebM/MOV/AVI) inline in the same folder flow —
   hardware-decoded, looped, with mpv-style transport keys. A viewer
   that happens to play video, not a media player.
+- Embedded subtitles and local SRT/WebVTT sidecars, with automatic
+  filename matching, track selection and drag-and-drop attachment. Subtitle
+  controls only appear for a video that has something to select.
 - Zoom, pan, fit modes, view rotation.
 - Delete to trash with undo toast; rotate + save to disk.
 - Frameless window with fade-in overlay controls; fullscreen.
@@ -52,10 +55,9 @@ replacing Loupe as the system default image viewer.
 - Library management, tagging, search, cloud anything.
 - Editing beyond rotate (crop, color, filters).
 - EXIF panel, slideshow, clipboard copy (explicitly cut this iteration).
-- Subtitles and audio/subtitle track selection. This is the line between
-  "a viewer that happens to play video" and a media player, and it is
-  also where playbin3 stops being cheap: stream selection there goes
-  through `GstStreamCollection`, not the old `current-text` property.
+- Audio track selection, subtitle downloading/search, dual subtitles,
+  subtitle editing, and timing or style controls. Subtitle display stays a
+  focused viewing aid; those controls would turn it into a media player.
 - Camera RAW — no glycin loader for it, so it is a decoder question
   rather than a policy one.
 - Non-Linux platforms.
