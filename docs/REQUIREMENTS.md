@@ -199,13 +199,16 @@ product; there is no version staging.
   the video stem, optionally followed by dot-separated language or role
   components, is discovered only when its video opens; subtitles never enter
   the FR-3 navigation set. Automatic selection respects the container's
-  default and a matching sidecar, while a conditional subtitle menu offers
-  Automatic, Off and every available track. `V` toggles visibility and
-  `Shift+V` cycles tracks through the single action layer. Dropping a local
-  subtitle on a playing video attaches and selects it for that video only;
-  another drop replaces that external attachment. Navigating away forgets a
-  manually attached subtitle. An unreadable, malformed or unsupported
-  subtitle reports non-modally and never stops otherwise playable video.
+  default and a matching sidecar. Every video's CC button and its shared
+  More/right-click Subtitles submenu offer Add External Subtitle; once tracks
+  exist they also offer Automatic, Off and every available track. Add opens a
+  native local-file chooser filtered to SRT/WebVTT. `V` toggles visibility and
+  `Shift+V` cycles tracks through the single action layer. Dropping one local
+  subtitle from Files on a playing video attaches and selects it for that
+  video only; another drop replaces that external attachment. Navigating away
+  forgets a manually attached subtitle. An unreadable, malformed or
+  unsupported subtitle reports non-modally and never stops otherwise playable
+  video.
   Subtitle downloads, audio-track selection, dual subtitles and timing/style
   controls remain out of scope.
 

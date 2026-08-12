@@ -41,6 +41,7 @@ enum Action {
     SeekBack,
     SeekForward,
     Mute,
+    SubtitleOpen,
     SubtitleToggle,
     SubtitleCycle,
     VolumeUp,
@@ -76,6 +77,7 @@ impl Action {
             Action::SeekBack => "seek-back",
             Action::SeekForward => "seek-forward",
             Action::Mute => "mute",
+            Action::SubtitleOpen => "subtitle-open",
             Action::SubtitleToggle => "subtitle-toggle",
             Action::SubtitleCycle => "subtitle-cycle",
             Action::VolumeUp => "volume-up",
@@ -170,6 +172,7 @@ const ACTIONS: &[(Action, &str)] = &[
     (Action::SeekBack, "Seek back 10 seconds"),
     (Action::SeekForward, "Seek forward 10 seconds"),
     (Action::Mute, "Mute audio"),
+    (Action::SubtitleOpen, "Add an external subtitle"),
     (Action::SubtitleToggle, "Show or hide subtitles"),
     (Action::SubtitleCycle, "Next subtitle track"),
     (Action::VolumeUp, "Volume up"),
@@ -301,7 +304,7 @@ pub struct App {
     mute_btn: gtk::Button,
     subtitle_btn: gtk::MenuButton,
     subtitle_menu: gio::Menu,
-    subtitle_available: Cell<bool>,
+    subtitle_context_menu: gio::Menu,
     subtitle_action: gio::SimpleAction,
     save_btn: gtk::Button,
     /// (window width, transport shown, time length) the video controls
@@ -504,6 +507,11 @@ impl App {
         more_menu.append(Some("Rotate Right"), Some("win.rotate-cw"));
         more_menu.append(Some("First File"), Some("win.first"));
         more_menu.append(Some("Last File"), Some("win.last"));
+        // Filled only while a video is active. The same subtitle model is
+        // shared with the CC button, so right-click and the transport never
+        // disagree about available tracks (FR-10.7).
+        let subtitle_context_menu = gio::Menu::new();
+        more_menu.append_section(None, &subtitle_context_menu);
         more_menu.append(Some("Keyboard Shortcuts"), Some("win.help"));
         let more_btn = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
@@ -596,7 +604,7 @@ impl App {
             mute_btn,
             subtitle_btn: subtitle_btn.clone(),
             subtitle_menu,
-            subtitle_available: Cell::new(false),
+            subtitle_context_menu,
             subtitle_action,
             save_btn,
             fitted_for: Cell::new(None),
@@ -1034,6 +1042,69 @@ impl App {
         }
     }
 
+    fn choose_external_subtitle(self: &Rc<Self>) {
+        let video = match &*self.media.borrow() {
+            MediaState::Video(path) => path.clone(),
+            _ => {
+                self.show_toast("Open a video before adding subtitles", false);
+                return;
+            }
+        };
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("SRT and WebVTT subtitles"));
+        filter.add_suffix("srt");
+        filter.add_suffix("vtt");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Add External Subtitle");
+        dialog.set_accept_label(Some("Add Subtitle"));
+        dialog.set_modal(true);
+        dialog.set_filters(Some(&filters));
+        dialog.set_default_filter(Some(&filter));
+        if let Some(parent) = video.parent() {
+            dialog.set_initial_folder(Some(&gio::File::for_path(parent)));
+        }
+        dialog.open(
+            Some(&self.win),
+            gio::Cancellable::NONE,
+            clone!(
+                #[strong(rename_to = app)]
+                self,
+                move |result| match result {
+                    Ok(file) => match file.path() {
+                        Some(path) if config::is_subtitle(&path) => app.attach_subtitle(&path),
+                        Some(_) =>
+                            app.show_toast("Only SRT and WebVTT subtitles are supported", false,),
+                        None => app.show_toast("Only local subtitle files are supported", false),
+                    },
+                    Err(error) if error.matches(gio::IOErrorEnum::Cancelled) => {}
+                    Err(error) => app.show_toast(&format!("Cannot open subtitle: {error}"), false),
+                }
+            ),
+        );
+    }
+
+    fn handle_dropped_files(self: &Rc<Self>, files: Vec<gio::File>) -> bool {
+        if files.len() != 1 {
+            self.show_toast("Drop one file at a time", false);
+            return true;
+        }
+        let Some(path) = files[0].path() else {
+            self.show_toast("Only local files can be dropped", false);
+            return true;
+        };
+        if config::is_subtitle(&path) {
+            self.attach_subtitle(&path);
+        } else if looks_like_subtitle(&path) {
+            self.show_toast("Only SRT and WebVTT subtitles are supported", false);
+        } else {
+            self.open_path(&path);
+        }
+        true
+    }
+
     // ----- video transport (FR-10.5) ------------------------------------
 
     /// Keep video controls inside the window. The seek bar gives up width
@@ -1065,7 +1136,7 @@ impl App {
         self.seek_bar.set_size_request(0, -1);
         self.time_label.set_visible(true);
         self.mute_btn.set_visible(true);
-        self.subtitle_btn.set_visible(self.subtitle_available.get());
+        self.subtitle_btn.set_visible(true);
         let others = |s: &Self| s.control_bar.measure(gtk::Orientation::Horizontal, -1).0;
 
         let mut room = width - others(self);
@@ -1086,17 +1157,9 @@ impl App {
     }
 
     fn update_subtitles(&self, snapshot: SubtitleSnapshot) {
-        self.subtitle_menu.remove_all();
-        append_subtitle_item(&self.subtitle_menu, "Automatic", "auto");
-        append_subtitle_item(&self.subtitle_menu, "Off", "off");
-        for track in &snapshot.tracks {
-            append_subtitle_item(&self.subtitle_menu, &track.label, &track.id);
-        }
+        rebuild_subtitle_menu(&self.subtitle_menu, &snapshot);
         self.subtitle_action
             .set_state(&snapshot.choice.action_target().to_variant());
-        let available = !snapshot.tracks.is_empty();
-        self.subtitle_available.set(available);
-        self.subtitle_btn.set_visible(available);
         self.fitted_for.set(None);
     }
 
@@ -1266,6 +1329,8 @@ impl App {
 
         self.photo_controls.set_visible(photo);
         self.transport.set_visible(video);
+        self.subtitle_btn.set_visible(video);
+        rebuild_subtitle_context(&self.subtitle_context_menu, &self.subtitle_menu, video);
         self.control_bar.set_visible(photo || video);
         self.fitted_for.set(None);
     }
@@ -2092,6 +2157,10 @@ impl App {
             }),
         );
         add(
+            Action::SubtitleOpen,
+            Box::new(|a| a.choose_external_subtitle()),
+        );
+        add(
             Action::SubtitleToggle,
             Box::new(|a| {
                 if let Some(snapshot) = a.with_video(Player::toggle_subtitles)
@@ -2398,29 +2467,33 @@ impl App {
         ));
         self.win.add_controller(drag);
 
-        // Media drops open normally; subtitle drops attach to the video
-        // already on screen without changing its folder context (FR-10.7).
-        let drop = gtk::DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
-        drop.connect_drop(clone!(
+        // Nautilus sends `GdkFileList`, even for one file. Accept that
+        // native payload for real Files drags; keep GioFile as a fallback
+        // for sources that advertise only a single file (FR-1.5/10.7).
+        let file_list_drop =
+            gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        file_list_drop.connect_drop(clone!(
             #[strong(rename_to = app)]
             self,
             move |_, value, _, _| {
-                if let Ok(file) = value.get::<gio::File>()
-                    && let Some(path) = file.path()
-                {
-                    if config::is_subtitle(&path) {
-                        app.attach_subtitle(&path);
-                    } else if looks_like_subtitle(&path) {
-                        app.show_toast("Only SRT and WebVTT subtitles are supported", false);
-                    } else {
-                        app.open_path(&path);
-                    }
-                    return true;
+                if let Ok(files) = value.get::<gdk::FileList>() {
+                    return app.handle_dropped_files(files.files());
                 }
                 false
             }
         ));
-        self.win.add_controller(drop);
+        self.win.add_controller(file_list_drop);
+
+        let single_file_drop =
+            gtk::DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
+        single_file_drop.connect_drop(clone!(
+            #[strong(rename_to = app)]
+            self,
+            move |_, value, _, _| value
+                .get::<gio::File>()
+                .is_ok_and(|file| app.handle_dropped_files(vec![file]))
+        ));
+        self.win.add_controller(single_file_drop);
     }
 }
 
@@ -2499,6 +2572,28 @@ fn append_subtitle_item(menu: &gio::Menu, label: &str, target: &str) {
     let item = gio::MenuItem::new(Some(label), None);
     item.set_action_and_target_value(Some("win.subtitle"), Some(&target.to_variant()));
     menu.append_item(&item);
+}
+
+fn rebuild_subtitle_menu(menu: &gio::Menu, snapshot: &SubtitleSnapshot) {
+    menu.remove_all();
+    menu.append(Some("Add External Subtitle…"), Some("win.subtitle-open"));
+    if snapshot.tracks.is_empty() {
+        return;
+    }
+    let choices = gio::Menu::new();
+    append_subtitle_item(&choices, "Automatic", "auto");
+    append_subtitle_item(&choices, "Off", "off");
+    for track in &snapshot.tracks {
+        append_subtitle_item(&choices, &track.label, &track.id);
+    }
+    menu.append_section(None, &choices);
+}
+
+fn rebuild_subtitle_context(context: &gio::Menu, subtitles: &gio::Menu, video: bool) {
+    context.remove_all();
+    if video {
+        context.append_submenu(Some("Subtitles"), subtitles);
+    }
 }
 
 /// Recognise common subtitle extensions that are deliberately outside the
@@ -2700,14 +2795,18 @@ mod tests {
     use super::{
         ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SEEK_STEP_SECONDS,
         SKIP_BUDGET, cache_budget_bytes, chrome_is_held, excluded_path_message, format_time,
-        looks_like_subtitle, nav_target, position_text, resize_edge_at, save_control_visible,
-        skip_target, svg_render_dimension, window_dimension,
+        looks_like_subtitle, nav_target, position_text, rebuild_subtitle_context,
+        rebuild_subtitle_menu, resize_edge_at, save_control_visible, skip_target,
+        svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
     use crate::folder::Folder;
     use crate::loader;
+    use crate::player::{SubtitleChoice, SubtitleSnapshot, SubtitleTrack};
     use gtk4::gdk::SurfaceEdge;
+    use gtk4::glib::value::ToValue;
+    use gtk4::prelude::{FileExt, MenuModelExt};
     use std::path::PathBuf;
 
     /// A three-image folder on disk, which is what `Folder` reads.
@@ -2788,6 +2887,59 @@ mod tests {
         assert!(looks_like_subtitle(&PathBuf::from("movie.ASS")));
         assert!(looks_like_subtitle(&PathBuf::from("movie.ssa")));
         assert!(!looks_like_subtitle(&PathBuf::from("movie.mkv")));
+    }
+
+    #[test]
+    fn files_drag_payload_decodes_as_gdk_file_list() {
+        let file = gtk4::gio::File::for_path("/tmp/subtitle.srt");
+        let value = gtk4::gdk::FileList::from_array(&[file]).to_value();
+        let files = value.get::<gtk4::gdk::FileList>().unwrap().files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), Some(PathBuf::from("/tmp/subtitle.srt")));
+    }
+
+    #[test]
+    fn subtitle_menu_always_offers_add_and_right_click_uses_it_for_video() {
+        let subtitles = gtk4::gio::Menu::new();
+        let empty = SubtitleSnapshot {
+            tracks: Vec::new(),
+            choice: SubtitleChoice::Automatic,
+            active_label: None,
+        };
+        rebuild_subtitle_menu(&subtitles, &empty);
+        assert_eq!(subtitles.n_items(), 1);
+        assert_eq!(
+            subtitles
+                .item_attribute_value(0, "action", Some(gtk4::glib::VariantTy::STRING))
+                .and_then(|value| value.str().map(str::to_owned)),
+            Some("win.subtitle-open".to_string())
+        );
+
+        let with_track = SubtitleSnapshot {
+            tracks: vec![SubtitleTrack {
+                id: "english".into(),
+                label: "English".into(),
+            }],
+            choice: SubtitleChoice::Automatic,
+            active_label: Some("English".into()),
+        };
+        rebuild_subtitle_menu(&subtitles, &with_track);
+        assert_eq!(subtitles.n_items(), 2);
+        let choices = subtitles
+            .item_link(1, gtk4::gio::MENU_LINK_SECTION.as_str())
+            .unwrap();
+        assert_eq!(choices.n_items(), 3);
+
+        let context = gtk4::gio::Menu::new();
+        rebuild_subtitle_context(&context, &subtitles, false);
+        assert_eq!(context.n_items(), 0);
+        rebuild_subtitle_context(&context, &subtitles, true);
+        assert_eq!(context.n_items(), 1);
+        assert!(
+            context
+                .item_link(0, gtk4::gio::MENU_LINK_SUBMENU.as_str())
+                .is_some()
+        );
     }
 
     #[test]
@@ -2884,7 +3036,8 @@ mod tests {
         // of their own, and still bindable by name (FR-8.2). Anything
         // else without a binding is unreachable by keyboard (FR-6.5) and
         // would show up in the cheat sheet with a blank key column.
-        const REACHED_CONTEXTUALLY: &[Action] = &[Action::VolumeUp, Action::VolumeDown];
+        const REACHED_CONTEXTUALLY: &[Action] =
+            &[Action::VolumeUp, Action::VolumeDown, Action::SubtitleOpen];
 
         for (action, description) in ACTIONS {
             assert!(
