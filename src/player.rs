@@ -12,6 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -31,7 +32,12 @@ const VOLUME_MAX: f64 = 1.5;
 /// decoders rank at `Primary`, while these QSV factories normally rank
 /// lower. Prefer QSV for streams its caps accept and leave libav as the
 /// automatic fallback for streams the iGPU cannot decode (FR-10.1).
-const INTEL_VIDEO_DECODERS: &[&str] = &["qsvh264dec", "qsvh265dec", "qsvvp9dec", "qsvjpegdec"];
+const INTEL_VIDEO_DECODERS: &[(&str, &str)] = &[
+    ("qsvh264dec", "avdec_h264"),
+    ("qsvh265dec", "avdec_h265"),
+    ("qsvvp9dec", "avdec_vp9"),
+    ("qsvjpegdec", "avdec_mjpeg"),
+];
 /// Safety net: if a seek never gets its `AsyncDone` (broken file, stalled
 /// demuxer), stop reporting its target and fall back to real queries.
 const SEEK_SETTLE: Duration = Duration::from_millis(1500);
@@ -54,6 +60,95 @@ pub enum Event {
 struct SeekState {
     in_flight: Option<(f64, Instant)>,
     queued: Option<f64>,
+}
+
+/// True when the coded frame exceeds the size limit the stream itself
+/// declares. Unknown levels stay on the normal hardware
+/// path; this guard only acts on a demonstrable metadata contradiction.
+fn h264_exceeds_declared_level(caps: &gst::CapsRef) -> bool {
+    let Some(structure) = caps.iter().find(|s| s.name() == "video/x-h264") else {
+        return false;
+    };
+    let Ok(level) = structure.get::<String>("level") else {
+        return false;
+    };
+    let Some(max_frame_mbs) = h264_level_max_frame_mbs(&level) else {
+        return false;
+    };
+    let (Ok(width), Ok(height)) = (
+        structure.get::<i32>("width"),
+        structure.get::<i32>("height"),
+    ) else {
+        return false;
+    };
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+
+    let frame_mbs = (width as u64).div_ceil(16) * (height as u64).div_ceil(16);
+    frame_mbs > max_frame_mbs
+}
+
+/// H.264 Annex A `MaxFS` in macroblocks.
+fn h264_level_max_frame_mbs(level: &str) -> Option<u64> {
+    Some(match level {
+        "1" | "1b" => 99,
+        "1.1" | "1.2" | "1.3" | "2" => 396,
+        "2.1" => 792,
+        "2.2" | "3" => 1_620,
+        "3.1" => 3_600,
+        "3.2" => 5_120,
+        "4" | "4.1" => 8_192,
+        "4.2" => 8_704,
+        "5" => 22_080,
+        "5.1" | "5.2" => 36_864,
+        "6" | "6.1" | "6.2" => 139_264,
+        _ => return None,
+    })
+}
+
+/// The stream collection is posted synchronously before `decodebin3`
+/// chooses a decoder. Temporarily lowering QSV's rank here ensures its
+/// cached candidate list is built without QSV for only this malformed
+/// stream. Restore the process-wide rank as soon as libav is constructed.
+#[derive(Default)]
+struct DecoderFallback {
+    disabled_rank: Option<gst::Rank>,
+}
+
+impl DecoderFallback {
+    fn bypass_qsv_h264(&mut self, caps: &gst::CapsRef) -> Option<&'static str> {
+        if self.disabled_rank.is_some() || !h264_exceeds_declared_level(caps) {
+            return None;
+        }
+        let fallback = gst::ElementFactory::find("avdec_h264")?;
+        if fallback.rank() == gst::Rank::NONE {
+            return None;
+        }
+        let factory = gst::ElementFactory::find("qsvh264dec")?;
+        let rank = factory.rank();
+        if rank == gst::Rank::NONE {
+            return None;
+        }
+        factory.set_rank(gst::Rank::NONE);
+        self.disabled_rank = Some(rank);
+        Some("avdec_h264")
+    }
+
+    fn restore(&mut self) {
+        let Some(rank) = self.disabled_rank.take() else {
+            return;
+        };
+        if let Some(factory) = gst::ElementFactory::find("qsvh264dec") {
+            factory.set_rank(rank);
+        }
+    }
+}
+
+fn lock_decoder_fallback(state: &Mutex<DecoderFallback>) -> MutexGuard<'_, DecoderFallback> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl SeekState {
@@ -85,6 +180,7 @@ pub struct Player {
     /// Cached so the per-frame transport update does not re-query the
     /// demuxer; invalidated on `DurationChanged` and on every new video.
     duration: Rc<Cell<Option<f64>>>,
+    decoder_fallback: Arc<Mutex<DecoderFallback>>,
     /// Keeps the bus watch alive; dropping it detaches the watch.
     _bus_watch: gst::bus::BusWatchGuard,
 }
@@ -106,8 +202,53 @@ impl Player {
 
         let seek = Rc::new(RefCell::new(SeekState::default()));
         let duration = Rc::new(Cell::new(None));
+        let decoder_fallback = Arc::new(Mutex::new(DecoderFallback::default()));
+        playbin.connect_closure(
+            "element-setup",
+            false,
+            glib::closure!(
+                #[strong]
+                decoder_fallback,
+                move |_playbin: gst::Element, element: gst::Element| {
+                    let Some(factory) = element.factory() else {
+                        return;
+                    };
+                    if factory.name() == "avdec_h264" {
+                        lock_decoder_fallback(&decoder_fallback).restore();
+                    }
+                    if INTEL_VIDEO_DECODERS.iter().any(|(hardware, software)| {
+                        factory.name() == *hardware || factory.name() == *software
+                    }) {
+                        crate::applog!("player: selected decoder {}", factory.name());
+                    }
+                }
+            ),
+        );
 
         let bus = playbin.bus().ok_or("playbin has no bus")?;
+        bus.set_sync_handler({
+            let decoder_fallback = decoder_fallback.clone();
+            move |_bus, msg| {
+                if let gst::MessageView::StreamCollection(streams) = msg.view() {
+                    let collection = streams.stream_collection();
+                    for index in 0..collection.size() {
+                        let Some(caps) = collection.stream(index).and_then(|stream| stream.caps())
+                        else {
+                            continue;
+                        };
+                        if let Some(fallback) =
+                            lock_decoder_fallback(&decoder_fallback).bypass_qsv_h264(&caps)
+                        {
+                            crate::applog!(
+                                "player: stream exceeds its H.264 level; bypassing qsvh264dec for {fallback}"
+                            );
+                            break;
+                        }
+                    }
+                }
+                gst::BusSyncReply::Pass
+            }
+        });
         let bus_watch = bus
             .add_watch_local({
                 // The pipeline holds the bus, which holds this closure —
@@ -116,7 +257,8 @@ impl Player {
                 let playbin = playbin.clone();
                 let seek = seek.clone();
                 let duration = duration.clone();
-                move |_, msg| {
+                let decoder_fallback = decoder_fallback.clone();
+                move |_bus, msg| {
                     match msg.view() {
                         gst::MessageView::Eos(_) => on_event(Event::EndOfStream),
                         gst::MessageView::Error(e) => {
@@ -126,6 +268,7 @@ impl Player {
                                 e.error(),
                                 e.debug()
                             );
+                            lock_decoder_fallback(&decoder_fallback).restore();
                             on_event(Event::Error(e.error().to_string()));
                         }
                         gst::MessageView::Element(e) => {
@@ -163,6 +306,7 @@ impl Player {
             paintable,
             seek,
             duration,
+            decoder_fallback,
             _bus_watch: bus_watch,
         })
     }
@@ -198,6 +342,7 @@ impl Player {
     /// Drop everything that describes the outgoing stream so the next
     /// video never reports the previous one's duration or seek target.
     fn forget_stream(&self) {
+        lock_decoder_fallback(&self.decoder_fallback).restore();
         *self.seek.borrow_mut() = SeekState::default();
         self.duration.set(None);
     }
@@ -332,7 +477,7 @@ fn preferred_hardware_rank(current: gst::Rank) -> Option<gst::Rank> {
 /// This remains after lazy `gst::init` so image-only startup does not load
 /// GStreamer (NFR-1.1).
 fn prefer_intel_video_decoders() {
-    for name in INTEL_VIDEO_DECODERS {
+    for (name, _) in INTEL_VIDEO_DECODERS {
         let Some(factory) = gst::ElementFactory::find(name) else {
             continue;
         };
@@ -400,8 +545,9 @@ mod tests {
     use gstreamer::prelude::PluginFeatureExtManual;
 
     use super::{
-        INTEL_VIDEO_DECODERS, Instant, SEEK_SETTLE, SeekState, gst, missing_video_decoder,
-        prefer_intel_video_decoders, preferred_hardware_rank,
+        DecoderFallback, INTEL_VIDEO_DECODERS, Instant, SEEK_SETTLE, SeekState, gst,
+        h264_exceeds_declared_level, missing_video_decoder, prefer_intel_video_decoders,
+        preferred_hardware_rank,
     };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
@@ -451,7 +597,7 @@ mod tests {
         gst::init().unwrap();
         prefer_intel_video_decoders();
 
-        for name in INTEL_VIDEO_DECODERS {
+        for (name, _) in INTEL_VIDEO_DECODERS {
             let Some(factory) = gst::ElementFactory::find(name) else {
                 continue;
             };
@@ -459,6 +605,49 @@ mod tests {
                 assert!(factory.rank() > gst::Rank::PRIMARY, "{name}");
             }
         }
+    }
+
+    #[test]
+    fn invalid_h264_level_temporarily_disables_qsv_h264() {
+        gst::init().unwrap();
+        prefer_intel_video_decoders();
+        let Some(factory) = gst::ElementFactory::find("qsvh264dec") else {
+            return;
+        };
+        let Some(fallback) = gst::ElementFactory::find("avdec_h264") else {
+            return;
+        };
+        if fallback.rank() == gst::Rank::NONE {
+            return;
+        }
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("level", "4")
+            .field("width", 4_382i32)
+            .field("height", 3_500i32)
+            .field("framerate", gst::Fraction::new(30, 1))
+            .build();
+        let original = factory.rank();
+        let mut fallback = DecoderFallback::default();
+
+        assert!(h264_exceeds_declared_level(&caps));
+        assert_eq!(fallback.bypass_qsv_h264(&caps), Some("avdec_h264"));
+        assert_eq!(factory.rank(), gst::Rank::NONE);
+        assert_eq!(fallback.bypass_qsv_h264(&caps), None);
+        fallback.restore();
+        assert_eq!(factory.rank(), original);
+    }
+
+    #[test]
+    fn frame_within_h264_level_keeps_hardware_at_high_framerates() {
+        gst::init().unwrap();
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("level", "4")
+            .field("width", 1_120i32)
+            .field("height", 1_632i32)
+            .field("framerate", gst::Fraction::new(60, 1))
+            .build();
+
+        assert!(!h264_exceeds_declared_level(&caps));
     }
 
     #[test]
