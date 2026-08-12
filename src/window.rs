@@ -362,7 +362,9 @@ impl App {
         overlay.add_overlay(&next_btn);
 
         // Close button (FR-6.7).
-        let close_btn = osd_button("window-close-symbolic", "win.close", "Close");
+        // Ask for the regular icon: some third-party themes ship a white
+        // `-symbolic` source that GTK recolours to transparent.
+        let close_btn = osd_button("window-close", "win.close", "Close");
         close_btn.set_halign(gtk::Align::End);
         close_btn.set_valign(gtk::Align::Start);
         overlay.add_overlay(&close_btn);
