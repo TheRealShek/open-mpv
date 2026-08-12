@@ -539,7 +539,7 @@ impl App {
                     self.install_folder(folder, &dir);
                     match idx {
                         Some(idx) => self.show_index(idx, Arrival::Direct),
-                        None => self.show_error(&path, "not a supported image, or unreadable"),
+                        None => self.show_error(&path, &excluded_path_message(&path)),
                     }
                 }
                 Err(e) => self.show_error(&path, &format!("cannot read directory: {e}")),
@@ -2099,6 +2099,18 @@ fn skip_target(folder: &Folder, idx: usize, arrival: Arrival, wrap: bool) -> Opt
     }
 }
 
+/// Explain why a directly requested path was excluded from the folder.
+/// Keeping the distinctions here prevents a vanished download from
+/// being mislabeled as an unsupported format (FR-1.4).
+fn excluded_path_message(path: &Path) -> String {
+    match path.try_exists() {
+        Ok(false) => "file does not exist".to_owned(),
+        Err(e) => format!("cannot access path: {e}"),
+        Ok(true) if !config::is_supported(path) => "unsupported file type".to_owned(),
+        Ok(true) => "not a regular file".to_owned(),
+    }
+}
+
 /// Which window edge a point belongs to, given the window size. Corners
 /// win over sides so the diagonal grabs stay reachable.
 fn resize_edge_at(x: f64, y: f64, w: f64, h: f64) -> Option<gdk::SurfaceEdge> {
@@ -2178,7 +2190,10 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arrival, SKIP_BUDGET, format_time, nav_target, resize_edge_at, skip_target};
+    use super::{
+        Arrival, SKIP_BUDGET, excluded_path_message, format_time, nav_target, resize_edge_at,
+        skip_target,
+    };
 
     use crate::config::{Sort, SortOrder};
     use crate::folder::Folder;
@@ -2224,6 +2239,17 @@ mod tests {
         assert_eq!(nav_target(&folder, Some(0), 1, false), Some(1));
         assert_eq!(nav_target(&folder, Some(2), 1, false), None);
         assert_eq!(nav_target(&folder, Some(2), 1, true), Some(0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn excluded_paths_report_why_they_cannot_open() {
+        let (dir, _) = folder_of("excluded", &["notes.txt"]);
+        let missing = dir.join("gone.mp4");
+        let unsupported = dir.join("notes.txt");
+
+        assert_eq!(excluded_path_message(&missing), "file does not exist");
+        assert_eq!(excluded_path_message(&unsupported), "unsupported file type");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
