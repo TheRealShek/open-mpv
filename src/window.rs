@@ -141,6 +141,43 @@ enum Arrival {
     Step { direction: Direction, budget: u32 },
 }
 
+/// The mutually exclusive states of the media area. Keeping the path,
+/// decoded image and MIME type in one enum makes mismatched combinations
+/// unrepresentable while the reusable video pipeline remains lazy.
+enum MediaState {
+    Empty,
+    Loading(PathBuf),
+    Image {
+        path: PathBuf,
+        decoded: Rc<Decoded>,
+        mime: String,
+    },
+    Video(PathBuf),
+    Error(PathBuf),
+}
+
+impl MediaState {
+    fn path(&self) -> Option<&Path> {
+        match self {
+            MediaState::Loading(path)
+            | MediaState::Image { path, .. }
+            | MediaState::Video(path)
+            | MediaState::Error(path) => Some(path),
+            MediaState::Empty => None,
+        }
+    }
+
+    fn replace_path(&mut self, new: PathBuf) {
+        match self {
+            MediaState::Loading(path)
+            | MediaState::Image { path, .. }
+            | MediaState::Video(path)
+            | MediaState::Error(path) => *path = new,
+            MediaState::Empty => {}
+        }
+    }
+}
+
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_TIMEOUT: Duration = Duration::from_millis(1200);
 const SVG_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -155,9 +192,7 @@ pub struct App {
     view: ImageView,
     folder: RefCell<Option<Folder>>,
     monitor: RefCell<Option<gio::FileMonitor>>,
-    showing: RefCell<Option<PathBuf>>,
-    current_mime: RefCell<Option<String>>,
-    current_decoded: RefCell<Option<Rc<Decoded>>>,
+    media: RefCell<MediaState>,
     cache: loader::Cache,
     /// Bumped on every image change; async work checks it before
     /// touching the UI so stale decodes/frames are dropped (NFR-1.3).
@@ -388,9 +423,7 @@ impl App {
             view: view.clone(),
             folder: RefCell::new(None),
             monitor: RefCell::new(None),
-            showing: RefCell::new(None),
-            current_mime: RefCell::new(None),
-            current_decoded: RefCell::new(None),
+            media: RefCell::new(MediaState::Empty),
             cache: loader::Cache::new(3, cfg.cache_budget_mb as usize * 1024 * 1024),
             generation: Cell::new(0),
             editable_mimes: RefCell::new(BTreeSet::new()),
@@ -612,7 +645,7 @@ impl App {
         else {
             return;
         };
-        *self.showing.borrow_mut() = Some(path.clone());
+        *self.media.borrow_mut() = MediaState::Loading(path.clone());
         self.cache.pin(&path);
         self.set_current_name(Some(&path));
         self.update_pos_label();
@@ -629,7 +662,7 @@ impl App {
 
         if let Some((decoded, mime)) = self.cache.get(&path) {
             crate::applog!("show: {} (cache hit)", path.display());
-            self.apply_decoded(decoded, mime, generation);
+            self.apply_decoded(path, decoded, mime, generation);
         } else {
             glib::spawn_future_local(clone!(
                 #[strong(rename_to = app)]
@@ -639,7 +672,7 @@ impl App {
                         Ok((decoded, mime)) => {
                             app.cache.put(path.clone(), decoded.clone(), mime.clone());
                             if app.generation.get() == generation {
-                                app.apply_decoded(decoded, mime, generation);
+                                app.apply_decoded(path.clone(), decoded, mime, generation);
                             } else {
                                 crate::applog!(
                                     "show: {} superseded, kept in cache",
@@ -723,13 +756,12 @@ impl App {
             }
         };
         self.status.set_visible(false);
-        *self.current_decoded.borrow_mut() = None;
-        *self.current_mime.borrow_mut() = None;
         self.view.show_paintable(player.paintable(), None);
         if let Err(e) = player.play(path) {
             self.show_error(path, &e.to_string());
             return;
         }
+        *self.media.borrow_mut() = MediaState::Video(path.to_path_buf());
         crate::applog!("play: {}", path.display());
         self.set_idle_inhibited(true);
         self.update_save_enabled();
@@ -947,10 +979,7 @@ impl App {
     }
 
     fn is_video_showing(&self) -> bool {
-        self.showing
-            .borrow()
-            .as_deref()
-            .is_some_and(config::is_video)
+        matches!(*self.media.borrow(), MediaState::Video(_))
     }
 
     fn on_player_event(self: &Rc<Self>, event: player::Event) {
@@ -966,14 +995,14 @@ impl App {
                 }
             }
             player::Event::Error(error) => {
-                let path = self.showing.borrow().clone();
+                let path = self.current_path();
                 self.stop_video();
                 if let Some(path) = path {
                     self.show_error(&path, &error.to_string());
                 }
             }
             player::Event::MissingVideoDecoder(description) => {
-                let path = self.showing.borrow().clone();
+                let path = self.current_path();
                 self.stop_video();
                 if let Some(path) = path {
                     self.show_error(&path, &format!("video decoder unavailable: {description}"));
@@ -992,10 +1021,19 @@ impl App {
         player.as_deref().map(f)
     }
 
-    fn apply_decoded(self: &Rc<Self>, decoded: Rc<Decoded>, mime: String, generation: u64) {
+    fn apply_decoded(
+        self: &Rc<Self>,
+        path: PathBuf,
+        decoded: Rc<Decoded>,
+        mime: String,
+        generation: u64,
+    ) {
         self.status.set_visible(false);
-        *self.current_mime.borrow_mut() = Some(mime);
-        *self.current_decoded.borrow_mut() = Some(decoded.clone());
+        *self.media.borrow_mut() = MediaState::Image {
+            path,
+            decoded: decoded.clone(),
+            mime,
+        };
         let texture = decoded.first_texture();
         let size = match &*decoded {
             Decoded::Svg { nominal, .. } => {
@@ -1066,8 +1104,11 @@ impl App {
     /// settles, so vectors stay sharp at any zoom (FR-2.3).
     fn schedule_svg_rerender(self: &Rc<Self>) {
         let is_svg = matches!(
-            self.current_decoded.borrow().as_deref(),
-            Some(Decoded::Svg { .. })
+            &*self.media.borrow(),
+            MediaState::Image {
+                decoded,
+                ..
+            } if matches!(&**decoded, Decoded::Svg { .. })
         );
         if !is_svg {
             return;
@@ -1080,7 +1121,10 @@ impl App {
                 #[strong(rename_to = app)]
                 self,
                 move || {
-                    let decoded = app.current_decoded.borrow().clone();
+                    let decoded = match &*app.media.borrow() {
+                        MediaState::Image { decoded, .. } => Some(decoded.clone()),
+                        _ => None,
+                    };
                     let Some(decoded) = decoded else { return };
                     let Decoded::Svg { nominal, .. } = &*decoded else {
                         return;
@@ -1158,8 +1202,7 @@ impl App {
         self.generation.set(self.generation.get() + 1);
         self.stop_video();
         self.view.clear();
-        *self.current_decoded.borrow_mut() = None;
-        *self.current_mime.borrow_mut() = None;
+        *self.media.borrow_mut() = MediaState::Empty;
     }
 
     /// Put a message where the image would be (FR-1.4).
@@ -1172,8 +1215,9 @@ impl App {
     fn show_error(self: &Rc<Self>, path: &Path, message: &str) {
         eprintln!("open-mpv: error: {}: {message}", path.display());
         self.clear_media();
-        // `showing` deliberately survives: the file is still the one the
-        // folder is positioned on, so navigation works from the error.
+        // The error retains its path so folder navigation remains
+        // positioned on the file that failed.
+        *self.media.borrow_mut() = MediaState::Error(path.to_path_buf());
         self.show_status(&format!(
             "{}\n\n{message}",
             path.file_name()
@@ -1186,7 +1230,6 @@ impl App {
     fn empty_state(self: &Rc<Self>, message: &str) {
         self.clear_media();
         // Nothing is positioned anywhere any more, unlike show_error.
-        *self.showing.borrow_mut() = None;
         self.set_current_name(None);
         self.update_pos_label();
         self.show_status(message);
@@ -1231,8 +1274,12 @@ impl App {
 
     // ----- navigation ---------------------------------------------------
 
+    fn current_path(&self) -> Option<PathBuf> {
+        self.media.borrow().path().map(Path::to_path_buf)
+    }
+
     fn current_index(&self) -> Option<usize> {
-        let showing = self.showing.borrow();
+        let showing = self.current_path();
         let folder = self.folder.borrow();
         folder.as_ref()?.index_of(showing.as_deref()?)
     }
@@ -1319,7 +1366,7 @@ impl App {
             let Some(folder) = folder.as_mut() else {
                 return;
             };
-            let showing = self.showing.borrow().clone();
+            let showing = self.current_path();
             match event {
                 E::Created | E::MovedIn => {
                     if let Some(p) = file.path() {
@@ -1340,7 +1387,7 @@ impl App {
                         if let Some(new) = other.and_then(|f| f.path()) {
                             folder.insert(&new);
                             if showing.as_deref() == Some(p.as_path()) {
-                                *self.showing.borrow_mut() = Some(new.clone());
+                                self.media.borrow_mut().replace_path(new.clone());
                                 self.set_current_name(Some(&new));
                             }
                         }
@@ -1373,8 +1420,7 @@ impl App {
         } else {
             // Index of the removed file is gone; land on the same slot.
             let idx = self
-                .showing
-                .borrow()
+                .current_path()
                 .as_deref()
                 .and_then(|p| self.folder.borrow().as_ref().and_then(|f| f.index_of(p)))
                 .unwrap_or(0);
@@ -1385,7 +1431,7 @@ impl App {
     // ----- file operations (FR-5) --------------------------------------
 
     fn trash_current(self: &Rc<Self>) {
-        let Some(path) = self.showing.borrow().clone() else {
+        let Some(path) = self.current_path() else {
             return;
         };
         // Release the file before it moves to trash.
@@ -1480,7 +1526,7 @@ impl App {
 
     fn save_rotation(self: &Rc<Self>) {
         let rotation = self.view.rotation();
-        let Some(path) = self.showing.borrow().clone() else {
+        let Some(path) = self.current_path() else {
             return;
         };
         if rotation == 0 {
@@ -1523,26 +1569,29 @@ impl App {
     fn update_save_enabled(&self) {
         // Why, not just whether: a greyed-out button that never says what
         // is wrong reads as a bug (FR-5.4).
-        let reason = match (
-            self.current_decoded.borrow().as_deref(),
-            self.current_mime.borrow().as_deref(),
-        ) {
-            (Some(Decoded::Static { .. }), Some(mime)) => {
+        let media = self.media.borrow();
+        let reason = match &*media {
+            MediaState::Image { decoded, mime, .. }
+                if matches!(&**decoded, Decoded::Static { .. }) =>
+            {
                 if self.editable_mimes.borrow().contains(mime) {
                     None
                 } else {
                     Some(format!("{mime} images cannot be written back"))
                 }
             }
-            (Some(Decoded::Svg { .. }), _) => {
+            MediaState::Image { decoded, .. } if matches!(&**decoded, Decoded::Svg { .. }) => {
                 Some("SVG rotation is view-only — the file is never rewritten".into())
             }
-            (Some(Decoded::Animated { .. }), _) => {
+            MediaState::Image { decoded, .. } if matches!(&**decoded, Decoded::Animated { .. }) => {
                 Some("Animated images can only be rotated in the view".into())
             }
-            _ if self.is_video_showing() => Some("Video cannot be rotated and saved".into()),
+            MediaState::Video(_) => Some("Video cannot be rotated and saved".into()),
             _ => Some("Nothing to save".into()),
         };
+        // `set_enabled` can emit into application code; never hold a
+        // RefCell borrow across that framework boundary.
+        drop(media);
         let enabled = reason.is_none() && self.view.rotation() != 0;
         self.save_action.set_enabled(enabled);
         self.save_btn.set_tooltip_text(Some(&match reason {
@@ -2220,13 +2269,14 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arrival, Direction, SKIP_BUDGET, excluded_path_message, format_time, nav_target,
-        resize_edge_at, skip_target,
+        Arrival, Direction, MediaState, SKIP_BUDGET, excluded_path_message, format_time,
+        nav_target, resize_edge_at, skip_target,
     };
 
     use crate::config::{Sort, SortOrder};
     use crate::folder::Folder;
     use gtk4::gdk::SurfaceEdge;
+    use std::path::PathBuf;
 
     /// A three-image folder on disk, which is what `Folder` reads.
     fn folder_of(name: &str, files: &[&str]) -> (std::path::PathBuf, Folder) {
@@ -2251,7 +2301,7 @@ mod tests {
     #[test]
     fn arrows_work_when_nothing_is_on_screen() {
         // Opening an unsupported file loads the folder but never lands on
-        // an image, leaving `showing` unset. The arrows used to go dead:
+        // an image, leaving the media state empty. The arrows used to go dead:
         // navigate() bailed out on the missing current index.
         let (dir, folder) = folder_of("nav", &["a.jpg", "b.jpg", "c.jpg"]);
         assert_eq!(
@@ -2272,6 +2322,22 @@ mod tests {
         assert_eq!(nav_target(&folder, Some(2), Direction::Next, false), None);
         assert_eq!(nav_target(&folder, Some(2), Direction::Next, true), Some(0));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn media_state_owns_the_position_through_transitions_and_renames() {
+        let original = PathBuf::from("a.jpg");
+        let renamed = PathBuf::from("b.jpg");
+        let mut state = MediaState::Loading(original.clone());
+        assert_eq!(state.path(), Some(original.as_path()));
+
+        state = MediaState::Error(original);
+        state.replace_path(renamed.clone());
+        assert_eq!(state.path(), Some(renamed.as_path()));
+
+        state = MediaState::Empty;
+        state.replace_path(PathBuf::from("ignored.jpg"));
+        assert_eq!(state.path(), None);
     }
 
     #[test]
