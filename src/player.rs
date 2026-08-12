@@ -457,7 +457,7 @@ impl Player {
                         }
                         gst::MessageView::AsyncDone(_) => {
                             // Replacing an external sidecar rebuilds the
-                            // same URI in Paused, then restores position and
+                            // same URI, then restores position and
                             // the former playback state without blocking the
                             // GTK main loop (FR-10.7).
                             let resume_action = advance_resume(&mut resume.borrow_mut());
@@ -470,16 +470,24 @@ impl Player {
                                         || !issue_seek(&playbin, &seek, position)
                                     {
                                         *resume.borrow_mut() = None;
-                                        if resume_playing {
-                                            let _ = playbin.set_state(gst::State::Playing);
-                                        }
+                                        let target = if resume_playing {
+                                            gst::State::Playing
+                                        } else {
+                                            gst::State::Paused
+                                        };
+                                        let _ = playbin.set_state(target);
                                     }
                                     return glib::ControlFlow::Continue;
                                 }
-                                ResumeAction::Finish { resume_playing } if resume_playing => {
-                                    let _ = playbin.set_state(gst::State::Playing);
+                                ResumeAction::Finish { resume_playing } => {
+                                    let target = if resume_playing {
+                                        gst::State::Playing
+                                    } else {
+                                        gst::State::Paused
+                                    };
+                                    let _ = playbin.set_state(target);
                                 }
-                                ResumeAction::Finish { .. } | ResumeAction::None => {}
+                                ResumeAction::None => {}
                             }
 
                             // The seek landed: real positions are truthful
@@ -655,7 +663,11 @@ impl Player {
         );
         let play_after_seek = self.is_playing();
 
-        let _ = self.playbin.set_state(gst::State::Null);
+        // READY is the documented reconfiguration boundary for playbin3.
+        // Restart in PLAYING so its video pad is assembled alongside the
+        // external text pad; starting this rebuild in PAUSED can let the
+        // text pad reach playsink first and fail with "no video pad".
+        let _ = self.playbin.set_state(gst::State::Ready);
         self.forget_timing();
         {
             let mut subtitles = self.subtitles.borrow_mut();
@@ -673,7 +685,7 @@ impl Player {
         self.playbin.set_property("uri", uri.as_str());
         self.playbin.set_property("suburi", suburi.as_str());
         crate::applog!("player: attached subtitle {}", path.display());
-        if let Err(source) = self.playbin.set_state(gst::State::Paused) {
+        if let Err(source) = self.playbin.set_state(gst::State::Playing) {
             *self.resume.borrow_mut() = None;
             return Err(PlayerError::Playback {
                 path: video,
@@ -911,7 +923,7 @@ fn recover_without_external(
         |state| (state.position, state.play_after_seek),
     );
 
-    let _ = playbin.set_state(gst::State::Null);
+    let _ = playbin.set_state(gst::State::Ready);
     *seek.borrow_mut() = SeekState::default();
     duration.set(None);
     {
@@ -929,7 +941,7 @@ fn recover_without_external(
     });
     playbin.set_property("uri", uri.as_str());
     playbin.set_property("suburi", Option::<&str>::None);
-    if playbin.set_state(gst::State::Paused).is_err() {
+    if playbin.set_state(gst::State::Playing).is_err() {
         *resume.borrow_mut() = None;
         return false;
     }
