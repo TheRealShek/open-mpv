@@ -12,7 +12,7 @@
 | Action | Command | Note |
 | ------ | ------- | ---- |
 | Build | `cargo build` | System deps: `gtk4-devel`, `glycin-devel`, `gstreamer1-devel` |
-| Run | `cargo run -- <file-or-dir>` | `OPEN_MPV_LOG=1` for a timed trace |
+| Run | `cargo run -- <file-or-dir>` | Timed trace is on; `OPEN_MPV_LOG=0` disables it |
 | Test | `cargo test` | Real trash/rotate tests; needs a user session, ImageMagick makes fixtures |
 | Lint | `cargo clippy --all-targets -- -D warnings` | Warnings are errors; `--all-targets` or you miss the tests |
 | Format | `cargo fmt` | |
@@ -83,7 +83,7 @@ gdbus call --session --dest dev.thakur.OpenMpv \
   --method org.gtk.Actions.Activate <action> "[]" "{}"
 ```
 
-Pair it with `OPEN_MPV_LOG=1` and assert against the trace. Prefer extracting a decision into a free function and unit-testing it (`nav_target`, `skip_target`, `cursor_name`, `help_line`) over testing through the widget tree.
+Assert against the default trace. Prefer extracting a decision into a free function and unit-testing it (`nav_target`, `skip_target`, `cursor_name`, `help_line`) over testing through the widget tree.
 
 ---
 

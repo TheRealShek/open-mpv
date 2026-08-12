@@ -1,5 +1,6 @@
-//! Opt-in diagnostic logging (`OPEN_MPV_LOG=1`), designed to be free
-//! when disabled: every `applog!` site is one atomic bool check — no
+//! Diagnostic logging, enabled by default and disabled with
+//! `OPEN_MPV_LOG=0`. Every `applog!` site is one atomic bool check when
+//! disabled — no
 //! formatting, no I/O. Lines carry monotonic ms since launch so the
 //! log doubles as a performance trace against the NFR-1 budgets.
 //! Never log from the render path (`ImageView::snapshot`).
@@ -14,12 +15,16 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 pub fn init() {
     START.get_or_init(Instant::now);
     if enabled() {
-        crate::applog!("logging enabled (OPEN_MPV_LOG)");
+        crate::applog!("logging enabled");
     }
 }
 
 pub fn enabled() -> bool {
-    *ENABLED.get_or_init(|| std::env::var("OPEN_MPV_LOG").is_ok_and(|v| !v.is_empty() && v != "0"))
+    *ENABLED.get_or_init(|| enabled_for(std::env::var_os("OPEN_MPV_LOG").as_deref()))
+}
+
+fn enabled_for(value: Option<&std::ffi::OsStr>) -> bool {
+    value != Some(std::ffi::OsStr::new("0"))
 }
 
 pub fn write(args: std::fmt::Arguments) {
@@ -27,8 +32,8 @@ pub fn write(args: std::fmt::Arguments) {
     eprintln!("open-mpv [{ms:9.1} ms] {args}");
 }
 
-/// Log when `OPEN_MPV_LOG` is set; free otherwise (arguments are not
-/// even formatted).
+/// Log unless `OPEN_MPV_LOG=0`; free otherwise (arguments are not even
+/// formatted).
 #[macro_export]
 macro_rules! applog {
     ($($arg:tt)*) => {
@@ -36,4 +41,17 @@ macro_rules! applog {
             $crate::log::write(format_args!($($arg)*));
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logging_is_on_unless_explicitly_disabled() {
+        assert!(enabled_for(None));
+        assert!(enabled_for(Some(std::ffi::OsStr::new(""))));
+        assert!(enabled_for(Some(std::ffi::OsStr::new("1"))));
+        assert!(!enabled_for(Some(std::ffi::OsStr::new("0"))));
+    }
 }

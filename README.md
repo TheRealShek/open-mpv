@@ -98,13 +98,13 @@ bind = q none          # `none` removes a default binding outright
 
 ## Logs
 
-Silent by default. Set `OPEN_MPV_LOG=1` to get a diagnostic trace on
-stderr — what was opened, every decode with dimensions and duration,
-cache hits, preloads, trash/restore/save results, and the cold-start
-time to first frame:
+Diagnostic logging is on by default. The trace on stderr records what
+was opened, every decode with dimensions and duration, cache hits,
+preloads, trash/restore/save results, and the cold-start time to first
+frame. Set `OPEN_MPV_LOG=0` to disable it:
 
 ```sh
-OPEN_MPV_LOG=1 open-mpv ~/Pictures | grep -v Gsk
+OPEN_MPV_LOG=0 open-mpv ~/Pictures
 ```
 
 When launched from Files (desktop), stderr goes to the journal:
@@ -113,8 +113,8 @@ When launched from Files (desktop), stderr goes to the journal:
 journalctl --user -t open-mpv -b   # or: journalctl --user -g open-mpv
 ```
 
-Logging is free when off (a single flag check per site — nothing is
-formatted or written) and never runs on the frame-rendering path.
+Disabled logging is free (a single flag check per site — nothing is
+formatted or written) and logging never runs on the frame-rendering path.
 Genuine errors (failed decode, failed trash/save) always print to
 stderr, log enabled or not.
 
