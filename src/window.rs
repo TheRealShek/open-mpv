@@ -1434,7 +1434,19 @@ impl App {
             #[strong(rename_to = app)]
             self,
             async move {
-                match fileops::restore(&path).await {
+                // `restore` has to enumerate the freedesktop trash on
+                // disk. Keep that synchronous filesystem work off the GTK
+                // main thread while the Gio pool runs it (NFR-1.2).
+                let restore_path = path.clone();
+                let result =
+                    match gio::spawn_blocking(move || fileops::restore(&restore_path)).await {
+                        Ok(result) => result,
+                        Err(_) => Err(format!(
+                            "could not restore {}: restore worker failed",
+                            path.display()
+                        )),
+                    };
+                match result {
                     Ok(()) => {
                         crate::applog!("restore: {}", path.display());
                         let idx = {

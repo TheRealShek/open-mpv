@@ -34,7 +34,7 @@ pub async fn trash(path: &Path) -> Result<(), String> {
 /// (the same on-disk format GIO writes) rather than the `trash://`
 /// gvfs backend, which is not reliably reachable outside a running
 /// GUI main loop.
-pub async fn restore(orig: &Path) -> Result<(), String> {
+pub fn restore(orig: &Path) -> Result<(), String> {
     let mut best: Option<(PathBuf, PathBuf, String)> = None; // (files/<n>, info file, date)
     for trash_dir in trash_dirs_for(orig) {
         let info_dir = trash_dir.join("info");
@@ -240,12 +240,12 @@ mod tests {
         block_on(trash(&file)).unwrap();
         assert!(!file.exists(), "file must be gone after trash");
 
-        block_on(restore(&file)).unwrap();
+        restore(&file).unwrap();
         assert!(file.exists(), "file must be back after restore");
         assert_eq!(std::fs::read(&file).unwrap(), b"payload");
 
         // Restoring again must fail cleanly — nothing left in trash.
-        assert!(block_on(restore(&file)).is_err());
+        assert!(restore(&file).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
