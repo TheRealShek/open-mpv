@@ -122,6 +122,15 @@ impl Player {
                             );
                             on_event(Event::Error(e.error().to_string()));
                         }
+                        gst::MessageView::Element(e) => {
+                            if let Some(description) = e.structure().and_then(missing_video_decoder)
+                            {
+                                crate::applog!("player: missing video decoder: {description}");
+                                on_event(Event::Error(format!(
+                                    "video decoder unavailable: {description}"
+                                )));
+                            }
+                        }
                         // The seek landed: real positions are truthful
                         // again, and the newest scrub position that piled
                         // up behind it can go out now.
@@ -304,6 +313,35 @@ impl Player {
     }
 }
 
+/// GStreamer can keep playing the audio half of a file when its video
+/// decoder is missing. That is a successful pipeline state rather than
+/// an `Error` message, so recognise the accompanying `missing-plugin`
+/// element message and surface the broken video playback (FR-10.6).
+/// Missing audio and subtitle decoders do not make the picture unusable.
+fn missing_video_decoder(structure: &gst::StructureRef) -> Option<String> {
+    if structure.name() != "missing-plugin"
+        || structure.get::<String>("type").ok().as_deref() != Some("decoder")
+    {
+        return None;
+    }
+
+    let caps = structure.get::<gst::Caps>("detail").ok()?;
+    if !caps
+        .iter()
+        .any(|candidate| candidate.name().starts_with("video/"))
+    {
+        return None;
+    }
+
+    Some(
+        structure
+            .get::<String>("name")
+            .ok()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| caps.to_string()),
+    )
+}
+
 /// Send the seek and record it as in flight. Free-standing because the
 /// bus watch flushes queued scrub positions without holding a `Player`.
 fn issue_seek(playbin: &gst::Element, seek: &RefCell<SeekState>, secs: f64) {
@@ -327,7 +365,7 @@ impl Drop for Player {
 
 #[cfg(test)]
 mod tests {
-    use super::{Instant, SEEK_SETTLE, SeekState};
+    use super::{Instant, SEEK_SETTLE, SeekState, gst, missing_video_decoder};
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
     fn issued(state: &mut SeekState, secs: f64, ago: std::time::Duration) {
@@ -359,5 +397,34 @@ mod tests {
         issued(&mut state, 12.0, SEEK_SETTLE);
         assert_eq!(state.pending(), None);
         assert!(state.request(20.0));
+    }
+
+    #[test]
+    fn a_missing_video_decoder_is_not_mistaken_for_successful_playback() {
+        gst::init().unwrap();
+        let message = gst::Structure::builder("missing-plugin")
+            .field("type", "decoder")
+            .field("detail", gst::Caps::builder("video/x-h264").build())
+            .field("name", "H.264 High 10 decoder")
+            .build();
+
+        assert_eq!(
+            missing_video_decoder(&message),
+            Some("H.264 High 10 decoder".to_owned())
+        );
+    }
+
+    #[test]
+    fn missing_non_video_decoders_do_not_hide_a_playable_picture() {
+        gst::init().unwrap();
+        for media_type in ["audio/mpeg", "text/x-raw"] {
+            let message = gst::Structure::builder("missing-plugin")
+                .field("type", "decoder")
+                .field("detail", gst::Caps::builder(media_type).build())
+                .field("name", "optional stream decoder")
+                .build();
+
+            assert_eq!(missing_video_decoder(&message), None);
+        }
     }
 }
