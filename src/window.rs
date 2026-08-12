@@ -635,7 +635,6 @@ impl App {
                             }
                         }
                         Err(e) => {
-                            eprintln!("open-mpv: error: {}: {e}", path.display());
                             if app.generation.get() == generation {
                                 app.on_decode_failed(&path, &e, idx, arrival);
                             }
@@ -680,11 +679,11 @@ impl App {
 
     // ----- showing videos (FR-10) ---------------------------------------
 
-    /// Lazily build the shared player; `None` if the pipeline cannot be
+    /// Lazily build the shared player; `Err` if the pipeline cannot be
     /// assembled (missing plugins) — a routine state, not a panic.
-    fn player(self: &Rc<Self>) -> Option<Rc<Player>> {
+    fn player(self: &Rc<Self>) -> Result<Rc<Player>, String> {
         if let Some(p) = self.player.borrow().as_ref() {
-            return Some(p.clone());
+            return Ok(p.clone());
         }
         let weak = Rc::downgrade(self);
         match Player::new(move |event| {
@@ -696,19 +695,19 @@ impl App {
                 let p = Rc::new(p);
                 p.set_volume(self.cfg.volume);
                 *self.player.borrow_mut() = Some(p.clone());
-                Some(p)
+                Ok(p)
             }
-            Err(e) => {
-                eprintln!("open-mpv: error: {e}");
-                None
-            }
+            Err(e) => Err(e),
         }
     }
 
     fn show_video(self: &Rc<Self>, path: &Path) {
-        let Some(player) = self.player() else {
-            self.show_error(path, "video playback unavailable (GStreamer)");
-            return;
+        let player = match self.player() {
+            Ok(player) => player,
+            Err(e) => {
+                self.show_error(path, &e);
+                return;
+            }
         };
         self.status.set_visible(false);
         *self.current_decoded.borrow_mut() = None;
@@ -1152,6 +1151,7 @@ impl App {
     }
 
     fn show_error(self: &Rc<Self>, path: &Path, message: &str) {
+        eprintln!("open-mpv: error: {}: {message}", path.display());
         self.clear_media();
         // `showing` deliberately survives: the file is still the one the
         // folder is positioned on, so navigation works from the error.
