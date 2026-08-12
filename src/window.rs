@@ -25,46 +25,119 @@ use crate::loader::{self, Decoded};
 use crate::player::{self, Player};
 use crate::viewer::ImageView;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Action {
+    Right,
+    Left,
+    Up,
+    Down,
+    Next,
+    Previous,
+    First,
+    Last,
+    PlayPause,
+    SeekBack,
+    SeekForward,
+    Mute,
+    VolumeUp,
+    VolumeDown,
+    ZoomIn,
+    ZoomOut,
+    ZoomFit,
+    ZoomActual,
+    ZoomToggle,
+    RotateClockwise,
+    RotateCounterclockwise,
+    Save,
+    Trash,
+    Undo,
+    Fullscreen,
+    Help,
+    Close,
+    Escape,
+}
+
+impl Action {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Action::Right => "right",
+            Action::Left => "left",
+            Action::Up => "up",
+            Action::Down => "down",
+            Action::Next => "next",
+            Action::Previous => "prev",
+            Action::First => "first",
+            Action::Last => "last",
+            Action::PlayPause => "play-pause",
+            Action::SeekBack => "seek-back",
+            Action::SeekForward => "seek-forward",
+            Action::Mute => "mute",
+            Action::VolumeUp => "volume-up",
+            Action::VolumeDown => "volume-down",
+            Action::ZoomIn => "zoom-in",
+            Action::ZoomOut => "zoom-out",
+            Action::ZoomFit => "zoom-fit",
+            Action::ZoomActual => "zoom-actual",
+            Action::ZoomToggle => "zoom-toggle",
+            Action::RotateClockwise => "rotate-cw",
+            Action::RotateCounterclockwise => "rotate-ccw",
+            Action::Save => "save",
+            Action::Trash => "trash",
+            Action::Undo => "undo",
+            Action::Fullscreen => "fullscreen",
+            Action::Help => "help",
+            Action::Close => "close",
+            Action::Escape => "escape",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        ACTIONS
+            .iter()
+            .find_map(|(action, _)| (action.as_str() == name).then_some(*action))
+    }
+}
+
 /// Default key → action map; config `bind=` lines override per key.
-const DEFAULT_BINDS: &[(&str, &str)] = &[
+const DEFAULT_BINDS: &[(&str, Action)] = &[
     // The arrow keys are contextual (see `App::arrow`), which is why they
     // bind to their own actions rather than straight to next/prev: Page
     // Down must keep stepping through the folder even when a zoomed
     // image has the arrows panning.
-    ("Right", "right"),
-    ("Left", "left"),
-    ("Up", "up"),
-    ("Down", "down"),
+    ("Right", Action::Right),
+    ("Left", Action::Left),
+    ("Up", Action::Up),
+    ("Down", Action::Down),
     // Space pauses video, flips to the next photo otherwise.
-    ("space", "play-pause"),
-    ("Page_Down", "next"),
-    ("BackSpace", "prev"),
-    ("Page_Up", "prev"),
-    ("Home", "first"),
-    ("End", "last"),
-    ("plus", "zoom-in"),
-    ("equal", "zoom-in"),
-    ("KP_Add", "zoom-in"),
-    ("minus", "zoom-out"),
-    ("KP_Subtract", "zoom-out"),
-    ("0", "zoom-fit"),
-    ("1", "zoom-actual"),
-    ("z", "zoom-toggle"),
-    ("r", "rotate-cw"),
-    ("<Shift>r", "rotate-ccw"),
-    ("s", "save"),
+    ("space", Action::PlayPause),
+    ("Page_Down", Action::Next),
+    ("BackSpace", Action::Previous),
+    ("Page_Up", Action::Previous),
+    ("Home", Action::First),
+    ("End", Action::Last),
+    ("plus", Action::ZoomIn),
+    ("equal", Action::ZoomIn),
+    ("KP_Add", Action::ZoomIn),
+    ("minus", Action::ZoomOut),
+    ("KP_Subtract", Action::ZoomOut),
+    ("0", Action::ZoomFit),
+    ("1", Action::ZoomActual),
+    ("z", Action::ZoomToggle),
+    ("r", Action::RotateClockwise),
+    ("<Shift>r", Action::RotateCounterclockwise),
+    ("s", Action::Save),
     // Video transport (FR-10.4), mpv-flavored.
-    ("j", "seek-back"),
-    ("l", "seek-forward"),
-    ("m", "mute"),
-    ("Delete", "trash"),
-    ("KP_Delete", "trash"),
-    ("<Control>z", "undo"),
-    ("f", "fullscreen"),
-    ("F11", "fullscreen"),
-    ("q", "close"),
-    ("question", "help"),
-    ("Escape", "escape"),
+    ("j", Action::SeekBack),
+    ("l", Action::SeekForward),
+    ("m", Action::Mute),
+    ("Delete", Action::Trash),
+    ("KP_Delete", Action::Trash),
+    ("<Control>z", Action::Undo),
+    ("f", Action::Fullscreen),
+    ("F11", Action::Fullscreen),
+    ("q", Action::Close),
+    ("question", Action::Help),
+    ("Escape", Action::Escape),
 ];
 
 /// Every action, paired with the description the cheat sheet shows
@@ -72,35 +145,35 @@ const DEFAULT_BINDS: &[(&str, &str)] = &[
 /// documented, and config binds are validated against the same names
 /// (FR-8.2). `escape` carries no description: its layered behaviour is
 /// spelled out in the footer instead.
-const ACTIONS: &[(&str, &str)] = &[
-    ("right", "Next image, or pan when zoomed in"),
-    ("left", "Previous image, or pan when zoomed in"),
-    ("up", "Volume up, or pan when zoomed in"),
-    ("down", "Volume down, or pan when zoomed in"),
-    ("next", "Next image"),
-    ("prev", "Previous image"),
-    ("first", "First image"),
-    ("last", "Last image"),
-    ("play-pause", "Pause video, or next image"),
-    ("seek-back", "Seek back 5 seconds"),
-    ("seek-forward", "Seek forward 5 seconds"),
-    ("mute", "Mute audio"),
-    ("volume-up", "Volume up"),
-    ("volume-down", "Volume down"),
-    ("zoom-in", "Zoom in"),
-    ("zoom-out", "Zoom out"),
-    ("zoom-fit", "Fit to window"),
-    ("zoom-actual", "Actual size, 100%"),
-    ("zoom-toggle", "Toggle fit and 100%"),
-    ("rotate-cw", "Rotate right"),
-    ("rotate-ccw", "Rotate left"),
-    ("save", "Save rotation to the file"),
-    ("trash", "Move to trash"),
-    ("undo", "Undo the delete"),
-    ("fullscreen", "Fullscreen"),
-    ("help", "This list"),
-    ("close", "Quit"),
-    ("escape", ""),
+const ACTIONS: &[(Action, &str)] = &[
+    (Action::Right, "Next image, or pan when zoomed in"),
+    (Action::Left, "Previous image, or pan when zoomed in"),
+    (Action::Up, "Volume up, or pan when zoomed in"),
+    (Action::Down, "Volume down, or pan when zoomed in"),
+    (Action::Next, "Next image"),
+    (Action::Previous, "Previous image"),
+    (Action::First, "First image"),
+    (Action::Last, "Last image"),
+    (Action::PlayPause, "Pause video, or next image"),
+    (Action::SeekBack, "Seek back 5 seconds"),
+    (Action::SeekForward, "Seek forward 5 seconds"),
+    (Action::Mute, "Mute audio"),
+    (Action::VolumeUp, "Volume up"),
+    (Action::VolumeDown, "Volume down"),
+    (Action::ZoomIn, "Zoom in"),
+    (Action::ZoomOut, "Zoom out"),
+    (Action::ZoomFit, "Fit to window"),
+    (Action::ZoomActual, "Actual size, 100%"),
+    (Action::ZoomToggle, "Toggle fit and 100%"),
+    (Action::RotateClockwise, "Rotate right"),
+    (Action::RotateCounterclockwise, "Rotate left"),
+    (Action::Save, "Save rotation to the file"),
+    (Action::Trash, "Move to trash"),
+    (Action::Undo, "Undo the delete"),
+    (Action::Fullscreen, "Fullscreen"),
+    (Action::Help, "This list"),
+    (Action::Close, "Quit"),
+    (Action::Escape, ""),
 ];
 
 /// Seek bar width when the window has room for it: wide enough that a
@@ -467,8 +540,8 @@ impl App {
             indicator_timer: TimerSlot::default(),
             toast_timer: TimerSlot::default(),
             svg_timer: TimerSlot::default(),
-            save_action: gio::SimpleAction::new("save", None),
-            undo_action: gio::SimpleAction::new("undo", None),
+            save_action: gio::SimpleAction::new(Action::Save.as_str(), None),
+            undo_action: gio::SimpleAction::new(Action::Undo.as_str(), None),
             cfg,
         });
 
@@ -1701,22 +1774,25 @@ impl App {
 
     fn setup_actions(self: &Rc<Self>, gtk_app: &gtk::Application) {
         type Handler = Box<dyn Fn(&Rc<App>)>;
-        let add = |name: &str, f: Handler| {
-            let action = gio::SimpleAction::new(name, None);
+        let add = |name: Action, f: Handler| {
+            let action = gio::SimpleAction::new(name.as_str(), None);
             let app = self.clone();
             action.connect_activate(move |_, _| f(&app));
             self.win.add_action(&action);
             action
         };
 
-        add("next", Box::new(|a| a.navigate(Direction::Next)));
-        add("prev", Box::new(|a| a.navigate(Direction::Previous)));
-        add("right", Box::new(|a| a.arrow(1, 0)));
-        add("left", Box::new(|a| a.arrow(-1, 0)));
-        add("up", Box::new(|a| a.arrow(0, -1)));
-        add("down", Box::new(|a| a.arrow(0, 1)));
+        add(Action::Next, Box::new(|a| a.navigate(Direction::Next)));
         add(
-            "first",
+            Action::Previous,
+            Box::new(|a| a.navigate(Direction::Previous)),
+        );
+        add(Action::Right, Box::new(|a| a.arrow(1, 0)));
+        add(Action::Left, Box::new(|a| a.arrow(-1, 0)));
+        add(Action::Up, Box::new(|a| a.arrow(0, -1)));
+        add(Action::Down, Box::new(|a| a.arrow(0, 1)));
+        add(
+            Action::First,
             Box::new(|a| {
                 if a.folder.borrow().as_ref().is_some_and(|f| !f.is_empty()) {
                     a.show_index(0, Arrival::Direct);
@@ -1724,7 +1800,7 @@ impl App {
             }),
         );
         add(
-            "last",
+            Action::Last,
             Box::new(|a| {
                 let len = a.folder.borrow().as_ref().map_or(0, Folder::len);
                 if len > 0 {
@@ -1732,15 +1808,18 @@ impl App {
                 }
             }),
         );
-        add("zoom-in", Box::new(|a| a.view.zoom_by(1.25, None)));
-        add("zoom-out", Box::new(|a| a.view.zoom_by(0.8, None)));
-        add("zoom-fit", Box::new(|a| a.view.zoom_fit()));
-        add("zoom-actual", Box::new(|a| a.view.zoom_to(1.0, None)));
-        add("zoom-toggle", Box::new(|a| a.view.toggle_fit_actual()));
-        add("rotate-cw", Box::new(|a| a.view.rotate_view(1)));
-        add("rotate-ccw", Box::new(|a| a.view.rotate_view(-1)));
+        add(Action::ZoomIn, Box::new(|a| a.view.zoom_by(1.25, None)));
+        add(Action::ZoomOut, Box::new(|a| a.view.zoom_by(0.8, None)));
+        add(Action::ZoomFit, Box::new(|a| a.view.zoom_fit()));
+        add(Action::ZoomActual, Box::new(|a| a.view.zoom_to(1.0, None)));
+        add(Action::ZoomToggle, Box::new(|a| a.view.toggle_fit_actual()));
+        add(Action::RotateClockwise, Box::new(|a| a.view.rotate_view(1)));
         add(
-            "play-pause",
+            Action::RotateCounterclockwise,
+            Box::new(|a| a.view.rotate_view(-1)),
+        );
+        add(
+            Action::PlayPause,
             Box::new(|a| {
                 if a.is_video_showing() {
                     // A paused video must not keep the screen awake.
@@ -1762,32 +1841,32 @@ impl App {
             }),
         );
         add(
-            "seek-back",
+            Action::SeekBack,
             Box::new(|a| {
                 a.with_video(|p| p.seek_by(-5.0));
                 a.flash_progress();
             }),
         );
         add(
-            "seek-forward",
+            Action::SeekForward,
             Box::new(|a| {
                 a.with_video(|p| p.seek_by(5.0));
                 a.flash_progress();
             }),
         );
         add(
-            "mute",
+            Action::Mute,
             Box::new(|a| match a.with_video(Player::toggle_mute) {
                 Some(true) => a.flash("Muted"),
                 Some(false) => a.flash("Sound on"),
                 None => {}
             }),
         );
-        add("volume-up", Box::new(|a| a.change_volume(0.1)));
-        add("volume-down", Box::new(|a| a.change_volume(-0.1)));
-        add("trash", Box::new(|a| a.trash_current()));
+        add(Action::VolumeUp, Box::new(|a| a.change_volume(0.1)));
+        add(Action::VolumeDown, Box::new(|a| a.change_volume(-0.1)));
+        add(Action::Trash, Box::new(|a| a.trash_current()));
         add(
-            "fullscreen",
+            Action::Fullscreen,
             Box::new(|a| {
                 if a.win.is_fullscreen() {
                     a.win.unfullscreen();
@@ -1796,14 +1875,14 @@ impl App {
                 }
             }),
         );
-        add("close", Box::new(|a| a.win.close()));
+        add(Action::Close, Box::new(|a| a.win.close()));
         add(
-            "help",
+            Action::Help,
             Box::new(|a| a.help_label.set_visible(!a.help_label.is_visible())),
         );
         // Escape: help → fullscreen → close (FR-6.7).
         add(
-            "escape",
+            Action::Escape,
             Box::new(|a| {
                 if a.help_label.is_visible() {
                     a.help_label.set_visible(false);
@@ -1829,9 +1908,9 @@ impl App {
 
         // Defaults merged with user binds (FR-8.2); a user bind takes
         // the key over from the default action.
-        let mut key_to_action: BTreeMap<String, String> = DEFAULT_BINDS
+        let mut key_to_action: BTreeMap<String, Action> = DEFAULT_BINDS
             .iter()
-            .map(|(k, a)| (k.to_string(), a.to_string()))
+            .map(|(key, action)| (key.to_string(), *action))
             .collect();
         for (key, action) in &self.cfg.binds {
             if gtk::accelerator_parse(key).is_none() {
@@ -1844,21 +1923,21 @@ impl App {
                 key_to_action.remove(key);
                 continue;
             }
-            if !ACTIONS.iter().any(|(name, _)| name == action) {
+            let Some(action) = Action::parse(action) else {
                 eprintln!("open-mpv: config: unknown action `{action}` for bind `{key}`");
                 continue;
-            }
-            key_to_action.insert(key.clone(), action.clone());
+            };
+            key_to_action.insert(key.clone(), action);
         }
-        let mut action_to_keys: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut action_to_keys: BTreeMap<Action, Vec<&str>> = BTreeMap::new();
         for (key, action) in &key_to_action {
             action_to_keys
-                .entry(action.as_str())
+                .entry(*action)
                 .or_default()
                 .push(key.as_str());
         }
         for (action, keys) in &action_to_keys {
-            gtk_app.set_accels_for_action(&format!("win.{action}"), keys);
+            gtk_app.set_accels_for_action(&format!("win.{}", action.as_str()), keys);
         }
     }
 
@@ -1868,7 +1947,7 @@ impl App {
             if description.is_empty() {
                 continue;
             }
-            let accels = gtk_app.accels_for_action(&format!("win.{action}"));
+            let accels = gtk_app.accels_for_action(&format!("win.{}", action.as_str()));
             if accels.is_empty() {
                 continue;
             }
@@ -2269,8 +2348,8 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arrival, Direction, MediaState, SKIP_BUDGET, excluded_path_message, format_time,
-        nav_target, resize_edge_at, skip_target,
+        ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SKIP_BUDGET,
+        excluded_path_message, format_time, nav_target, resize_edge_at, skip_target,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -2434,31 +2513,40 @@ mod tests {
 
     #[test]
     fn every_action_is_documented_and_reachable_by_key() {
-        use super::{ACTIONS, DEFAULT_BINDS};
-
         for (key, action) in DEFAULT_BINDS {
             assert!(
                 ACTIONS.iter().any(|(name, _)| name == action),
-                "default bind `{key}` names `{action}`, which is not a known action"
+                "default bind `{key}` names `{}`, which is not a known action",
+                action.as_str()
             );
         }
         // Reached through the contextual arrow actions rather than a key
         // of their own, and still bindable by name (FR-8.2). Anything
         // else without a binding is unreachable by keyboard (FR-6.5) and
         // would show up in the cheat sheet with a blank key column.
-        const REACHED_CONTEXTUALLY: &[&str] = &["volume-up", "volume-down"];
+        const REACHED_CONTEXTUALLY: &[Action] = &[Action::VolumeUp, Action::VolumeDown];
 
         for (action, description) in ACTIONS {
             assert!(
                 DEFAULT_BINDS.iter().any(|(_, name)| name == action)
                     || REACHED_CONTEXTUALLY.contains(action),
-                "action `{action}` has no default binding"
+                "action `{}` has no default binding",
+                action.as_str()
             );
             assert!(
-                !description.is_empty() || *action == "escape",
-                "action `{action}` has no description for the cheat sheet"
+                !description.is_empty() || *action == Action::Escape,
+                "action `{}` has no description for the cheat sheet",
+                action.as_str()
             );
         }
+    }
+
+    #[test]
+    fn configured_action_names_parse_only_at_the_boundary() {
+        for (action, _) in ACTIONS {
+            assert_eq!(Action::parse(action.as_str()), Some(*action));
+        }
+        assert_eq!(Action::parse("not-an-action"), None);
     }
 
     #[test]
