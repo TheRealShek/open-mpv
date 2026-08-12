@@ -10,7 +10,8 @@
 //! `Null`, freeing decoder state while an image is shown.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -45,7 +46,60 @@ const SEEK_SETTLE: Duration = Duration::from_millis(1500);
 /// Pipeline happenings the window reacts to; delivered on the main loop.
 pub enum Event {
     EndOfStream,
-    Error(String),
+    Error(glib::Error),
+    MissingVideoDecoder(String),
+}
+
+#[derive(Debug)]
+pub enum PlayerError {
+    Init(glib::Error),
+    SinkUnavailable(glib::BoolError),
+    PlaybinUnavailable(glib::BoolError),
+    MissingBus,
+    BusWatch(glib::BoolError),
+    Uri {
+        path: PathBuf,
+        source: glib::Error,
+    },
+    Playback {
+        path: PathBuf,
+        source: gst::StateChangeError,
+    },
+}
+
+impl fmt::Display for PlayerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PlayerError::Init(source) => write!(f, "GStreamer init failed: {source}"),
+            PlayerError::SinkUnavailable(source) => {
+                write!(f, "gtk4paintablesink unavailable: {source}")
+            }
+            PlayerError::PlaybinUnavailable(source) => {
+                write!(f, "playbin3 unavailable: {source}")
+            }
+            PlayerError::MissingBus => f.write_str("playbin has no bus"),
+            PlayerError::BusWatch(source) => write!(f, "cannot watch pipeline bus: {source}"),
+            PlayerError::Uri { path, source } => {
+                write!(f, "cannot build uri for {}: {source}", path.display())
+            }
+            PlayerError::Playback { path, source } => {
+                write!(f, "cannot start playback of {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlayerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PlayerError::Init(source) | PlayerError::Uri { source, .. } => Some(source),
+            PlayerError::SinkUnavailable(source)
+            | PlayerError::PlaybinUnavailable(source)
+            | PlayerError::BusWatch(source) => Some(source),
+            PlayerError::Playback { source, .. } => Some(source),
+            PlayerError::MissingBus => None,
+        }
+    }
 }
 
 /// A flushing seek only answers position queries with the new position
@@ -187,18 +241,18 @@ pub struct Player {
 
 impl Player {
     /// Build the pipeline. `on_event` fires on the GTK main loop.
-    pub fn new(on_event: impl Fn(Event) + 'static) -> Result<Player, String> {
-        gst::init().map_err(|e| format!("GStreamer init failed: {e}"))?;
+    pub fn new(on_event: impl Fn(Event) + 'static) -> Result<Player, PlayerError> {
+        gst::init().map_err(PlayerError::Init)?;
         prefer_intel_video_decoders();
         let sink = gst::ElementFactory::make("gtk4paintablesink")
             .build()
-            .map_err(|e| format!("gtk4paintablesink unavailable: {e}"))?;
+            .map_err(PlayerError::SinkUnavailable)?;
         // The sink's paintable must be pulled from the main thread.
         let paintable = sink.property::<gdk::Paintable>("paintable");
         let playbin = gst::ElementFactory::make("playbin3")
             .property("video-sink", &sink)
             .build()
-            .map_err(|e| format!("playbin3 unavailable: {e}"))?;
+            .map_err(PlayerError::PlaybinUnavailable)?;
 
         let seek = Rc::new(RefCell::new(SeekState::default()));
         let duration = Rc::new(Cell::new(None));
@@ -225,7 +279,7 @@ impl Player {
             ),
         );
 
-        let bus = playbin.bus().ok_or("playbin has no bus")?;
+        let bus = playbin.bus().ok_or(PlayerError::MissingBus)?;
         bus.set_sync_handler({
             let decoder_fallback = decoder_fallback.clone();
             move |_bus, msg| {
@@ -269,15 +323,13 @@ impl Player {
                                 e.debug()
                             );
                             lock_decoder_fallback(&decoder_fallback).restore();
-                            on_event(Event::Error(e.error().to_string()));
+                            on_event(Event::Error(e.error()));
                         }
                         gst::MessageView::Element(e) => {
                             if let Some(description) = e.structure().and_then(missing_video_decoder)
                             {
                                 crate::applog!("player: missing video decoder: {description}");
-                                on_event(Event::Error(format!(
-                                    "video decoder unavailable: {description}"
-                                )));
+                                on_event(Event::MissingVideoDecoder(description));
                             }
                         }
                         // The seek landed: real positions are truthful
@@ -299,7 +351,7 @@ impl Player {
                     glib::ControlFlow::Continue
                 }
             })
-            .map_err(|e| format!("cannot watch pipeline bus: {e}"))?;
+            .map_err(PlayerError::BusWatch)?;
 
         Ok(Player {
             playbin,
@@ -317,15 +369,20 @@ impl Player {
 
     /// Start playing `path` from the beginning, replacing any current
     /// video. The pipeline object is reused; only its state cycles.
-    pub fn play(&self, path: &Path) -> Result<(), String> {
-        let uri = glib::filename_to_uri(path, None)
-            .map_err(|e| format!("cannot build uri for {}: {e}", path.display()))?;
+    pub fn play(&self, path: &Path) -> Result<(), PlayerError> {
+        let uri = glib::filename_to_uri(path, None).map_err(|source| PlayerError::Uri {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let _ = self.playbin.set_state(gst::State::Null);
         self.forget_stream();
         self.playbin.set_property("uri", uri.as_str());
         self.playbin
             .set_state(gst::State::Playing)
-            .map_err(|e| format!("cannot start playback of {}: {e}", path.display()))?;
+            .map_err(|source| PlayerError::Playback {
+                path: path.to_path_buf(),
+                source,
+            })?;
         Ok(())
     }
 

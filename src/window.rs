@@ -649,7 +649,7 @@ impl App {
                         }
                         Err(e) => {
                             if app.generation.get() == generation {
-                                app.on_decode_failed(&path, &e, idx, arrival);
+                                app.on_decode_failed(&path, &e.to_string(), idx, arrival);
                             }
                         }
                     }
@@ -694,7 +694,7 @@ impl App {
 
     /// Lazily build the shared player; `Err` if the pipeline cannot be
     /// assembled (missing plugins) — a routine state, not a panic.
-    fn player(self: &Rc<Self>) -> Result<Rc<Player>, String> {
+    fn player(self: &Rc<Self>) -> Result<Rc<Player>, player::PlayerError> {
         if let Some(p) = self.player.borrow().as_ref() {
             return Ok(p.clone());
         }
@@ -718,7 +718,7 @@ impl App {
         let player = match self.player() {
             Ok(player) => player,
             Err(e) => {
-                self.show_error(path, &e);
+                self.show_error(path, &e.to_string());
                 return;
             }
         };
@@ -727,7 +727,7 @@ impl App {
         *self.current_mime.borrow_mut() = None;
         self.view.show_paintable(player.paintable(), None);
         if let Err(e) = player.play(path) {
-            self.show_error(path, &e);
+            self.show_error(path, &e.to_string());
             return;
         }
         crate::applog!("play: {}", path.display());
@@ -965,11 +965,18 @@ impl App {
                     p.rewind();
                 }
             }
-            player::Event::Error(message) => {
+            player::Event::Error(error) => {
                 let path = self.showing.borrow().clone();
                 self.stop_video();
                 if let Some(path) = path {
-                    self.show_error(&path, &message);
+                    self.show_error(&path, &error.to_string());
+                }
+            }
+            player::Event::MissingVideoDecoder(description) => {
+                let path = self.showing.borrow().clone();
+                self.stop_video();
+                if let Some(path) = path {
+                    self.show_error(&path, &format!("video decoder unavailable: {description}"));
                 }
             }
         }
@@ -1418,7 +1425,7 @@ impl App {
                     }
                     Err(e) => {
                         eprintln!("open-mpv: error: {e}");
-                        app.show_toast(&e, false);
+                        app.show_toast(&e.to_string(), false);
                     }
                 }
             }
@@ -1438,9 +1445,9 @@ impl App {
                 // disk. Keep that synchronous filesystem work off the GTK
                 // main thread while the Gio pool runs it (NFR-1.2).
                 let restore_path = path.clone();
-                let result =
+                let result: Result<(), String> =
                     match gio::spawn_blocking(move || fileops::restore(&restore_path)).await {
-                        Ok(result) => result,
+                        Ok(result) => result.map_err(|error| error.to_string()),
                         Err(_) => Err(format!(
                             "could not restore {}: restore worker failed",
                             path.display()
@@ -1464,7 +1471,7 @@ impl App {
                     }
                     Err(e) => {
                         eprintln!("open-mpv: error: {e}");
-                        app.show_toast(&e, false);
+                        app.show_toast(&e.to_string(), false);
                     }
                 }
             }
@@ -1502,7 +1509,7 @@ impl App {
                     }
                     Err(e) => {
                         eprintln!("open-mpv: error: {e}");
-                        app.show_toast(&e, false);
+                        app.show_toast(&e.to_string(), false);
                         app.update_save_enabled();
                     }
                 }

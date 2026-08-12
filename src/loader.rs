@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -34,6 +35,29 @@ pub enum Decoded {
     },
 }
 
+#[derive(Debug)]
+pub enum DecodeError {
+    Load(glycin::ErrorCtx),
+    FirstFrame(glycin::ErrorCtx),
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DecodeError::Load(source) => write!(f, "image loader failed: {source}"),
+            DecodeError::FirstFrame(source) => write!(f, "could not decode first frame: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DecodeError::Load(source) | DecodeError::FirstFrame(source) => Some(source),
+        }
+    }
+}
+
 impl Decoded {
     pub fn first_texture(&self) -> gdk::Texture {
         match self {
@@ -44,15 +68,15 @@ impl Decoded {
     }
 }
 
-pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), String> {
+pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), DecodeError> {
     let started = std::time::Instant::now();
     let file = gio::File::for_path(path);
     let image = glycin::Loader::new(file)
         .load()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(DecodeError::Load)?;
     let mime = image.mime_type().to_string();
-    let frame = image.next_frame().await.map_err(|e| e.to_string())?;
+    let frame = image.next_frame().await.map_err(DecodeError::FirstFrame)?;
     crate::applog!(
         "decode: {} {}x{} {} in {:.1} ms",
         path.display(),

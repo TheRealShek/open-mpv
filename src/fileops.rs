@@ -4,6 +4,7 @@
 //! staged in a temp file and renamed over the original (FR-5.5).
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,115 @@ use gtk4::gio::prelude::*;
 use gtk4::glib;
 
 use gufo_common::orientation::Rotation;
+
+#[derive(Debug)]
+pub struct TrashError {
+    path: PathBuf,
+    source: glib::Error,
+}
+
+impl fmt::Display for TrashError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "could not move {} to trash: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for TrashError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+#[derive(Debug)]
+pub enum RestoreError {
+    NotFound(PathBuf),
+    Move {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RestoreError::NotFound(path) => {
+                write!(f, "{} is no longer in the trash", path.display())
+            }
+            RestoreError::Move { path, source } => {
+                write!(f, "could not restore {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RestoreError::NotFound(_) => None,
+            RestoreError::Move { source, .. } => Some(source),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SaveRotationError {
+    Editor {
+        path: PathBuf,
+        source: glycin::ErrorCtx,
+    },
+    Rotation {
+        path: PathBuf,
+        source: glycin::ErrorCtx,
+    },
+    SparseWrite {
+        path: PathBuf,
+        source: glycin::Error,
+    },
+    ReadEdited(std::io::Error),
+    AtomicWrite {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl fmt::Display for SaveRotationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SaveRotationError::Editor { path, source } => {
+                write!(f, "editor failed for {}: {source}", path.display())
+            }
+            SaveRotationError::Rotation { path, source } => {
+                write!(f, "rotation failed for {}: {source}", path.display())
+            }
+            SaveRotationError::SparseWrite { path, source } => {
+                write!(f, "could not write {}: {source}", path.display())
+            }
+            SaveRotationError::AtomicWrite { path, source } => {
+                write!(f, "could not write {}: {source}", path.display())
+            }
+            SaveRotationError::ReadEdited(source) => {
+                write!(f, "could not read edited image data: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SaveRotationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SaveRotationError::Editor { source, .. }
+            | SaveRotationError::Rotation { source, .. } => Some(source),
+            SaveRotationError::SparseWrite { source, .. } => Some(source),
+            SaveRotationError::ReadEdited(source)
+            | SaveRotationError::AtomicWrite { source, .. } => Some(source),
+        }
+    }
+}
 
 /// MIME types the sandboxed editors can rewrite (queried once).
 pub async fn editable_mime_types() -> BTreeSet<String> {
@@ -22,11 +132,14 @@ pub async fn editable_mime_types() -> BTreeSet<String> {
         .collect()
 }
 
-pub async fn trash(path: &Path) -> Result<(), String> {
+pub async fn trash(path: &Path) -> Result<(), TrashError> {
     gio::File::for_path(path)
         .trash_future(glib::Priority::DEFAULT)
         .await
-        .map_err(|e| format!("could not move {} to trash: {e}", path.display()))
+        .map_err(|source| TrashError {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// Restore the most recently trashed file whose original location was
@@ -34,7 +147,7 @@ pub async fn trash(path: &Path) -> Result<(), String> {
 /// (the same on-disk format GIO writes) rather than the `trash://`
 /// gvfs backend, which is not reliably reachable outside a running
 /// GUI main loop.
-pub fn restore(orig: &Path) -> Result<(), String> {
+pub fn restore(orig: &Path) -> Result<(), RestoreError> {
     let mut best: Option<(PathBuf, PathBuf, String)> = None; // (files/<n>, info file, date)
     for trash_dir in trash_dirs_for(orig) {
         let info_dir = trash_dir.join("info");
@@ -80,10 +193,11 @@ pub fn restore(orig: &Path) -> Result<(), String> {
             }
         }
     }
-    let (file, info, _) =
-        best.ok_or_else(|| format!("{} is no longer in the trash", orig.display()))?;
-    std::fs::rename(&file, orig)
-        .map_err(|e| format!("could not restore {}: {e}", orig.display()))?;
+    let (file, info, _) = best.ok_or_else(|| RestoreError::NotFound(orig.to_path_buf()))?;
+    std::fs::rename(&file, orig).map_err(|source| RestoreError::Move {
+        path: orig.to_path_buf(),
+        source,
+    })?;
     let _ = std::fs::remove_file(info);
     Ok(())
 }
@@ -144,7 +258,7 @@ fn percent_decode(s: &str) -> PathBuf {
 /// Persist a clockwise view rotation (in quarter turns) to disk via the
 /// sandboxed editor. JPEG rotations are sparse metadata edits (no pixel
 /// re-encode); other editable formats are rewritten atomically (FR-5.4).
-pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), String> {
+pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), SaveRotationError> {
     // glycin rotations are counter-clockwise.
     let rotation = match cw_quarter_turns % 4 {
         1 => Rotation::_270,
@@ -156,23 +270,32 @@ pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), Stri
     let editable = glycin::Editor::new(file.clone())
         .edit()
         .await
-        .map_err(|e| format!("editor failed for {}: {e}", path.display()))?;
+        .map_err(|source| SaveRotationError::Editor {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let ops = glycin::Operations::new(vec![glycin::Operation::Rotate(rotation)]);
     let edit = editable
         .apply_sparse(&ops)
         .await
-        .map_err(|e| format!("rotation failed for {}: {e}", path.display()))?;
+        .map_err(|source| SaveRotationError::Rotation {
+            path: path.to_path_buf(),
+            source,
+        })?;
     match edit {
         glycin::SparseEdit::Sparse(_) => match edit.apply_to(file).await {
             Ok(_) => Ok(()),
-            Err(e) => Err(format!("could not write {}: {e}", path.display())),
+            Err(source) => Err(SaveRotationError::SparseWrite {
+                path: path.to_path_buf(),
+                source,
+            }),
         },
         glycin::SparseEdit::Complete(data) => {
-            let bytes = data
-                .get_full()
-                .map_err(|e| format!("could not read edited image data: {e}"))?;
-            atomic_write(path, &bytes)
-                .map_err(|e| format!("could not write {}: {e}", path.display()))
+            let bytes = data.get_full().map_err(SaveRotationError::ReadEdited)?;
+            atomic_write(path, &bytes).map_err(|source| SaveRotationError::AtomicWrite {
+                path: path.to_path_buf(),
+                source,
+            })
         }
     }
 }
@@ -245,7 +368,10 @@ mod tests {
         assert_eq!(std::fs::read(&file).unwrap(), b"payload");
 
         // Restoring again must fail cleanly — nothing left in trash.
-        assert!(restore(&file).is_err());
+        assert!(matches!(
+            restore(&file),
+            Err(RestoreError::NotFound(path)) if path == file
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
