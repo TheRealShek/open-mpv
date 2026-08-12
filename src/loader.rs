@@ -88,7 +88,7 @@ pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), DecodeError> {
     let is_svg = matches!(mime.as_str(), "image/svg+xml" | "image/svg+xml-compressed");
     let decoded = if is_svg {
         Decoded::Svg {
-            nominal: (frame.width() as f64, frame.height() as f64),
+            nominal: (f64::from(frame.width()), f64::from(frame.height())),
             first: frame.texture(),
             image,
         }
@@ -110,7 +110,15 @@ pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), DecodeError> {
 /// erring toward staying under the budget.
 fn frame_bytes(decoded: &Decoded) -> usize {
     let t = decoded.first_texture();
-    t.width() as usize * t.height() as usize * 4
+    let (Ok(width), Ok(height)) = (usize::try_from(t.width()), usize::try_from(t.height())) else {
+        // An invalid foreign dimension must never wrap into a small cache
+        // charge. Treat it as over-budget so it cannot retain neighbors.
+        return usize::MAX;
+    };
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .unwrap_or(usize::MAX)
 }
 
 /// Tiny LRU keyed by path: current image plus pre-decoded neighbors.

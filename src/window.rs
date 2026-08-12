@@ -497,7 +497,7 @@ impl App {
             folder: RefCell::new(None),
             monitor: RefCell::new(None),
             media: RefCell::new(MediaState::Empty),
-            cache: loader::Cache::new(3, cfg.cache_budget_mb as usize * 1024 * 1024),
+            cache: loader::Cache::new(3, cache_budget_bytes(cfg.cache_budget_mb)),
             generation: Cell::new(0),
             editable_mimes: RefCell::new(BTreeSet::new()),
             player: RefCell::new(None),
@@ -993,7 +993,12 @@ impl App {
         if self.win.is_fullscreen() {
             return None;
         }
-        resize_edge_at(x, y, self.win.width() as f64, self.win.height() as f64)
+        resize_edge_at(
+            x,
+            y,
+            f64::from(self.win.width()),
+            f64::from(self.win.height()),
+        )
     }
 
     /// Show the grab as a resize cursor, so the border can be found
@@ -1115,7 +1120,7 @@ impl App {
             }
             _ => {
                 self.view.show_texture(texture.clone(), None);
-                (texture.width() as f64, texture.height() as f64)
+                (f64::from(texture.width()), f64::from(texture.height()))
             }
         };
         if let Decoded::Animated { .. } = &*decoded {
@@ -1203,12 +1208,8 @@ impl App {
                         return;
                     };
                     let zoom = app.view.zoom_percent() / 100.0;
-                    let w = (nominal.0 * zoom)
-                        .round()
-                        .clamp(1.0, loader::SVG_RENDER_MAX as f64);
-                    let h = (nominal.1 * zoom)
-                        .round()
-                        .clamp(1.0, loader::SVG_RENDER_MAX as f64);
+                    let w = svg_render_dimension(nominal.0 * zoom);
+                    let h = svg_render_dimension(nominal.1 * zoom);
                     glib::spawn_future_local(clone!(
                         #[strong]
                         app,
@@ -1217,7 +1218,7 @@ impl App {
                                 return;
                             };
                             let started = std::time::Instant::now();
-                            let request = glycin::FrameRequest::new().scale(w as u32, h as u32);
+                            let request = glycin::FrameRequest::new().scale(w, h);
                             if let Ok(frame) = image.specific_frame(request).await
                                 && app.generation.get() == generation
                             {
@@ -1333,13 +1334,13 @@ impl App {
             && let Some(monitor) = display.monitors().item(0).and_downcast::<gdk::Monitor>()
         {
             let geo = monitor.geometry();
-            (mw, mh) = (geo.width() as f64, geo.height() as f64);
+            (mw, mh) = (f64::from(geo.width()), f64::from(geo.height()));
         }
         let (cap_w, cap_h) = (mw * 0.85, mh * 0.85);
         let s = (cap_w / size.0).min(cap_h / size.1).min(1.0);
         self.win.set_default_size(
-            (size.0 * s).round().max(200.0) as i32,
-            (size.1 * s).round().max(150.0) as i32,
+            window_dimension(size.0 * s, 200),
+            window_dimension(size.1 * s, 150),
         );
         self.sized_from_media.set(true);
         crate::applog!("window sized to media {}x{}", size.0, size.1);
@@ -1616,7 +1617,7 @@ impl App {
                         crate::applog!(
                             "save-rotation: {} ({}°) in {:.1} ms",
                             path.display(),
-                            rotation as u32 * 90,
+                            u32::from(rotation) * 90,
                             started.elapsed().as_secs_f64() * 1000.0
                         );
                         app.cache.invalidate(&path);
@@ -2034,7 +2035,7 @@ impl App {
                 toplevel.begin_resize(
                     edge,
                     Some(&device),
-                    gdk::BUTTON_PRIMARY as i32,
+                    i32::try_from(gdk::BUTTON_PRIMARY).unwrap_or(1),
                     x,
                     y,
                     gesture.current_event_time(),
@@ -2118,7 +2119,7 @@ impl App {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 toplevel.begin_move(
                     &device,
-                    gdk::BUTTON_PRIMARY as i32,
+                    i32::try_from(gdk::BUTTON_PRIMARY).unwrap_or(1),
                     sx,
                     sy,
                     gesture.current_event_time(),
@@ -2147,6 +2148,34 @@ impl App {
 }
 
 // ----- helpers ----------------------------------------------------------
+
+fn cache_budget_bytes(mebibytes: u32) -> usize {
+    usize::try_from(mebibytes)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(1024 * 1024)
+}
+
+fn svg_render_dimension(value: f64) -> u32 {
+    if !value.is_finite() {
+        return 1;
+    }
+    // The value is finite, positive and within u32 before crossing the
+    // glycin FFI boundary.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let dimension = value.round().clamp(1.0, f64::from(loader::SVG_RENDER_MAX)) as u32;
+    dimension
+}
+
+fn window_dimension(value: f64, minimum: i32) -> i32 {
+    if !value.is_finite() {
+        return minimum;
+    }
+    // GTK accepts i32 logical dimensions. Validate the floating-point
+    // calculation before the final FFI conversion.
+    #[allow(clippy::cast_possible_truncation)]
+    let dimension = value.round().clamp(f64::from(minimum), f64::from(i32::MAX)) as i32;
+    dimension
+}
 
 fn osd_button(icon: &str, action: &str, tooltip: &str) -> gtk::Button {
     let b = gtk::Button::from_icon_name(icon);
@@ -2318,7 +2347,7 @@ fn edge_cursor_name(edge: gdk::SurfaceEdge) -> &'static str {
 
 /// `M:SS`, or `H:MM:SS` from the first hour (FR-10.5).
 fn format_time(secs: f64) -> String {
-    let s = secs.max(0.0).round() as u64;
+    let s = Duration::try_from_secs_f64(secs.max(0.0).round()).map_or(0, |value| value.as_secs());
     let (h, m, s) = (s / 3600, (s % 3600) / 60, s % 60);
     if h > 0 {
         format!("{h}:{m:02}:{s:02}")
@@ -2349,11 +2378,13 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 mod tests {
     use super::{
         ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SKIP_BUDGET,
-        excluded_path_message, format_time, nav_target, resize_edge_at, skip_target,
+        cache_budget_bytes, excluded_path_message, format_time, nav_target, resize_edge_at,
+        skip_target, svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
     use crate::folder::Folder;
+    use crate::loader;
     use gtk4::gdk::SurfaceEdge;
     use std::path::PathBuf;
 
@@ -2591,5 +2622,23 @@ mod tests {
         assert_eq!(format_time(3600.0), "1:00:00");
         assert_eq!(format_time(3725.0), "1:02:05");
         assert_eq!(format_time(-3.0), "0:00");
+    }
+
+    #[test]
+    fn cache_budget_conversion_is_checked() {
+        assert_eq!(cache_budget_bytes(0), 0);
+        assert_eq!(cache_budget_bytes(256), 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn foreign_dimensions_are_bounded_before_conversion() {
+        assert_eq!(svg_render_dimension(f64::NAN), 1);
+        assert_eq!(svg_render_dimension(f64::INFINITY), 1);
+        assert_eq!(svg_render_dimension(0.4), 1);
+        assert_eq!(svg_render_dimension(f64::MAX), loader::SVG_RENDER_MAX);
+
+        assert_eq!(window_dimension(f64::NAN, 200), 200);
+        assert_eq!(window_dimension(199.4, 200), 200);
+        assert_eq!(window_dimension(f64::MAX, 200), i32::MAX);
     }
 }

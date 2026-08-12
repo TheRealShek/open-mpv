@@ -203,7 +203,7 @@ fn take_number(it: &mut std::iter::Peekable<std::str::Chars>) -> u128 {
     let mut n: u128 = 0;
     while let Some(c) = it.peek().copied() {
         if let Some(d) = c.to_digit(10) {
-            n = n.saturating_mul(10).saturating_add(d as u128);
+            n = n.saturating_mul(10).saturating_add(u128::from(d));
             it.next();
         } else {
             break;

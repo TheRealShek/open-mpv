@@ -139,7 +139,10 @@ fn h264_exceeds_declared_level(caps: &gst::CapsRef) -> bool {
         return false;
     }
 
-    let frame_mbs = (width as u64).div_ceil(16) * (height as u64).div_ceil(16);
+    let (Ok(width), Ok(height)) = (u64::try_from(width), u64::try_from(height)) else {
+        return false;
+    };
+    let frame_mbs = width.div_ceil(16) * height.div_ceil(16);
     frame_mbs > max_frame_mbs
 }
 
@@ -446,7 +449,10 @@ impl Player {
         let dur = self.duration()?;
         let pos = match self.seek.borrow().pending() {
             Some(secs) => secs,
-            None => self.playbin.query_position::<gst::ClockTime>()?.nseconds() as f64 / 1e9,
+            None => self
+                .playbin
+                .query_position::<gst::ClockTime>()?
+                .seconds_f64(),
         };
         Some((pos.clamp(0.0, dur), dur))
     }
@@ -456,7 +462,10 @@ impl Player {
         if let Some(dur) = self.duration.get() {
             return Some(dur);
         }
-        let dur = self.playbin.query_duration::<gst::ClockTime>()?.nseconds() as f64 / 1e9;
+        let dur = self
+            .playbin
+            .query_duration::<gst::ClockTime>()?
+            .seconds_f64();
         if dur <= 0.0 {
             return None;
         }
@@ -580,12 +589,15 @@ fn missing_video_decoder(structure: &gst::StructureRef) -> Option<String> {
 /// bus watch flushes queued scrub positions without holding a `Player`.
 fn issue_seek(playbin: &gst::Element, seek: &RefCell<SeekState>, secs: f64) {
     let secs = secs.max(0.0);
+    let Ok(target) = gst::ClockTime::try_from_seconds_f64(secs) else {
+        crate::applog!("player: refusing invalid seek target {secs}");
+        return;
+    };
     {
         let mut state = seek.borrow_mut();
         state.in_flight = Some((secs, Instant::now()));
         state.queued = None;
     }
-    let target = gst::ClockTime::from_nseconds((secs * 1e9) as u64);
     let _ = playbin.seek_simple(SEEK_FLAGS, target);
     crate::applog!("player: seek to {secs:.1}s");
 }
