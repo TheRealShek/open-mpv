@@ -25,6 +25,8 @@ use crate::loader::{self, Decoded};
 use crate::player::{self, Player};
 use crate::viewer::ImageView;
 
+const SEEK_STEP_SECONDS: f64 = 10.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Action {
     Right,
@@ -129,6 +131,8 @@ const DEFAULT_BINDS: &[(&str, Action)] = &[
     // Video transport (FR-10.4), mpv-flavored.
     ("j", Action::SeekBack),
     ("l", Action::SeekForward),
+    ("<Shift>Left", Action::SeekBack),
+    ("<Shift>Right", Action::SeekForward),
     ("m", Action::Mute),
     ("Delete", Action::Trash),
     ("KP_Delete", Action::Trash),
@@ -155,8 +159,8 @@ const ACTIONS: &[(Action, &str)] = &[
     (Action::First, "First image"),
     (Action::Last, "Last image"),
     (Action::PlayPause, "Pause video, or next image"),
-    (Action::SeekBack, "Seek back 5 seconds"),
-    (Action::SeekForward, "Seek forward 5 seconds"),
+    (Action::SeekBack, "Seek back 10 seconds"),
+    (Action::SeekForward, "Seek forward 10 seconds"),
     (Action::Mute, "Mute audio"),
     (Action::VolumeUp, "Volume up"),
     (Action::VolumeDown, "Volume down"),
@@ -1846,14 +1850,14 @@ impl App {
         add(
             Action::SeekBack,
             Box::new(|a| {
-                a.with_video(|p| p.seek_by(-5.0));
+                a.with_video(|p| p.seek_by(-SEEK_STEP_SECONDS));
                 a.flash_progress();
             }),
         );
         add(
             Action::SeekForward,
             Box::new(|a| {
-                a.with_video(|p| p.seek_by(5.0));
+                a.with_video(|p| p.seek_by(SEEK_STEP_SECONDS));
                 a.flash_progress();
             }),
         );
@@ -2379,9 +2383,9 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SKIP_BUDGET,
-        cache_budget_bytes, excluded_path_message, format_time, nav_target, resize_edge_at,
-        skip_target, svg_render_dimension, window_dimension,
+        ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SEEK_STEP_SECONDS,
+        SKIP_BUDGET, cache_budget_bytes, excluded_path_message, format_time, nav_target,
+        resize_edge_at, skip_target, svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -2572,6 +2576,19 @@ mod tests {
                 action.as_str()
             );
         }
+    }
+
+    #[test]
+    fn video_seek_defaults_are_ten_seconds_with_shift_arrow_aliases() {
+        assert_eq!(SEEK_STEP_SECONDS, 10.0);
+        assert!(
+            DEFAULT_BINDS.contains(&("<Shift>Left", Action::SeekBack)),
+            "Shift+Left must seek without taking plain Left away from folder navigation"
+        );
+        assert!(
+            DEFAULT_BINDS.contains(&("<Shift>Right", Action::SeekForward)),
+            "Shift+Right must seek without taking plain Right away from folder navigation"
+        );
     }
 
     #[test]

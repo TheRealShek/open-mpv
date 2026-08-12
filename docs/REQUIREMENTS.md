@@ -169,9 +169,11 @@ product; there is no version staging.
 - **FR-10.3** Playback loops at end of stream, like animated images —
   configurable, with `loop=no` leaving the last frame up.
 - **FR-10.4** Transport through the single action layer, rebindable
-  (FR-8.2): play-pause (advances on images), seek ±5 s, mute,
-  volume up/down. Zoom, pan and view rotation apply to video; save
-  is disabled (no lossless rotate for video).
+  (FR-8.2): play-pause (advances on images), seek ±10 s via `J`/`L`
+  or `Shift+Left`/`Shift+Right`, mute, volume up/down. Plain `Left` and
+  `Right` keep navigating the mixed-media folder (or panning zoomed
+  media). Zoom, pan and view rotation apply to video; save is disabled
+  (no lossless rotate for video).
 - **FR-10.5** The overlay control bar shows a seek bar and
   `position / duration` for videos only; its position poll runs only
   while the overlay is visible. The seek bar takes up to 320 px and

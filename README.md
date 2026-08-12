@@ -86,7 +86,8 @@ Press `?` inside the app to see the complete shortcut guide.
 | `Delete` | Move the current file to trash |
 | `Ctrl+Z` | Undo the most recent trash action while offered |
 | `Space` | Pause or resume video; next file for an image |
-| `J` / `L` | Seek video back / forward 5 seconds |
+| `J` / `Shift+Left` | Seek video back 10 seconds |
+| `L` / `Shift+Right` | Seek video forward 10 seconds |
 | `M` | Mute video |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Q` | Quit |
