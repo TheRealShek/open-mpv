@@ -134,8 +134,11 @@ open-mpv writes a diagnostic trace to stderr. When it was opened from Files,
 view the log with:
 
 ```sh
-journalctl --user -t open-mpv -b
+journalctl -b _COMM=open-mpv
 ```
+
+Add `-f` to follow a reproduction live. The `_COMM` filter includes both the
+application trace and GTK/GStreamer diagnostics from the desktop launch.
 
 Disable routine diagnostic logging with `OPEN_MPV_LOG=0`. Errors are still
 reported.

@@ -651,6 +651,17 @@ impl Player {
                     path: path.to_path_buf(),
                     source: io::Error::new(io::ErrorKind::InvalidInput, "no video is playing"),
                 })?;
+        let already_attached = self.subtitles.borrow().external.as_deref() == Some(path);
+        if already_attached {
+            crate::applog!(
+                "player: subtitle {} already attached; selecting existing track",
+                path.display()
+            );
+            if !self.choose_subtitle(SubtitleChoice::Automatic) {
+                self.subtitles.borrow_mut().choice = SubtitleChoice::Automatic;
+            }
+            return Ok(());
+        }
         let uri = file_uri(&video)?;
         let suburi = file_uri(path)?;
         let position = self.progress().map_or_else(
@@ -663,11 +674,20 @@ impl Player {
         );
         let play_after_seek = self.is_playing();
 
-        // READY is the documented reconfiguration boundary for playbin3.
-        // Restart in PLAYING so its video pad is assembled alongside the
-        // external text pad; starting this rebuild in PAUSED can let the
-        // text pad reach playsink first and fail with "no video pad".
-        let _ = self.playbin.set_state(gst::State::Ready);
+        crate::applog!(
+            "player: replacing external subtitle at {position:.1}s ({})",
+            if play_after_seek { "playing" } else { "paused" }
+        );
+        // A full teardown matters here. READY can retain the old playsink
+        // pads, so the new text pad may reach it before the replacement
+        // video pad and fail with "Have text pad but no video pad".
+        self.playbin
+            .set_state(gst::State::Null)
+            .map_err(|source| PlayerError::Playback {
+                path: video.clone(),
+                source,
+            })?;
+        crate::applog!("player: subtitle rebuild reached null");
         self.forget_timing();
         {
             let mut subtitles = self.subtitles.borrow_mut();
@@ -923,7 +943,11 @@ fn recover_without_external(
         |state| (state.position, state.play_after_seek),
     );
 
-    let _ = playbin.set_state(gst::State::Ready);
+    crate::applog!("player: subtitle recovery tearing pipeline down");
+    if playbin.set_state(gst::State::Null).is_err() {
+        crate::applog!("player: subtitle recovery could not reach null");
+        return false;
+    }
     *seek.borrow_mut() = SeekState::default();
     duration.set(None);
     {
@@ -943,6 +967,7 @@ fn recover_without_external(
     playbin.set_property("suburi", Option::<&str>::None);
     if playbin.set_state(gst::State::Playing).is_err() {
         *resume.borrow_mut() = None;
+        crate::applog!("player: subtitle recovery could not restart video");
         return false;
     }
     crate::applog!("player: external subtitle failed; restoring video without it");
