@@ -180,7 +180,9 @@ product; there is no version staging.
   or `Shift+Left`/`Shift+Right`, mute, volume up/down. Plain `Left` and
   `Right` keep navigating the mixed-media folder (or panning zoomed
   media). Zoom, pan and view rotation apply to video; save is disabled
-  (no lossless rotate for video).
+  (no lossless rotate for video). In Fit mode, video scales both up and
+  down to occupy the largest aspect-preserving area of the window; this
+  fills fullscreen when the video and monitor have the same aspect ratio.
 - **FR-10.5** The bottom overlay switches from photo controls to video
   transport: play/pause, seek bar, `position / duration`, and mute. Its
   position poll runs only while the overlay is visible. The seek bar

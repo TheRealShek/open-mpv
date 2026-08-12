@@ -933,7 +933,7 @@ impl App {
             }
         };
         self.status.set_visible(false);
-        self.view.show_paintable(player.paintable(), None);
+        self.view.show_live_paintable(player.paintable());
         if let Err(e) = player.play(path) {
             self.show_error(path, &e.to_string());
             return;

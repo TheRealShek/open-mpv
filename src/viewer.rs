@@ -109,10 +109,18 @@ impl ScrollGesture {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
-    /// Scale to the window, never above 100% (FR-4.1). Not pannable.
+    /// Scale to the window according to the current medium's fit policy.
     Fit,
     /// Explicit zoom level; 1.0 is pixel-exact 100%.
     Manual(f64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FitPolicy {
+    /// Images retain pixel-exact presentation when they already fit (FR-4.1).
+    DownscaleOnly,
+    /// Video uses the largest aspect-preserving size the viewport allows (FR-10.4).
+    ScaleToViewport,
 }
 
 pub struct State {
@@ -123,6 +131,7 @@ pub struct State {
     /// same on-screen geometry (FR-2.3).
     nominal: Option<(f64, f64)>,
     mode: Mode,
+    fit_policy: FitPolicy,
     /// Pan offset of the image center from the widget center, logical px.
     offset: (f64, f64),
     /// View rotation in quarter turns, 0..4.
@@ -138,6 +147,7 @@ impl Default for State {
             paintable: None,
             nominal: None,
             mode: Mode::Fit,
+            fit_policy: FitPolicy::DownscaleOnly,
             offset: (0.0, 0.0),
             rotation: 0,
             default_fit_actual: false,
@@ -192,7 +202,7 @@ mod imp {
             let obj = self.obj();
             // Copy everything out of the state first: a foreign
             // paintable's snapshot must not run under our borrow.
-            let (paintable, dims, zoom, rotation, center) = {
+            let (paintable, source, dims, zoom, rotation, center) = {
                 let state = self.state.borrow();
                 let Some(paintable) = state.paintable.clone() else {
                     return;
@@ -218,8 +228,16 @@ mod imp {
                 // 100% view is never compositor-blurred (FR-4.7).
                 let cx = ((w / 2.0 + offset.0) * scale).round() / scale;
                 let cy = ((h / 2.0 + offset.1) * scale).round() / scale;
-                (paintable, (dw, dh), zoom, state.rotation, (cx, cy))
+                (
+                    paintable,
+                    (tw, th),
+                    (dw, dh),
+                    zoom,
+                    state.rotation,
+                    (cx, cy),
+                )
             };
+            let (tw, th) = source;
             let (dw, dh) = dims;
 
             snapshot.save();
@@ -248,13 +266,24 @@ mod imp {
                     ),
                 );
             } else {
-                // Live paintables (video sink) draw themselves; they
-                // composite dmabuf frames without a CPU copy.
-                snapshot.translate(&graphene::Point::new(
-                    (-dw / 2.0) as f32,
-                    (-dh / 2.0) as f32,
-                ));
-                paintable.snapshot(snapshot, dw, dh);
+                // Compose the foreign paintable at its native size, then
+                // wrap that node in an explicit GSK scale. This leaves no
+                // sizing policy to gtk4paintablesink and keeps the dmabuf
+                // scaling on the GPU (FR-10.1/10.4).
+                let frame = gtk::Snapshot::new();
+                paintable.snapshot(&frame, tw, th);
+                if let Some(frame) = frame.to_node() {
+                    let scaled = gtk::Snapshot::new();
+                    scaled.scale((dw / tw) as f32, (dh / th) as f32);
+                    scaled.append_node(&frame);
+                    if let Some(scaled) = scaled.to_node() {
+                        snapshot.translate(&graphene::Point::new(
+                            (-dw / 2.0) as f32,
+                            (-dh / 2.0) as f32,
+                        ));
+                        snapshot.append_node(&scaled);
+                    }
+                }
             }
             snapshot.restore();
         }
@@ -286,9 +315,10 @@ fn effective_zoom(state: &State, w: f64, h: f64, scale: f64, tw: f64, th: f64) -
     } else {
         (tw, th)
     };
-    match state.mode {
-        Mode::Fit => (w * scale / rtw).min(h * scale / rth).min(1.0),
-        Mode::Manual(z) => z,
+    match (state.mode, state.fit_policy) {
+        (Mode::Fit, FitPolicy::DownscaleOnly) => (w * scale / rtw).min(h * scale / rth).min(1.0),
+        (Mode::Fit, FitPolicy::ScaleToViewport) => (w * scale / rtw).min(h * scale / rth),
+        (Mode::Manual(z), _) => z,
     }
 }
 
@@ -322,18 +352,27 @@ impl ImageView {
     /// `nominal` overrides the on-screen size for resolution-independent
     /// content (SVG); raster images pass None.
     pub fn show_texture(&self, texture: gtk::gdk::Texture, nominal: Option<(f64, f64)>) {
-        self.show_paintable(texture.upcast(), nominal);
+        self.show_paintable(texture.upcast(), nominal, FitPolicy::DownscaleOnly);
     }
 
-    /// Show any paintable, resetting the view like [`Self::show_texture`].
-    /// Non-texture paintables are treated as live sources (video): their
-    /// invalidate signals drive redraws until they are replaced.
-    pub fn show_paintable(&self, paintable: gtk::gdk::Paintable, nominal: Option<(f64, f64)>) {
+    /// Show a live video paintable, scaling it to the viewport in Fit mode
+    /// and following invalidations until it is replaced (FR-10.4).
+    pub fn show_live_paintable(&self, paintable: gtk::gdk::Paintable) {
+        self.show_paintable(paintable, None, FitPolicy::ScaleToViewport);
+    }
+
+    fn show_paintable(
+        &self,
+        paintable: gtk::gdk::Paintable,
+        nominal: Option<(f64, f64)>,
+        fit_policy: FitPolicy,
+    ) {
         self.watch_live_source(&paintable);
         {
             let mut st = self.state();
             st.paintable = Some(paintable);
             st.nominal = nominal;
+            st.fit_policy = fit_policy;
             st.rotation = 0;
             st.offset = (0.0, 0.0);
             st.mode = if st.default_fit_actual {
@@ -749,13 +788,29 @@ mod tests {
     }
 
     #[test]
-    fn fit_never_upscales() {
+    fn image_fit_never_upscales() {
         let st = State::default();
         // 100x100 texture in a 400x400 logical window at scale 1.
         assert_eq!(effective_zoom(&st, 400.0, 400.0, 1.0, 100.0, 100.0), 1.0);
         // Large texture scales down.
         let z = effective_zoom(&st, 400.0, 400.0, 1.0, 800.0, 400.0);
         assert!((z - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn video_fit_upscales_and_preserves_aspect_ratio() {
+        let st = State {
+            fit_policy: FitPolicy::ScaleToViewport,
+            ..Default::default()
+        };
+        // A 720p video fills a 1080p viewport without cropping.
+        let z = effective_zoom(&st, 1920.0, 1080.0, 1.0, 1280.0, 720.0);
+        assert!((z - 1.5).abs() < 1e-9);
+        // A taller viewport remains width-bound, leaving only the
+        // aspect-ratio bars that are mathematically necessary.
+        let z = effective_zoom(&st, 1920.0, 1200.0, 1.0, 1280.0, 720.0);
+        assert!((z - 1.5).abs() < 1e-9);
+        assert!((720.0 * z - 1080.0).abs() < 1e-9);
     }
 
     #[test]
