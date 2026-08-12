@@ -38,8 +38,9 @@ replacing Loupe as the system default image viewer.
   hardware-decoded, looped, with mpv-style transport keys. A viewer
   that happens to play video, not a media player.
 - Embedded subtitles and local SRT/WebVTT sidecars, with automatic
-  filename matching, track selection and drag-and-drop attachment. Subtitle
-  controls only appear for a video that has something to select.
+  filename matching, track selection, a local-file chooser and drag-and-drop
+  attachment. Every video keeps the add-subtitle entry point discoverable;
+  track choices appear once GStreamer discovers them.
 - Zoom, pan, fit modes, view rotation.
 - Delete to trash with undo toast; rotate + save to disk.
 - Frameless window with fade-in overlay controls; fullscreen.

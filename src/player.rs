@@ -72,11 +72,11 @@ pub enum SubtitleChoice {
 }
 
 impl SubtitleChoice {
-    pub fn action_target(&self) -> &str {
+    pub fn action_target(&self) -> String {
         match self {
-            SubtitleChoice::Automatic => "auto",
-            SubtitleChoice::Off => "off",
-            SubtitleChoice::Track(id) => id,
+            SubtitleChoice::Automatic => "auto".to_string(),
+            SubtitleChoice::Off => "off".to_string(),
+            SubtitleChoice::Track(id) => format!("track:{id}"),
         }
     }
 }
@@ -154,6 +154,8 @@ struct SubtitleState {
     selected: BTreeSet<String>,
     tracks: Vec<SubtitleTrack>,
     choice: SubtitleChoice,
+    /// The track visibility toggling should restore after `Off`.
+    last_visible_choice: SubtitleChoice,
     external: Option<PathBuf>,
 }
 
@@ -343,6 +345,7 @@ impl Player {
     pub fn new(on_event: impl Fn(Event) + 'static) -> Result<Player, PlayerError> {
         gst::init().map_err(PlayerError::Init)?;
         prefer_intel_video_decoders();
+        let on_event: Rc<dyn Fn(Event)> = Rc::new(on_event);
         let sink = gst::ElementFactory::make("gtk4paintablesink")
             .build()
             .map_err(PlayerError::SinkUnavailable)?;
@@ -358,6 +361,7 @@ impl Player {
         let subtitles = Rc::new(RefCell::new(SubtitleState::default()));
         let resume = Rc::new(RefCell::new(None::<ResumeState>));
         let current_video = Rc::new(RefCell::new(None::<PathBuf>));
+        let error_pending = Rc::new(Cell::new(false));
         let decoder_fallback = Arc::new(Mutex::new(DecoderFallback::default()));
         playbin.connect_closure(
             "element-setup",
@@ -416,7 +420,9 @@ impl Player {
                 let subtitles = subtitles.clone();
                 let resume = resume.clone();
                 let current_video = current_video.clone();
+                let error_pending = error_pending.clone();
                 let decoder_fallback = decoder_fallback.clone();
+                let on_event = on_event.clone();
                 move |_bus, msg| {
                     match msg.view() {
                         gst::MessageView::Eos(_) => on_event(Event::EndOfStream),
@@ -428,24 +434,63 @@ impl Player {
                                 e.debug()
                             );
                             lock_decoder_fallback(&decoder_fallback).restore();
-                            if recover_without_external(
-                                &playbin,
-                                &current_video,
-                                &subtitles,
-                                &resume,
-                                &seek,
-                                &duration,
-                            ) {
-                                on_event(Event::SubtitleError(e.error().to_string()));
-                            } else {
-                                on_event(Event::Error(e.error()));
+                            if error_pending.replace(true) {
+                                crate::applog!(
+                                    "player: ignoring error queued behind pending recovery"
+                                );
+                                return glib::ControlFlow::Continue;
                             }
+                            let failed_video = current_video.borrow().clone();
+                            let failed_external = subtitles.borrow().external.clone();
+                            let error = e.error();
+                            let playbin = playbin.clone();
+                            let current_video = current_video.clone();
+                            let subtitles = subtitles.clone();
+                            let resume = resume.clone();
+                            let seek = seek.clone();
+                            let duration = duration.clone();
+                            let error_pending = error_pending.clone();
+                            let on_event = on_event.clone();
+                            // Returning from the bus watch before changing
+                            // state is mandatory: tearing a failed pipeline
+                            // down from inside its Error callback can wait on
+                            // the streaming thread that posted this message.
+                            glib::idle_add_local_once(move || {
+                                let still_current = *current_video.borrow() == failed_video
+                                    && subtitles.borrow().external == failed_external;
+                                if !still_current {
+                                    crate::applog!("player: stale pipeline error superseded");
+                                    error_pending.set(false);
+                                    return;
+                                }
+                                let recovered = recover_without_external(
+                                    &playbin,
+                                    &current_video,
+                                    &subtitles,
+                                    &resume,
+                                    &seek,
+                                    &duration,
+                                );
+                                error_pending.set(false);
+                                if recovered {
+                                    on_event(Event::SubtitleError(error.to_string()));
+                                } else {
+                                    on_event(Event::Error(error));
+                                }
+                            });
                         }
                         gst::MessageView::Element(e) => {
                             let structure = e.structure();
                             if let Some(description) = structure.and_then(missing_video_decoder) {
                                 crate::applog!("player: missing video decoder: {description}");
-                                on_event(Event::MissingVideoDecoder(description));
+                                let failed_video = current_video.borrow().clone();
+                                let current_video = current_video.clone();
+                                let on_event = on_event.clone();
+                                glib::idle_add_local_once(move || {
+                                    if *current_video.borrow() == failed_video {
+                                        on_event(Event::MissingVideoDecoder(description));
+                                    }
+                                });
                             } else if let Some(description) =
                                 structure.and_then(missing_subtitle_decoder)
                             {
@@ -515,6 +560,13 @@ impl Player {
                                 ) {
                                     state.choice = SubtitleChoice::Automatic;
                                 }
+                                if matches!(
+                                    &state.last_visible_choice,
+                                    SubtitleChoice::Track(id)
+                                        if !state.tracks.iter().any(|track| track.id == *id)
+                                ) {
+                                    state.last_visible_choice = SubtitleChoice::Automatic;
+                                }
                                 state.choice.clone()
                             };
                             crate::applog!(
@@ -564,6 +616,14 @@ impl Player {
         self.paintable.clone()
     }
 
+    pub fn has_external_subtitle(&self) -> bool {
+        self.subtitles.borrow().external.is_some()
+    }
+
+    pub fn path_has_sidecar(path: &Path) -> bool {
+        matching_sidecar(path).is_some()
+    }
+
     /// Start playing `path` from the beginning, replacing any current
     /// video. The pipeline object is reused; only its state cycles.
     pub fn play(&self, path: &Path) -> Result<(), PlayerError> {
@@ -573,12 +633,11 @@ impl Player {
         }
         let uri = file_uri(path)?;
         let suburi = subtitle.as_deref().map(file_uri).transpose()?;
-        let _ = self.playbin.set_state(gst::State::Null);
+        let _ = teardown_pipeline(&self.playbin);
         self.forget_stream();
         *self.current_video.borrow_mut() = Some(path.to_path_buf());
         self.subtitles.borrow_mut().external = subtitle;
-        self.playbin.set_property("uri", uri.as_str());
-        self.playbin.set_property("suburi", suburi.as_deref());
+        configure_uris(&self.playbin, &uri, suburi.as_deref());
         self.playbin
             .set_state(gst::State::Playing)
             .map_err(|source| PlayerError::Playback {
@@ -591,7 +650,7 @@ impl Player {
     /// Drop to `Null`: stops playback and frees decoder state.
     pub fn stop(&self) {
         let (_, current, _) = self.playbin.state(gst::ClockTime::ZERO);
-        let _ = self.playbin.set_state(gst::State::Null);
+        let _ = teardown_pipeline(&self.playbin);
         self.forget_stream();
         if current != gst::State::Null {
             crate::applog!("player: stopped, pipeline released");
@@ -658,7 +717,9 @@ impl Player {
                 path.display()
             );
             if !self.choose_subtitle(SubtitleChoice::Automatic) {
-                self.subtitles.borrow_mut().choice = SubtitleChoice::Automatic;
+                let mut state = self.subtitles.borrow_mut();
+                state.choice = SubtitleChoice::Automatic;
+                state.last_visible_choice = SubtitleChoice::Automatic;
             }
             return Ok(());
         }
@@ -681,12 +742,10 @@ impl Player {
         // A full teardown matters here. READY can retain the old playsink
         // pads, so the new text pad may reach it before the replacement
         // video pad and fail with "Have text pad but no video pad".
-        self.playbin
-            .set_state(gst::State::Null)
-            .map_err(|source| PlayerError::Playback {
-                path: video.clone(),
-                source,
-            })?;
+        teardown_pipeline(&self.playbin).map_err(|source| PlayerError::Playback {
+            path: video.clone(),
+            source,
+        })?;
         crate::applog!("player: subtitle rebuild reached null");
         self.forget_timing();
         {
@@ -695,6 +754,7 @@ impl Player {
             subtitles.selected.clear();
             subtitles.tracks.clear();
             subtitles.choice = SubtitleChoice::Automatic;
+            subtitles.last_visible_choice = SubtitleChoice::Automatic;
             subtitles.external = Some(path.to_path_buf());
         }
         *self.resume.borrow_mut() = Some(ResumeState {
@@ -702,11 +762,18 @@ impl Player {
             play_after_seek,
             stage: ResumeStage::Preroll,
         });
-        self.playbin.set_property("uri", uri.as_str());
-        self.playbin.set_property("suburi", suburi.as_str());
+        configure_uris(&self.playbin, &uri, Some(&suburi));
         crate::applog!("player: attached subtitle {}", path.display());
         if let Err(source) = self.playbin.set_state(gst::State::Playing) {
             *self.resume.borrow_mut() = None;
+            let _ = recover_without_external(
+                &self.playbin,
+                &self.current_video,
+                &self.subtitles,
+                &self.resume,
+                &self.seek,
+                &self.duration,
+            );
             return Err(PlayerError::Playback {
                 path: video,
                 source,
@@ -733,7 +800,11 @@ impl Player {
         let sent = apply_subtitle_choice(&self.playbin, &self.subtitles, &choice);
         if sent {
             crate::applog!("player: subtitle selection {}", choice.action_target());
-            self.subtitles.borrow_mut().choice = choice;
+            let mut state = self.subtitles.borrow_mut();
+            if choice != SubtitleChoice::Off {
+                state.last_visible_choice = choice.clone();
+            }
+            state.choice = choice;
         }
         sent
     }
@@ -742,11 +813,7 @@ impl Player {
         if self.subtitles.borrow().tracks.is_empty() {
             return self.subtitle_snapshot();
         }
-        let choice = if self.subtitles.borrow().choice == SubtitleChoice::Off {
-            SubtitleChoice::Automatic
-        } else {
-            SubtitleChoice::Off
-        };
+        let choice = toggled_subtitle_choice(&self.subtitles.borrow());
         self.choose_subtitle(choice);
         self.subtitle_snapshot()
     }
@@ -756,18 +823,7 @@ impl Player {
         if state.tracks.is_empty() {
             return subtitle_snapshot(&state);
         }
-        let choice = if state.choice == SubtitleChoice::Off {
-            state.tracks.first().map_or(SubtitleChoice::Off, |track| {
-                SubtitleChoice::Track(track.id.clone())
-            })
-        } else {
-            selected_text_id(&state)
-                .and_then(|id| state.tracks.iter().position(|track| track.id == id))
-                .and_then(|index| state.tracks.get(index + 1))
-                .map_or(SubtitleChoice::Off, |track| {
-                    SubtitleChoice::Track(track.id.clone())
-                })
-        };
+        let choice = cycled_subtitle_choice(&state);
         drop(state);
         self.choose_subtitle(choice);
         self.subtitle_snapshot()
@@ -905,6 +961,30 @@ fn file_uri(path: &Path) -> Result<String, PlayerError> {
         })
 }
 
+/// `uri` and `suburi` are "next media" properties on playbin3. Clear both
+/// before reusing the same pipeline so replaying identical paths is still a
+/// fresh pair rather than a stale subtitle source attached to new video pads.
+fn configure_uris(playbin: &gst::Element, uri: &str, suburi: Option<&str>) {
+    playbin.set_property("suburi", Option::<&str>::None);
+    playbin.set_property("uri", uri);
+    playbin.set_property("suburi", suburi);
+}
+
+/// Wait for the downward transition before reusing `uri`/`suburi`. Although
+/// `set_state(Null)` usually completes synchronously, playbin3 can still be
+/// removing its old text/video pads; immediately setting the same pair again
+/// then intermittently connects text to playsink before video (FR-10.7).
+fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError> {
+    playbin.set_state(gst::State::Null)?;
+    let (transition, current, pending) = playbin.state(gst::ClockTime::from_seconds(1));
+    transition?;
+    if current == gst::State::Null && pending == gst::State::VoidPending {
+        Ok(())
+    } else {
+        Err(gst::StateChangeError)
+    }
+}
+
 /// If an external subtitle makes an otherwise-working pipeline fail, remove
 /// only that auxiliary URI and asynchronously restore the video. The external
 /// marker is cleared before retrying, so a genuine video failure on the retry
@@ -927,24 +1007,17 @@ fn recover_without_external(
     let Ok(uri) = glib::filename_to_uri(&video, None) else {
         return false;
     };
-    let (position, play_after_seek) = resume.borrow().as_ref().map_or_else(
-        || {
-            let position = playbin
-                .query_position::<gst::ClockTime>()
-                .map_or(0.0, gst::ClockTime::seconds_f64);
-            let (_, current, pending) = playbin.state(gst::ClockTime::ZERO);
-            let target = if pending == gst::State::VoidPending {
-                current
-            } else {
-                pending
-            };
-            (position, target == gst::State::Playing)
-        },
-        |state| (state.position, state.play_after_seek),
-    );
+    // Never query a failed pipeline here. Some sinks answer position/state
+    // synchronously by waiting on the streaming thread that just errored.
+    // Replacement already owns an exact resume point; an automatic sidecar
+    // failing during initial playback safely falls back to the beginning.
+    let (position, play_after_seek) = resume
+        .borrow()
+        .as_ref()
+        .map_or((0.0, true), |state| (state.position, state.play_after_seek));
 
     crate::applog!("player: subtitle recovery tearing pipeline down");
-    if playbin.set_state(gst::State::Null).is_err() {
+    if teardown_pipeline(playbin).is_err() {
         crate::applog!("player: subtitle recovery could not reach null");
         return false;
     }
@@ -956,6 +1029,7 @@ fn recover_without_external(
         state.selected.clear();
         state.tracks.clear();
         state.choice = SubtitleChoice::Automatic;
+        state.last_visible_choice = SubtitleChoice::Automatic;
         state.external = None;
     }
     *resume.borrow_mut() = Some(ResumeState {
@@ -963,8 +1037,7 @@ fn recover_without_external(
         play_after_seek,
         stage: ResumeStage::Preroll,
     });
-    playbin.set_property("uri", uri.as_str());
-    playbin.set_property("suburi", Option::<&str>::None);
+    configure_uris(playbin, &uri, None);
     if playbin.set_state(gst::State::Playing).is_err() {
         *resume.borrow_mut() = None;
         crate::applog!("player: subtitle recovery could not restart video");
@@ -992,7 +1065,11 @@ fn matching_sidecar(video: &Path) -> Option<PathBuf> {
                     candidate == stem
                         || candidate
                             .strip_prefix(stem)
-                            .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1)
+                            .and_then(|suffix| suffix.strip_prefix('.'))
+                            .is_some_and(|components| {
+                                !components.is_empty()
+                                    && components.split('.').all(|component| !component.is_empty())
+                            })
                 })
         })
         .collect();
@@ -1023,13 +1100,23 @@ fn refresh_subtitle_tracks(state: &mut SubtitleState) {
         state.tracks.clear();
         return;
     };
-    let mut external_label = state.external.as_ref().and_then(|path| {
-        path.file_name()
-            .map(|name| format!("External — {}", name.to_string_lossy()))
-    });
-    state.tracks = (0..collection.size())
+    let text_streams: Vec<gst::Stream> = (0..collection.size())
         .filter_map(|index| collection.stream(index))
         .filter(|stream| stream.stream_type().contains(gst::StreamType::TEXT))
+        .collect();
+    // With one text stream, an active `suburi` identifies it. With embedded
+    // and external streams together, playbin3 exposes no reliable source URI
+    // on GstStream; assigning the filename to the first untagged stream could
+    // therefore mislabel an embedded track.
+    let mut external_label = (text_streams.len() == 1)
+        .then_some(state.external.as_ref())
+        .flatten()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| format!("External — {}", name.to_string_lossy()))
+        });
+    state.tracks = text_streams
+        .into_iter()
         .enumerate()
         .filter_map(|(index, stream)| {
             let id = stream.stream_id()?.to_string();
@@ -1068,6 +1155,39 @@ fn subtitle_snapshot(state: &SubtitleState) -> SubtitleSnapshot {
         choice: state.choice.clone(),
         active_label,
     }
+}
+
+fn toggled_subtitle_choice(state: &SubtitleState) -> SubtitleChoice {
+    if state.choice != SubtitleChoice::Off {
+        return SubtitleChoice::Off;
+    }
+    match &state.last_visible_choice {
+        SubtitleChoice::Track(id) if state.tracks.iter().any(|track| track.id == *id) => {
+            SubtitleChoice::Track(id.clone())
+        }
+        SubtitleChoice::Automatic | SubtitleChoice::Track(_) | SubtitleChoice::Off => {
+            SubtitleChoice::Automatic
+        }
+    }
+}
+
+fn cycled_subtitle_choice(state: &SubtitleState) -> SubtitleChoice {
+    if state.choice == SubtitleChoice::Off {
+        return state.tracks.first().map_or(SubtitleChoice::Off, |track| {
+            SubtitleChoice::Track(track.id.clone())
+        });
+    }
+    let current = match &state.choice {
+        SubtitleChoice::Track(id) => Some(id.as_str()),
+        SubtitleChoice::Automatic => selected_text_id(state),
+        SubtitleChoice::Off => None,
+    };
+    current
+        .and_then(|id| state.tracks.iter().position(|track| track.id == id))
+        .and_then(|index| state.tracks.get(index + 1))
+        .map_or(SubtitleChoice::Off, |track| {
+            SubtitleChoice::Track(track.id.clone())
+        })
 }
 
 fn selected_text_id(state: &SubtitleState) -> Option<&str> {
@@ -1272,10 +1392,11 @@ mod tests {
 
     use super::{
         DecoderFallback, INTEL_VIDEO_DECODERS, Instant, ResumeAction, ResumeStage, ResumeState,
-        SEEK_SETTLE, SeekState, SubtitleChoice, SubtitleState, advance_resume, gst,
-        h264_exceeds_declared_level, matching_sidecar, missing_subtitle_decoder,
-        missing_video_decoder, prefer_intel_video_decoders, preferred_hardware_rank,
-        refresh_subtitle_tracks, subtitle_selection_ids,
+        SEEK_SETTLE, SeekState, SubtitleChoice, SubtitleState, SubtitleTrack, advance_resume,
+        cycled_subtitle_choice, gst, h264_exceeds_declared_level, matching_sidecar,
+        missing_subtitle_decoder, missing_video_decoder, prefer_intel_video_decoders,
+        preferred_hardware_rank, refresh_subtitle_tracks, subtitle_selection_ids,
+        toggled_subtitle_choice,
     };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
@@ -1325,7 +1446,7 @@ mod tests {
             std::env::temp_dir().join(format!("open-mpv-sidecar-prefix-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        for name in ["movie.mkv", "movie2.srt", "movie.en.vtt"] {
+        for name in ["movie.mkv", "movie2.srt", "movie..srt", "movie.en.vtt"] {
             std::fs::write(dir.join(name), []).unwrap();
         }
 
@@ -1384,6 +1505,94 @@ mod tests {
             subtitle_selection_ids(&state, &SubtitleChoice::Track("hindi".into())),
             ["video", "audio", "hindi"]
         );
+    }
+
+    #[test]
+    fn subtitle_visibility_toggle_restores_the_selected_track() {
+        assert_eq!(
+            SubtitleChoice::Track("off".into()).action_target(),
+            "track:off"
+        );
+        let hindi = SubtitleTrack {
+            id: "hindi".into(),
+            label: "Hindi".into(),
+        };
+        let mut state = SubtitleState {
+            tracks: vec![hindi],
+            choice: SubtitleChoice::Track("hindi".into()),
+            last_visible_choice: SubtitleChoice::Track("hindi".into()),
+            ..SubtitleState::default()
+        };
+
+        assert_eq!(toggled_subtitle_choice(&state), SubtitleChoice::Off);
+        state.choice = SubtitleChoice::Off;
+        assert_eq!(
+            toggled_subtitle_choice(&state),
+            SubtitleChoice::Track("hindi".into())
+        );
+
+        state.tracks.clear();
+        assert_eq!(toggled_subtitle_choice(&state), SubtitleChoice::Automatic);
+    }
+
+    #[test]
+    fn rapid_subtitle_cycles_follow_the_requested_track_not_stale_bus_state() {
+        let mut state = SubtitleState {
+            tracks: vec![
+                SubtitleTrack {
+                    id: "english".into(),
+                    label: "English".into(),
+                },
+                SubtitleTrack {
+                    id: "hindi".into(),
+                    label: "Hindi".into(),
+                },
+            ],
+            choice: SubtitleChoice::Track("hindi".into()),
+            ..SubtitleState::default()
+        };
+        state.selected.insert("english".into());
+
+        assert_eq!(cycled_subtitle_choice(&state), SubtitleChoice::Off);
+        state.choice = SubtitleChoice::Off;
+        assert_eq!(
+            cycled_subtitle_choice(&state),
+            SubtitleChoice::Track("english".into())
+        );
+    }
+
+    #[test]
+    fn external_filename_is_not_assigned_to_an_ambiguous_embedded_track() {
+        gst::init().unwrap();
+        let text = |id| {
+            gst::Stream::new(
+                Some(id),
+                None,
+                gst::StreamType::TEXT,
+                gst::StreamFlags::SELECT,
+            )
+        };
+        let mut state = SubtitleState {
+            collection: Some(
+                gst::StreamCollection::builder(None)
+                    .streams([text("embedded"), text("external")])
+                    .build(),
+            ),
+            external: Some(std::path::PathBuf::from("movie.en.srt")),
+            ..SubtitleState::default()
+        };
+
+        refresh_subtitle_tracks(&mut state);
+        assert_eq!(state.tracks[0].label, "Subtitle 1");
+        assert_eq!(state.tracks[1].label, "Subtitle 2");
+
+        state.collection = Some(
+            gst::StreamCollection::builder(None)
+                .streams([text("external")])
+                .build(),
+        );
+        refresh_subtitle_tracks(&mut state);
+        assert_eq!(state.tracks[0].label, "External — movie.en.srt");
     }
 
     #[test]

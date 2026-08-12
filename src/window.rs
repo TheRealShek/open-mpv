@@ -22,7 +22,7 @@ use crate::config::{self, Config, FitMode, SubtitleMode};
 use crate::fileops;
 use crate::folder::Folder;
 use crate::loader::{self, Decoded};
-use crate::player::{self, Player, SubtitleChoice, SubtitleSnapshot};
+use crate::player::{self, Player, SubtitleChoice, SubtitleSnapshot, SubtitleTrack};
 use crate::viewer::ImageView;
 
 const SEEK_STEP_SECONDS: f64 = 10.0;
@@ -974,6 +974,18 @@ impl App {
     }
 
     fn show_video(self: &Rc<Self>, path: &Path) {
+        // Reuse the shared pipeline for ordinary video navigation. External
+        // text pads are the exception: playbin3 can retain their playsink
+        // ownership across Null and intermittently connect the next text pad
+        // before video. A fresh pipeline keeps FR-10.7 deterministic without
+        // moving GStreamer initialization onto image startup.
+        let replace_player =
+            self.player.borrow().as_ref().is_some_and(|player| {
+                player.has_external_subtitle() || Player::path_has_sidecar(path)
+            });
+        if replace_player && let Some(player) = self.player.borrow_mut().take() {
+            player.stop();
+        }
         let player = match self.player() {
             Ok(player) => player,
             Err(e) => {
@@ -1008,6 +1020,11 @@ impl App {
     }
 
     fn stop_video(&self) {
+        let discard_player = self
+            .player
+            .borrow()
+            .as_ref()
+            .is_some_and(|player| player.has_external_subtitle());
         let snapshot = if let Some(p) = self.player.borrow().as_ref() {
             p.stop();
             Some(p.subtitle_snapshot())
@@ -1016,6 +1033,9 @@ impl App {
         };
         if let Some(snapshot) = snapshot {
             self.update_subtitles(snapshot);
+        }
+        if discard_player {
+            self.player.borrow_mut().take();
         }
         self.set_idle_inhibited(false);
         // Hiding the bar mid-drag means no button release reaches it.
@@ -1074,7 +1094,18 @@ impl App {
                 self,
                 move |result| match result {
                     Ok(file) => match file.path() {
-                        Some(path) if config::is_subtitle(&path) => app.attach_subtitle(&path),
+                        Some(path) if config::is_subtitle(&path) => {
+                            if !app.is_video_showing()
+                                || app.current_path().as_deref() != Some(video.as_path())
+                            {
+                                app.show_toast(
+                                    "The video changed; choose its subtitle again",
+                                    false,
+                                );
+                                return;
+                            }
+                            app.attach_subtitle(&path);
+                        }
                         Some(_) =>
                             app.show_toast("Only SRT and WebVTT subtitles are supported", false,),
                         None => app.show_toast("Only local subtitle files are supported", false),
@@ -1109,7 +1140,8 @@ impl App {
 
     /// Keep video controls inside the window. The seek bar gives up width
     /// first; on very narrow windows the duplicated time and mute controls
-    /// yield before play, Trash, or the seek target (FR-10.5).
+    /// and the CC entry duplicated in the right-click menu yield before play,
+    /// Trash, or the seek target (FR-10.5/10.7).
     fn fit_seek_bar(&self) {
         // Every measurement here forces a layout pass, and this is called
         // from the per-frame transport tick. Only the window width and
@@ -2234,7 +2266,12 @@ impl App {
             let choice = match target {
                 "auto" => SubtitleChoice::Automatic,
                 "off" => SubtitleChoice::Off,
-                id => SubtitleChoice::Track(id.to_string()),
+                target => {
+                    let Some(id) = target.strip_prefix("track:") else {
+                        return;
+                    };
+                    SubtitleChoice::Track(id.to_string())
+                }
             };
             let Some(changed) = app.with_video(|player| player.choose_subtitle(choice)) else {
                 return;
@@ -2574,6 +2611,11 @@ fn append_subtitle_item(menu: &gio::Menu, label: &str, target: &str) {
     menu.append_item(&item);
 }
 
+fn append_subtitle_track(menu: &gio::Menu, track: &SubtitleTrack) {
+    let target = SubtitleChoice::Track(track.id.clone()).action_target();
+    append_subtitle_item(menu, &track.label, &target);
+}
+
 fn rebuild_subtitle_menu(menu: &gio::Menu, snapshot: &SubtitleSnapshot) {
     menu.remove_all();
     menu.append(Some("Add External Subtitle…"), Some("win.subtitle-open"));
@@ -2584,7 +2626,7 @@ fn rebuild_subtitle_menu(menu: &gio::Menu, snapshot: &SubtitleSnapshot) {
     append_subtitle_item(&choices, "Automatic", "auto");
     append_subtitle_item(&choices, "Off", "off");
     for track in &snapshot.tracks {
-        append_subtitle_item(&choices, &track.label, &track.id);
+        append_subtitle_track(&choices, track);
     }
     menu.append_section(None, &choices);
 }

@@ -23,6 +23,8 @@ the keyboard, and configurable with a plain-text file when you want it to be.
   supports it. JPEG rotation is lossless.
 - Move a file to the system trash and undo the action from the viewer.
 - Control video playback, seeking, volume, and looping without switching apps.
+- Show embedded subtitles or local SRT/WebVTT files, select tracks, and add a
+  subtitle through the CC/right-click menu or by dropping it on a video.
 - Use the mouse, touchpad, on-screen controls, or keyboard shortcuts.
 - Change the background, sorting, navigation, playback, and key bindings in a
   small configuration file.
@@ -78,9 +80,9 @@ Moving the pointer reveals a filename and folder-position pill at the
 top-left, fullscreen and close at the top-right, navigation arrows at the
 side edges, and media-specific controls at the bottom. Photos show rotate,
 conditional Save rotation, and Trash; videos show playback, timeline, time,
-mute, and Trash. Less frequent view and navigation actions live in the More
-menu, available from either its three-dot button or a right-click on the
-photo or video.
+subtitles, mute, and Trash. Less frequent view and navigation actions live in
+the More menu, available from either its three-dot button or a right-click on
+the photo or video.
 
 | Key or gesture | Action |
 | --- | --- |
@@ -97,6 +99,7 @@ photo or video.
 | `J` / `Shift+Left` | Seek video back 10 seconds |
 | `L` / `Shift+Right` | Seek video forward 10 seconds |
 | `M` | Mute video |
+| `V` / `Shift+V` | Show or hide subtitles / cycle subtitle tracks |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Q` | Quit |
 | `Escape` | Leave fullscreen, then quit |
@@ -117,6 +120,7 @@ hide-cursor = yes
 start-fullscreen = no
 loop = yes
 volume = 100           # 0-150
+subtitles = auto       # auto | off
 cache-budget-mb = 256
 
 # Add or replace key bindings.
