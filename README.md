@@ -74,6 +74,14 @@ You can also launch open-mpv with no file and drag a file into its window.
 
 Press `?` inside the app to see the complete shortcut guide.
 
+Moving the pointer reveals a filename and folder-position pill at the
+top-left, fullscreen and close at the top-right, navigation arrows at the
+side edges, and media-specific controls at the bottom. Photos show rotate,
+conditional Save rotation, and Trash; videos show playback, timeline, time,
+mute, and Trash. Less frequent view and navigation actions live in the More
+menu, available from either its three-dot button or a right-click on the
+photo or video.
+
 | Key or gesture | Action |
 | --- | --- |
 | `Right` / `Page Down` | Next file; `Right` pans a zoomed image |

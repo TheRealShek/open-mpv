@@ -46,7 +46,8 @@ product; there is no version staging.
   (FR-8).
 - **FR-3.3** Navigation does not wrap by default; at either end a subtle
   cue indicates "first/last image" (wrap available via config).
-- **FR-3.4** A position indicator ("17 / 244") is visible in the overlay.
+- **FR-3.4** The top-left information overlay shows the current filename
+  and position ("17 of 244").
 - **FR-3.5** If files are added, removed, or renamed in the folder while
   viewing, the navigation set updates without restarting the app.
 
@@ -84,8 +85,10 @@ product; there is no version staging.
   rotation to disk:
   - JPEG: losslessly (no pixel re-encode).
   - PNG/WebP/AVIF/BMP: re-encoded at equivalent quality settings.
-  - SVG and animated images: view-rotate only; save is disabled and the
-    UI says why.
+  - SVG and animated images: view-rotate only; no save control is offered.
+  The save control appears only after a writable image has a pending
+  rotation, so an unchanged or unsupported file never presents an inert
+  action.
 - **FR-5.5** Saves are atomic — a crash or power loss mid-save never
   leaves a corrupt or truncated file in place of the original.
 - **FR-5.6** No other write operation exists. The app never modifies,
@@ -95,13 +98,15 @@ product; there is no version staging.
 
 - **FR-6.1** Frameless window: no titlebar, no menubar — the image fills
   the window edge to edge over a dark background.
-- **FR-6.2** Overlay controls (prev/next, rotate, delete, position/zoom
-  indicator, close button) fade in on mouse movement and fade out after
-  ~2 s of inactivity; they never appear during pure keyboard use. A
-  pointer resting on the controls holds them open — they must not fade
-  out from under the click they are waiting for. The pointer itself
-  fades with them (`hide-cursor`), except over the resize border of
-  FR-6.4, where it has to stay visible to be found.
+- **FR-6.2** The overlay separates information and actions: filename and
+  folder position at top-left, fullscreen and close at top-right,
+  previous/next at the side edges, and media-specific actions at bottom
+  centre. The controls fade in on mouse movement and fade out after ~2 s
+  of inactivity; they never appear during pure keyboard use. A pointer
+  resting on the controls or an open More menu holds them open — they
+  must not fade out from under the interaction they are serving. The
+  pointer itself fades with them (`hide-cursor`), except over the resize
+  border of FR-6.4, where it has to stay visible to be found.
 - **FR-6.3** Fullscreen toggle via `F`/`F11` and double-click.
 - **FR-6.4** Window can be moved by dragging the image (when not panning
   a zoomed image) and resized by dragging within a few pixels of any edge
@@ -109,9 +114,11 @@ product; there is no version staging.
   means no decorations, and decorations are what normally carry the
   resize handles — so the app provides that border itself.
 - **FR-6.5** Every action is reachable from the keyboard and rebindable
-  (FR-8.2). The overlay carries the common subset — navigation, rotate,
-  save, trash, fullscreen, close, and the video transport — rather than
-  a button per action, which would fight FR-6.1's "just the image".
+  (FR-8.2). The overlay keeps the current medium's primary controls
+  visible and puts Fit, Actual Size, rotate, First, Last and keyboard
+  help in one menu, opened from either the bottom More button or a
+  secondary click on the medium, rather than adding a permanent button
+  per action, which would fight FR-6.1's "just the image".
 - **FR-6.6 Initial window size:** on open, the window sizes itself to the
   media at 100 % up to 85 % of the monitor's work area (larger media are
   fitted down to that bound); it never opens larger than the media
@@ -174,11 +181,12 @@ product; there is no version staging.
   `Right` keep navigating the mixed-media folder (or panning zoomed
   media). Zoom, pan and view rotation apply to video; save is disabled
   (no lossless rotate for video).
-- **FR-10.5** The overlay control bar shows a seek bar and
-  `position / duration` for videos only; its position poll runs only
-  while the overlay is visible. The seek bar takes up to 320 px and
-  shrinks to whatever the window leaves beside the buttons and labels,
-  so the bar is never squeezed off the edges of a narrow window.
+- **FR-10.5** The bottom overlay switches from photo controls to video
+  transport: play/pause, seek bar, `position / duration`, and mute. Its
+  position poll runs only while the overlay is visible. The seek bar
+  takes up to 320 px and shrinks first on narrow windows; the duplicated
+  time readout and mute button yield before play/pause, Trash, or the seek
+  target, so primary controls are not squeezed off the edges.
 - **FR-10.6** Missing plugins or a failing pipeline are routine states:
   in-window error message, never a crash. Unlike images (NFR-3.2),
   video decoding runs in-process — an accepted trade-off recorded in

@@ -282,17 +282,17 @@ pub struct App {
     presented: Cell<bool>,
     // Widgets and timers.
     status: gtk::Label,
+    info_bar: gtk::Box,
     name_label: gtk::Label,
     pos_label: gtk::Label,
+    photo_controls: gtk::Box,
     transport: gtk::Box,
     play_btn: gtk::Button,
     mute_btn: gtk::Button,
     save_btn: gtk::Button,
-    /// Image-editing controls, the first thing the control bar gives up
-    /// when a video leaves it no room (see `fit_seek_bar`).
-    compact_group: Vec<gtk::Widget>,
-    /// (window width, transport shown) the bar was last fitted for.
-    fitted_for: Cell<Option<(i32, bool, usize, usize)>>,
+    /// (window width, transport shown, time length) the video controls
+    /// were last fitted for.
+    fitted_for: Cell<Option<(i32, bool, usize)>>,
     /// The bottom control bar; measured to size the seek bar to the room
     /// left over beside the labels and buttons.
     control_bar: gtk::Box,
@@ -307,6 +307,9 @@ pub struct App {
     /// True while the pointer rests on the overlay controls, which must
     /// not fade out from under it (FR-6.2).
     pointer_on_chrome: Cell<bool>,
+    /// A popover is outside the bar's widget bounds, but it still owns the
+    /// interaction: the bar must remain visible until the menu closes.
+    menu_open: Cell<bool>,
     /// Last known pointer position, so the cursor can be re-decided when
     /// the overlay fades on a timer rather than on movement.
     pointer: Cell<(f64, f64)>,
@@ -365,33 +368,46 @@ impl App {
         next_btn.set_valign(gtk::Align::Center);
         overlay.add_overlay(&next_btn);
 
+        // Information belongs apart from actions: the filename and folder
+        // position form a quiet top-left pill (FR-3.4, FR-6.2).
+        let info_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        info_bar.add_css_class("osd-surface");
+        info_bar.add_css_class("info-bar");
+        info_bar.set_halign(gtk::Align::Start);
+        info_bar.set_valign(gtk::Align::Start);
+        info_bar.set_visible(false);
+        let name_label = gtk::Label::new(None);
+        name_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        name_label.set_max_width_chars(28);
+        info_bar.append(&name_label);
+        let pos_label = gtk::Label::new(None);
+        pos_label.add_css_class("position");
+        info_bar.append(&pos_label);
+        overlay.add_overlay(&info_bar);
+
+        // Window controls stay together in the opposite corner rather
+        // than competing with media actions in the bottom bar (FR-6.3/6.7).
+        let window_controls = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        window_controls.add_css_class("osd-surface");
+        window_controls.add_css_class("window-controls");
+        window_controls.set_halign(gtk::Align::End);
+        window_controls.set_valign(gtk::Align::Start);
+        let fullscreen_btn = bar_button("view-fullscreen-symbolic", "win.fullscreen", "Fullscreen");
+        window_controls.append(&fullscreen_btn);
         // Close button (FR-6.7).
         // Ask for the regular icon: some third-party themes ship a white
         // `-symbolic` source that GTK recolours to transparent.
-        let close_btn = osd_button("window-close", "win.close", "Close");
-        close_btn.set_halign(gtk::Align::End);
-        close_btn.set_valign(gtk::Align::Start);
-        overlay.add_overlay(&close_btn);
+        let close_btn = bar_button("window-close", "win.close", "Close");
+        window_controls.append(&close_btn);
+        overlay.add_overlay(&window_controls);
 
-        // Bottom control bar (FR-6.2).
+        // Bottom media controls (FR-6.2). Photo and video actions occupy
+        // the same place but never appear together.
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        bar.add_css_class("osd-surface");
         bar.add_css_class("osd-bar");
         bar.set_halign(gtk::Align::Center);
         bar.set_valign(gtk::Align::End);
-        // What you are actually looking at. A frameless window has no
-        // titlebar to carry the filename, so without this the name of the
-        // file on screen appears nowhere in the UI at all.
-        let name_label = gtk::Label::new(None);
-        name_label.add_css_class("dim");
-        name_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        // Bounds the natural width so a long name cannot push the bar
-        // wider than the window; ellipsizing keeps its *minimum* small,
-        // which is what fit_seek_bar measures against.
-        name_label.set_max_width_chars(28);
-        bar.append(&name_label);
-        let pos_label = gtk::Label::new(None);
-        pos_label.add_css_class("dim");
-        bar.append(&pos_label);
         // Video transport: seek bar + position, hidden for images
         // (FR-10.5). The position tick runs only while this is visible.
         let seek_bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
@@ -422,6 +438,8 @@ impl App {
         transport.append(&mute_btn);
         transport.set_visible(false);
         bar.append(&transport);
+
+        let photo_controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let rotate_ccw = bar_button(
             "object-rotate-left-symbolic",
             "win.rotate-ccw",
@@ -432,29 +450,59 @@ impl App {
             "win.rotate-cw",
             "Rotate right",
         );
-        bar.append(&rotate_ccw);
-        bar.append(&rotate_cw);
-        // Held onto: a disabled save button has to be able to say why
-        // (FR-5.4), which update_save_enabled writes into its tooltip.
+        photo_controls.append(&rotate_ccw);
+        photo_controls.append(&rotate_cw);
+        // Save appears only once an editable image has a pending rotation;
+        // an inert floppy icon reads as a broken control (FR-5.4).
         let save_btn = bar_button(
             "document-save-symbolic",
             "win.save",
             "Save rotation to file",
         );
-        bar.append(&save_btn);
-        for (icon, action, tip) in [
-            ("user-trash-symbolic", "win.trash", "Move to trash"),
-            ("view-fullscreen-symbolic", "win.fullscreen", "Fullscreen"),
-        ] {
-            bar.append(&bar_button(icon, action, tip));
-        }
+        save_btn.set_visible(false);
+        photo_controls.append(&save_btn);
+        photo_controls.set_visible(false);
+        bar.append(&photo_controls);
+
+        let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+        bar.append(&separator);
+        bar.append(&bar_button(
+            "user-trash-symbolic",
+            "win.trash",
+            "Move to trash",
+        ));
+
+        // Less frequent commands remain discoverable without making the
+        // primary strip permanent or wide (FR-6.5, NFR-5.2).
+        let more_menu = gio::Menu::new();
+        more_menu.append(Some("Fit to Window"), Some("win.zoom-fit"));
+        more_menu.append(Some("Actual Size"), Some("win.zoom-actual"));
+        more_menu.append(Some("Rotate Left"), Some("win.rotate-ccw"));
+        more_menu.append(Some("Rotate Right"), Some("win.rotate-cw"));
+        more_menu.append(Some("First File"), Some("win.first"));
+        more_menu.append(Some("Last File"), Some("win.last"));
+        more_menu.append(Some("Keyboard Shortcuts"), Some("win.help"));
+        let more_btn = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .menu_model(&more_menu)
+            .tooltip_text("More controls")
+            .build();
+        more_btn.add_css_class("flat");
+        bar.append(&more_btn);
+
+        // The same commands are also a contextual menu on the medium.
+        // It is parented to the view so its pointing rectangle uses the
+        // secondary-click coordinates directly.
+        let context_menu = gtk::PopoverMenu::from_model(Some(&more_menu));
+        context_menu.set_parent(&view);
+        bar.set_visible(false);
         overlay.add_overlay(&bar);
 
         // Zoom / edge-cue indicator (FR-4.4, FR-3.3).
         let indicator = gtk::Label::new(None);
         indicator.add_css_class("indicator");
         indicator.add_css_class("invisible");
-        indicator.set_halign(gtk::Align::Start);
+        indicator.set_halign(gtk::Align::Center);
         indicator.set_valign(gtk::Align::Start);
         indicator.set_can_target(false);
         overlay.add_overlay(&indicator);
@@ -489,7 +537,8 @@ impl App {
         for w in [
             prev_btn.upcast_ref::<gtk::Widget>(),
             next_btn.upcast_ref(),
-            close_btn.upcast_ref(),
+            info_bar.upcast_ref(),
+            window_controls.upcast_ref(),
             bar.upcast_ref(),
         ] {
             w.add_css_class("chrome");
@@ -510,16 +559,13 @@ impl App {
             pending_undo: RefCell::new(None),
             presented: Cell::new(false),
             status,
+            info_bar: info_bar.clone(),
             name_label,
             pos_label,
+            photo_controls,
             transport,
             play_btn,
             mute_btn,
-            compact_group: vec![
-                rotate_ccw.upcast(),
-                rotate_cw.upcast(),
-                save_btn.clone().upcast(),
-            ],
             save_btn,
             fitted_for: Cell::new(None),
             control_bar: bar.clone(),
@@ -528,6 +574,7 @@ impl App {
             transport_tick: RefCell::new(None),
             scrubbing: Cell::new(false),
             pointer_on_chrome: Cell::new(false),
+            menu_open: Cell::new(false),
             pointer: Cell::new((0.0, 0.0)),
             inhibit_cookie: Cell::new(None),
             sized_from_media: Cell::new(false),
@@ -539,7 +586,8 @@ impl App {
             chrome: vec![
                 prev_btn.upcast(),
                 next_btn.upcast(),
-                close_btn.upcast(),
+                info_bar.upcast(),
+                window_controls.upcast(),
                 bar.upcast(),
             ],
             chrome_timer: TimerSlot::default(),
@@ -554,6 +602,55 @@ impl App {
         app.setup_actions(gtk_app);
         app.setup_controllers();
         app.build_help(gtk_app);
+
+        more_btn.connect_active_notify(clone!(
+            #[strong(rename_to = app)]
+            app,
+            move |button| {
+                app.menu_open.set(button.is_active());
+                // Opening can move the pointer onto the popover surface
+                // before GTK reports it active, briefly firing the window
+                // leave handler. Reveal again after that race; while open,
+                // menu_open blocks every later fade. Closing starts a fresh
+                // timeout in the same call.
+                app.show_chrome();
+            }
+        ));
+        context_menu.connect_visible_notify(clone!(
+            #[strong(rename_to = app)]
+            app,
+            move |menu| {
+                app.menu_open.set(menu.is_visible());
+                app.show_chrome();
+            }
+        ));
+
+        let context_click = gtk::GestureClick::new();
+        context_click.set_button(gdk::BUTTON_SECONDARY);
+        context_click.connect_pressed(clone!(
+            #[strong(rename_to = app)]
+            app,
+            #[weak]
+            context_menu,
+            move |gesture, _, x, y| {
+                let showing_media = matches!(
+                    *app.media.borrow(),
+                    MediaState::Image { .. } | MediaState::Video(_)
+                );
+                if !showing_media {
+                    return;
+                }
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                context_menu.set_pointing_to(Some(&gdk::Rectangle::new(
+                    window_dimension(x, 0),
+                    window_dimension(y, 0),
+                    1,
+                    1,
+                )));
+                context_menu.popup();
+            }
+        ));
+        view.add_controller(context_click);
 
         if app.cfg.start_fullscreen {
             app.win.fullscreen();
@@ -725,6 +822,7 @@ impl App {
             return;
         };
         *self.media.borrow_mut() = MediaState::Loading(path.clone());
+        self.update_control_mode();
         self.cache.pin(&path);
         self.set_current_name(Some(&path));
         self.update_pos_label();
@@ -841,10 +939,10 @@ impl App {
             return;
         }
         *self.media.borrow_mut() = MediaState::Video(path.to_path_buf());
+        self.update_control_mode();
         crate::applog!("play: {}", path.display());
         self.set_idle_inhibited(true);
         self.update_save_enabled();
-        self.transport.set_visible(true);
         self.fit_seek_bar();
         // Blank rather than carry the previous video's numbers over the
         // moment before this one's duration is known.
@@ -864,10 +962,6 @@ impl App {
             p.stop();
         }
         self.set_idle_inhibited(false);
-        self.transport.set_visible(false);
-        // Give back whatever the transport made the bar shed: nothing
-        // else re-fits it, since the tick only runs for video.
-        self.fit_seek_bar();
         // Hiding the bar mid-drag means no button release reaches it.
         self.scrubbing.set(false);
         self.stop_transport_tick();
@@ -875,17 +969,9 @@ impl App {
 
     // ----- video transport (FR-10.5) ------------------------------------
 
-    /// Keep the control bar inside what the window can actually show. It
-    /// is an overlay child, so an oversized bar does not push the window
-    /// wider — it is squeezed, and whatever cannot shrink is clipped off
-    /// the ends. With the transport shown the bar needs ~520 px before
-    /// the seek bar gets any width at all, which is more than a window
-    /// sized to a 640-wide video has to give; the position/duration
-    /// readout was being clipped away as a result.
-    ///
-    /// So things yield in order of what the medium needs least: the seek
-    /// bar gives up width first, then the filename, then rotate/save —
-    /// which for a video are a fringe case and a disabled button anyway.
+    /// Keep video controls inside the window. The seek bar gives up width
+    /// first; on very narrow windows the duplicated time and mute controls
+    /// yield before play, Trash, or the seek target (FR-10.5).
     fn fit_seek_bar(&self) {
         // Every measurement here forces a layout pass, and this is called
         // from the per-frame transport tick. Only the window width and
@@ -897,36 +983,34 @@ impl App {
             self.win.width(),
             self.transport.is_visible(),
             self.time_label.text().len(),
-            self.pos_label.text().len(),
         );
         if self.fitted_for.get() == Some(key) {
             return;
         }
         self.fitted_for.set(Some(key));
         let (width, video, ..) = key;
-
-        // Measure from everything restored, with the seek bar
-        // contributing nothing, so `others` is the rest at its minimum.
-        self.seek_bar.set_size_request(0, -1);
-        self.name_label.set_visible(true);
-        for w in &self.compact_group {
-            w.set_visible(true);
+        if !video {
+            return;
         }
+
+        // Measure from all video controls restored, with the seek bar
+        // contributing nothing, so `others` is everything around it.
+        self.seek_bar.set_size_request(0, -1);
+        self.time_label.set_visible(true);
+        self.mute_btn.set_visible(true);
         let others = |s: &Self| s.control_bar.measure(gtk::Orientation::Horizontal, -1).0;
 
         let mut room = width - others(self);
-        if room < SEEK_BAR_MIN_WIDTH && video {
-            self.name_label.set_visible(false);
+        if room < SEEK_BAR_MIN_WIDTH {
+            self.time_label.set_visible(false);
             room = width - others(self);
         }
-        if room < SEEK_BAR_MIN_WIDTH && video {
-            for w in &self.compact_group {
-                w.set_visible(false);
-            }
+        if room < SEEK_BAR_MIN_WIDTH {
+            self.mute_btn.set_visible(false);
             room = width - others(self);
         }
         self.seek_bar
-            .set_size_request(room.clamp(SEEK_BAR_MIN_WIDTH, SEEK_BAR_MAX_WIDTH), -1);
+            .set_size_request(room.clamp(0, SEEK_BAR_MAX_WIDTH), -1);
     }
 
     fn update_transport(&self) {
@@ -1066,6 +1150,20 @@ impl App {
         matches!(*self.media.borrow(), MediaState::Video(_))
     }
 
+    /// Only controls relevant to the current medium occupy the bottom
+    /// strip. Loading and error states leave the image unobstructed.
+    fn update_control_mode(&self) {
+        let media = self.media.borrow();
+        let photo = matches!(*media, MediaState::Image { .. });
+        let video = matches!(*media, MediaState::Video(_));
+        drop(media);
+
+        self.photo_controls.set_visible(photo);
+        self.transport.set_visible(video);
+        self.control_bar.set_visible(photo || video);
+        self.fitted_for.set(None);
+    }
+
     fn on_player_event(self: &Rc<Self>, event: player::Event) {
         match event {
             player::Event::EndOfStream => {
@@ -1118,6 +1216,7 @@ impl App {
             decoded: decoded.clone(),
             mime,
         };
+        self.update_control_mode();
         let texture = decoded.first_texture();
         let size = match &*decoded {
             Decoded::Svg { nominal, .. } => {
@@ -1283,6 +1382,7 @@ impl App {
         self.stop_video();
         self.view.clear();
         *self.media.borrow_mut() = MediaState::Empty;
+        self.update_control_mode();
     }
 
     /// Put a message where the image would be (FR-1.4).
@@ -1396,6 +1496,7 @@ impl App {
             .map(|n| n.to_string_lossy());
         self.name_label.set_text(name.as_deref().unwrap_or(""));
         self.name_label.set_tooltip_text(name.as_deref());
+        self.info_bar.set_visible(name.is_some());
         self.win
             .set_title(Some(name.as_deref().unwrap_or("open-mpv")));
     }
@@ -1424,7 +1525,7 @@ impl App {
         let text = {
             let folder = self.folder.borrow();
             match (folder.as_ref(), self.current_index()) {
-                (Some(f), Some(i)) if !f.is_empty() => format!("{} / {}", i + 1, f.len()),
+                (Some(f), Some(i)) if !f.is_empty() => position_text(i, f.len()),
                 _ => String::new(),
             }
         };
@@ -1647,8 +1748,8 @@ impl App {
     /// still raster images in formats the sandboxed editor can rewrite;
     /// SVG and animations stay view-only (FR-5.4).
     fn update_save_enabled(&self) {
-        // Why, not just whether: a greyed-out button that never says what
-        // is wrong reads as a bug (FR-5.4).
+        // Unsupported and unchanged media do not offer an inert Save
+        // control. The action remains disabled for its keyboard binding.
         let media = self.media.borrow();
         let reason = match &*media {
             MediaState::Image { decoded, mime, .. }
@@ -1672,8 +1773,9 @@ impl App {
         // `set_enabled` can emit into application code; never hold a
         // RefCell borrow across that framework boundary.
         drop(media);
-        let enabled = reason.is_none() && self.view.rotation() != 0;
+        let enabled = save_control_visible(reason.is_none(), self.view.rotation());
         self.save_action.set_enabled(enabled);
+        self.save_btn.set_visible(enabled);
         self.save_btn.set_tooltip_text(Some(&match reason {
             Some(why) => why,
             None if enabled => "Save rotation to file".into(),
@@ -1708,7 +1810,11 @@ impl App {
         // Never pull the controls out from under the pointer: mid-scrub,
         // or while it simply rests on them. Both paths restart the
         // fade-out when the pointer is done.
-        if self.scrubbing.get() || self.pointer_on_chrome.get() {
+        if chrome_is_held(
+            self.scrubbing.get(),
+            self.pointer_on_chrome.get(),
+            self.menu_open.get(),
+        ) {
             return;
         }
         for w in &self.chrome {
@@ -2187,6 +2293,7 @@ fn osd_button(icon: &str, action: &str, tooltip: &str) -> gtk::Button {
     let b = gtk::Button::from_icon_name(icon);
     b.set_action_name(Some(action));
     b.set_tooltip_text(Some(tooltip));
+    b.add_css_class("flat");
     b.add_css_class("osd-btn");
     b.set_margin_start(12);
     b.set_margin_end(12);
@@ -2229,14 +2336,26 @@ fn apply_css(background: &str) {
         window {{ background-color: {background}; }}
         .chrome {{ transition: opacity 200ms ease; opacity: 1; }}
         .chrome.invisible {{ opacity: 0; }}
+        .osd-surface, .osd-btn {{ background-color: rgba(0, 0, 0, 0.62);
+            color: #eeeeee; border-radius: 9px; }}
+        .info-bar {{ padding: 7px 11px; margin: 12px; }}
+        .info-bar .position {{ opacity: 0.68; }}
+        .window-controls {{ padding: 2px; margin: 12px; }}
+        .window-controls button, .osd-bar button, .osd-bar menubutton > button {{
+            min-width: 36px; min-height: 36px; padding: 0; border-radius: 7px; }}
+        .osd-bar menubutton > button {{ background-color: transparent;
+            background-image: none; border: none; box-shadow: none; }}
+        .window-controls button:hover, .osd-bar button:hover,
+        .osd-bar menubutton > button:hover {{
+            background-color: rgba(255, 255, 255, 0.14); }}
         .indicator {{ transition: opacity 200ms ease; opacity: 1;
             background-color: rgba(0, 0, 0, 0.55); color: #eeeeee;
             padding: 4px 12px; margin: 12px; border-radius: 6px; }}
         .indicator.invisible {{ opacity: 0; }}
-        .osd-btn, .osd-bar {{ background-color: rgba(0, 0, 0, 0.55);
-            color: #eeeeee; border-radius: 8px; }}
-        .osd-bar {{ padding: 4px 10px; margin: 12px; }}
-        .osd-bar label {{ margin-right: 8px; }}
+        .osd-btn {{ background-image: none; border: none; box-shadow: none; }}
+        .osd-bar {{ padding: 4px 6px; margin: 12px; }}
+        .osd-bar separator {{ min-width: 1px; margin: 5px 2px;
+            background-color: rgba(255, 255, 255, 0.2); }}
         .toast {{ background-color: rgba(25, 25, 25, 0.92); color: #eeeeee;
             padding: 8px 14px; border-radius: 8px; }}
         .status {{ color: #999999; font-size: 1.1em; }}
@@ -2351,6 +2470,18 @@ fn edge_cursor_name(edge: gdk::SurfaceEdge) -> &'static str {
     }
 }
 
+fn position_text(index: usize, total: usize) -> String {
+    format!("{} of {total}", index + 1)
+}
+
+const fn chrome_is_held(scrubbing: bool, pointer_on_chrome: bool, menu_open: bool) -> bool {
+    scrubbing || pointer_on_chrome || menu_open
+}
+
+const fn save_control_visible(can_save: bool, rotation: u8) -> bool {
+    can_save && rotation != 0
+}
+
 /// `M:SS`, or `H:MM:SS` from the first hour (FR-10.5).
 fn format_time(secs: f64) -> String {
     let s = Duration::try_from_secs_f64(secs.max(0.0).round()).map_or(0, |value| value.as_secs());
@@ -2384,8 +2515,9 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 mod tests {
     use super::{
         ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SEEK_STEP_SECONDS,
-        SKIP_BUDGET, cache_budget_bytes, excluded_path_message, format_time, nav_target,
-        resize_edge_at, skip_target, svg_render_dimension, window_dimension,
+        SKIP_BUDGET, cache_budget_bytes, chrome_is_held, excluded_path_message, format_time,
+        nav_target, position_text, resize_edge_at, save_control_visible, skip_target,
+        svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -2589,6 +2721,16 @@ mod tests {
             DEFAULT_BINDS.contains(&("<Shift>Right", Action::SeekForward)),
             "Shift+Right must seek without taking plain Right away from folder navigation"
         );
+    }
+
+    #[test]
+    fn overlay_text_and_conditional_save_match_the_media_state() {
+        assert_eq!(position_text(54, 67), "55 of 67");
+        assert!(!save_control_visible(true, 0));
+        assert!(save_control_visible(true, 1));
+        assert!(!save_control_visible(false, 1));
+        assert!(chrome_is_held(false, false, true));
+        assert!(!chrome_is_held(false, false, false));
     }
 
     #[test]
