@@ -29,7 +29,7 @@ default image viewer.
 - Open a local image, video or folder and navigate supported media in that
   folder through one viewer surface.
 - View still, animated and vector images; play local video with focused
-  transport and local subtitle support.
+  transport, preset playback speeds and local subtitle support.
 - Zoom, pan, fit, view-rotate and use a frameless contextual interface through
   mouse, touchpad or configurable keyboard actions.
 - Trash with undo and explicitly save supported image rotations. These are the

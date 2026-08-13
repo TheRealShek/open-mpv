@@ -172,10 +172,20 @@ requirements define the finished product; there is no version staging.
   still navigate or pan. Zoom, pan and view rotation apply to video, but save
   does not. Fit scales video up or down to the largest aspect-preserving window
   area, filling matching-aspect fullscreen.
+- **FR-10.4a Playback speed:** local videos offer 0.5×, 0.75×, 1×, 1.25×,
+  1.5× and 2× presets through a contextual transport menu and rebindable
+  slower, faster and reset actions (`[` / `]` / `\`). A rate change preserves
+  position and play/pause state, keeps seeking, scrubbing, looping and
+  subtitles synchronized, and briefly shows the selected rate. Every newly
+  opened video starts at 1×. Audio keeps its pitch through GStreamer's
+  `scaletempo`; when that optional element or a compatible rate seek is
+  unavailable, the current rate is retained and a non-modal message explains
+  why.
 - **FR-10.5** For video, the bottom overlay shows play/pause, a seek bar,
-  `position / duration` and mute, polling position only while visible. The seek
-  bar is at most 320 px and shrinks first; on narrow windows, duplicate time and
-  mute yield before play/pause, Trash or the seek target.
+  `position / duration`, playback speed and mute, polling position only while
+  visible. The seek bar is at most 320 px and shrinks first; on narrow windows,
+  duplicate time, mute, subtitles and playback speed yield before play/pause,
+  Trash or the seek target.
 - **FR-10.6** Missing plugins or a failing pipeline are routine states:
   in-window error message, never a crash. Unlike images (NFR-3.2), video
   decoding runs in-process.
