@@ -19,7 +19,8 @@ the keyboard, and configurable with a plain-text file when you want it to be.
 - Browse supported photos and videos in one folder-navigation flow.
 - Zoom, pan, fit, rotate and use fullscreen with mouse, touchpad or keyboard.
 - Trash files with undo and save supported image rotations losslessly for JPEG.
-- Control local video and subtitles, with optional mpv-style configuration.
+- Control local video speed and subtitles, with optional mpv-style
+  configuration.
 
 Images are sandbox-decoded through
 [glycin](https://gitlab.gnome.org/GNOME/glycin). The app has no network,
@@ -34,7 +35,8 @@ Animated GIF, WebP, and PNG files play automatically.
 MP4, MKV, WebM, MOV, and AVI videos play through the system's GStreamer
 codecs. Hardware decoding is used when available. The optional
 `gstreamer1-plugin-libav` package provides a software fallback for some
-videos.
+videos. Playback-speed audio keeps its pitch through `scaletempo` from the
+`gstreamer1-plugins-good` package; without it, videos remain at 1×.
 
 ## Install on Fedora
 
@@ -43,7 +45,7 @@ To install the current version for your user account:
 ```sh
 git clone https://github.com/TheRealShek/open-mpv.git
 cd open-mpv
-sudo dnf install gtk4-devel glycin-devel gstreamer1-devel
+sudo dnf install gtk4-devel glycin-devel gstreamer1-devel gstreamer1-plugins-good
 sudo dnf install gstreamer1-plugin-libav # optional video fallback
 ./install.sh
 ```
@@ -84,6 +86,7 @@ three-dot button or by right-clicking the media.
 | `Space` | Pause or resume video; next file for an image |
 | `J` / `Shift+Left` | Seek video back 10 seconds |
 | `L` / `Shift+Right` | Seek video forward 10 seconds |
+| `[` / `]` / `\` | Decrease / increase / reset video playback speed |
 | `M` | Mute video |
 | `V` / `Shift+V` | Show or hide subtitles / cycle subtitle tracks |
 | `F` / `F11` / double-click | Toggle fullscreen |
@@ -112,6 +115,7 @@ cache-budget-mb = 256
 # Add or replace key bindings.
 bind = n next
 bind = <Shift>d trash
+bind = bracketright speed-up
 bind = q none          # remove a default binding
 ```
 

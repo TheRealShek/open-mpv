@@ -34,6 +34,7 @@ use crate::config;
 /// and at most one is ever in flight (see `SeekState`).
 const SEEK_FLAGS: gst::SeekFlags = gst::SeekFlags::FLUSH.union(gst::SeekFlags::ACCURATE);
 const VOLUME_MAX: f64 = 1.5;
+pub const PLAYBACK_RATES: &[f64] = &[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 /// Hardware decoders proven on the target machine. GStreamer's libav
 /// decoders rank at `Primary`, while these QSV factories normally rank
 /// lower. Prefer QSV for streams its caps accept and leave libav as the
@@ -55,7 +56,33 @@ pub enum Event {
     MissingVideoDecoder(String),
     SubtitleError(String),
     SubtitlesChanged(SubtitleSnapshot),
+    PlaybackRateError(PlaybackRateError),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackRateError {
+    PitchFilterUnavailable,
+    PositionUnavailable,
+    SeekRefused,
+}
+
+impl fmt::Display for PlaybackRateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PlaybackRateError::PitchFilterUnavailable => {
+                f.write_str("playback speed requires the GStreamer scaletempo plugin")
+            }
+            PlaybackRateError::PositionUnavailable => {
+                f.write_str("playback speed is not ready yet")
+            }
+            PlaybackRateError::SeekRefused => {
+                f.write_str("this video cannot change playback speed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlaybackRateError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtitleTrack {
@@ -167,13 +194,20 @@ enum ResumeStage {
 
 #[derive(Debug, PartialEq)]
 enum ResumeAction {
-    Seek { position: f64, resume_playing: bool },
-    Finish { resume_playing: bool },
+    Seek {
+        position: f64,
+        rate: f64,
+        resume_playing: bool,
+    },
+    Finish {
+        resume_playing: bool,
+    },
     None,
 }
 
 struct ResumeState {
     position: f64,
+    rate: f64,
     play_after_seek: bool,
     stage: ResumeStage,
 }
@@ -184,6 +218,7 @@ fn advance_resume(pending: &mut Option<ResumeState>) -> ResumeAction {
             state.stage = ResumeStage::Seek;
             ResumeAction::Seek {
                 position: state.position,
+                rate: state.rate,
                 resume_playing: state.play_after_seek,
             }
         }
@@ -204,10 +239,16 @@ fn advance_resume(pending: &mut Option<ResumeState>) -> ResumeAction {
 /// covers that gap, and `queued` coalesces the scrub positions that
 /// arrive while a seek is running — issuing them all would flood the
 /// pipeline with flushes and leave the picture trailing the pointer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SeekRequest {
+    position: f64,
+    rate: f64,
+}
+
 #[derive(Default)]
 struct SeekState {
-    in_flight: Option<(f64, Instant)>,
-    queued: Option<f64>,
+    in_flight: Option<(SeekRequest, Instant)>,
+    queued: Option<SeekRequest>,
 }
 
 /// True when the coded frame exceeds the size limit the stream itself
@@ -304,30 +345,45 @@ fn lock_decoder_fallback(state: &Mutex<DecoderFallback>) -> MutexGuard<'_, Decod
 
 impl SeekState {
     /// Where playback is headed, while it is still on its way there.
-    fn pending(&self) -> Option<f64> {
-        self.queued.or_else(|| self.running().map(|(secs, _)| secs))
+    fn pending(&self) -> Option<SeekRequest> {
+        self.queued
+            .or_else(|| self.running().map(|(request, _)| request))
     }
 
     /// The in-flight seek, unless it is old enough to count as lost.
-    fn running(&self) -> Option<(f64, Instant)> {
+    fn running(&self) -> Option<(SeekRequest, Instant)> {
         self.in_flight.filter(|(_, at)| at.elapsed() < SEEK_SETTLE)
     }
 
-    /// Record a request to seek to `secs`. Returns true when the caller
+    /// Record a request. Returns true when the caller
     /// must issue it, false when the running seek will pick it up.
-    fn request(&mut self, secs: f64) -> bool {
+    fn request(&mut self, request: SeekRequest) -> bool {
         if self.running().is_some() {
-            self.queued = Some(secs);
+            self.queued = Some(request);
             return false;
         }
+        // A seek older than SEEK_SETTLE no longer owns the UI's pending
+        // position and must not keep newer input queued indefinitely.
+        self.in_flight = None;
+        self.queued = None;
         true
     }
 }
 
 pub struct Player {
     playbin: gst::Element,
+    seek_target: gst::Element,
     paintable: gdk::Paintable,
     seek: Rc<RefCell<SeekState>>,
+    /// Last rate accepted by the pipeline. A queued seek can advertise its
+    /// newer requested rate through `playback_rate` without overwriting this
+    /// value until GStreamer accepts it.
+    playback_rate: Rc<Cell<f64>>,
+    pitch_preserving: bool,
+    /// User-requested play/pause state. Pipeline state briefly transitions
+    /// through Paused while flushing, so it cannot answer a rapid toggle
+    /// truthfully during a seek.
+    playing: Rc<Cell<bool>>,
     /// Cached so the per-frame transport update does not re-query the
     /// demuxer; invalidated on `DurationChanged` and on every new video.
     duration: Rc<Cell<Option<f64>>>,
@@ -355,8 +411,25 @@ impl Player {
             .property("video-sink", &sink)
             .build()
             .map_err(PlayerError::PlaybinUnavailable)?;
+        // Player construction is already the lazy GStreamer boundary. Keep
+        // image-only startup untouched, and make non-1x playback unavailable
+        // rather than changing voice pitch when the Fedora Good plug-ins are
+        // missing.
+        let pitch_preserving = match gst::ElementFactory::make("scaletempo").build() {
+            Ok(filter) => {
+                playbin.set_property("audio-filter", &filter);
+                crate::applog!("player: pitch-preserving scaletempo enabled");
+                true
+            }
+            Err(error) => {
+                crate::applog!("player: scaletempo unavailable: {error}");
+                false
+            }
+        };
 
         let seek = Rc::new(RefCell::new(SeekState::default()));
+        let playback_rate = Rc::new(Cell::new(1.0));
+        let playing = Rc::new(Cell::new(false));
         let duration = Rc::new(Cell::new(None));
         let subtitles = Rc::new(RefCell::new(SubtitleState::default()));
         let resume = Rc::new(RefCell::new(None::<ResumeState>));
@@ -415,7 +488,10 @@ impl Player {
                 // the guard below detaches the watch on drop, so the
                 // cycle ends with the `Player`.
                 let playbin = playbin.clone();
+                let seek_target = sink.clone();
                 let seek = seek.clone();
+                let playback_rate = playback_rate.clone();
+                let playing = playing.clone();
                 let duration = duration.clone();
                 let subtitles = subtitles.clone();
                 let resume = resume.clone();
@@ -448,6 +524,7 @@ impl Player {
                             let subtitles = subtitles.clone();
                             let resume = resume.clone();
                             let seek = seek.clone();
+                            let playback_rate = playback_rate.clone();
                             let duration = duration.clone();
                             let error_pending = error_pending.clone();
                             let on_event = on_event.clone();
@@ -469,6 +546,7 @@ impl Player {
                                     &subtitles,
                                     &resume,
                                     &seek,
+                                    &playback_rate,
                                     &duration,
                                 );
                                 error_pending.set(false);
@@ -509,11 +587,24 @@ impl Player {
                             match resume_action {
                                 ResumeAction::Seek {
                                     position,
+                                    rate,
                                     resume_playing,
                                 } => {
-                                    if position <= f64::EPSILON
-                                        || !issue_seek(&playbin, &seek, position)
+                                    let needs_seek = position > f64::EPSILON
+                                        || !same_rate(rate, playback_rate.get());
+                                    if !needs_seek
+                                        || !issue_seek(
+                                            &seek_target,
+                                            &seek,
+                                            &playback_rate,
+                                            SeekRequest { position, rate },
+                                        )
                                     {
+                                        if needs_seek && !same_rate(rate, playback_rate.get()) {
+                                            on_event(Event::PlaybackRateError(
+                                                PlaybackRateError::SeekRefused,
+                                            ));
+                                        }
                                         *resume.borrow_mut() = None;
                                         let target = if resume_playing {
                                             gst::State::Playing
@@ -521,6 +612,7 @@ impl Player {
                                             gst::State::Paused
                                         };
                                         let _ = playbin.set_state(target);
+                                        playing.set(resume_playing);
                                     }
                                     return glib::ControlFlow::Continue;
                                 }
@@ -531,6 +623,7 @@ impl Player {
                                         gst::State::Paused
                                     };
                                     let _ = playbin.set_state(target);
+                                    playing.set(resume_playing);
                                 }
                                 ResumeAction::None => {}
                             }
@@ -543,8 +636,15 @@ impl Player {
                                 state.in_flight = None;
                                 state.queued.take()
                             };
-                            if let Some(secs) = next {
-                                issue_seek(&playbin, &seek, secs);
+                            if let Some(request) = next {
+                                let rate_change = !same_rate(request.rate, playback_rate.get());
+                                if !issue_seek(&seek_target, &seek, &playback_rate, request)
+                                    && rate_change
+                                {
+                                    on_event(Event::PlaybackRateError(
+                                        PlaybackRateError::SeekRefused,
+                                    ));
+                                }
                             }
                         }
                         gst::MessageView::StreamCollection(streams) => {
@@ -600,8 +700,12 @@ impl Player {
 
         Ok(Player {
             playbin,
+            seek_target: sink,
             paintable,
             seek,
+            playback_rate,
+            pitch_preserving,
+            playing,
             duration,
             subtitles,
             current_video,
@@ -644,6 +748,7 @@ impl Player {
                 path: path.to_path_buf(),
                 source,
             })?;
+        self.playing.set(true);
         Ok(())
     }
 
@@ -652,6 +757,7 @@ impl Player {
         let (_, current, _) = self.playbin.state(gst::ClockTime::ZERO);
         let _ = teardown_pipeline(&self.playbin);
         self.forget_stream();
+        self.playing.set(false);
         if current != gst::State::Null {
             crate::applog!("player: stopped, pipeline released");
         }
@@ -661,6 +767,7 @@ impl Player {
     /// video never reports the previous one's duration or seek target.
     fn forget_stream(&self) {
         self.forget_timing();
+        self.playing.set(false);
         *self.current_video.borrow_mut() = None;
         *self.resume.borrow_mut() = None;
         let choice = if self.subtitles_default_on.get() {
@@ -677,6 +784,7 @@ impl Player {
     fn forget_timing(&self) {
         lock_decoder_fallback(&self.decoder_fallback).restore();
         *self.seek.borrow_mut() = SeekState::default();
+        self.playback_rate.set(1.0);
         self.duration.set(None);
     }
 
@@ -734,6 +842,7 @@ impl Player {
             |(position, _)| position,
         );
         let play_after_seek = self.is_playing();
+        let rate = self.playback_rate();
 
         crate::applog!(
             "player: replacing external subtitle at {position:.1}s ({})",
@@ -759,6 +868,7 @@ impl Player {
         }
         *self.resume.borrow_mut() = Some(ResumeState {
             position,
+            rate,
             play_after_seek,
             stage: ResumeStage::Preroll,
         });
@@ -772,6 +882,7 @@ impl Player {
                 &self.subtitles,
                 &self.resume,
                 &self.seek,
+                &self.playback_rate,
                 &self.duration,
             );
             return Err(PlayerError::Playback {
@@ -829,21 +940,9 @@ impl Player {
         self.subtitle_snapshot()
     }
 
-    /// Where the pipeline is heading: the pending state while a
-    /// transition is in flight, otherwise the current one. Asking for the
-    /// current state alone would report the state being left behind.
-    fn target_state(&self) -> gst::State {
-        let (_, current, pending) = self.playbin.state(gst::ClockTime::ZERO);
-        if pending == gst::State::VoidPending {
-            current
-        } else {
-            pending
-        }
-    }
-
-    /// True when playback is running or about to be.
+    /// True when playback is running or the user has asked it to run.
     pub fn is_playing(&self) -> bool {
-        self.target_state() == gst::State::Playing
+        self.playing.get()
     }
 
     pub fn is_muted(&self) -> bool {
@@ -852,13 +951,14 @@ impl Player {
 
     /// Toggle pause; returns true when now playing.
     pub fn toggle_pause(&self) -> bool {
-        let target = self.target_state();
-        if target == gst::State::Playing {
+        if self.playing.get() {
             let _ = self.playbin.set_state(gst::State::Paused);
+            self.playing.set(false);
             crate::applog!("player: paused");
             false
         } else {
             let _ = self.playbin.set_state(gst::State::Playing);
+            self.playing.set(true);
             crate::applog!("player: playing");
             true
         }
@@ -870,7 +970,7 @@ impl Player {
     pub fn progress(&self) -> Option<(f64, f64)> {
         let dur = self.duration()?;
         let pos = match self.seek.borrow().pending() {
-            Some(secs) => secs,
+            Some(request) => request.position,
             None => self
                 .playbin
                 .query_position::<gst::ClockTime>()?
@@ -916,9 +1016,63 @@ impl Player {
     /// Keeps at most one seek in flight; a request that arrives during
     /// one supersedes any other waiting request (see `SeekState`).
     fn seek_to(&self, secs: f64) {
-        let issue_now = self.seek.borrow_mut().request(secs);
+        let request = SeekRequest {
+            position: secs,
+            rate: self.playback_rate(),
+        };
+        let issue_now = self.seek.borrow_mut().request(request);
         if issue_now {
-            issue_seek(&self.playbin, &self.seek, secs);
+            issue_seek(&self.seek_target, &self.seek, &self.playback_rate, request);
+        }
+    }
+
+    /// The requested playback rate, including a coalesced change waiting
+    /// behind an accurate seek.
+    pub fn playback_rate(&self) -> f64 {
+        self.seek
+            .borrow()
+            .pending()
+            .map_or_else(|| self.playback_rate.get(), |request| request.rate)
+    }
+
+    /// Change playback rate without moving the visible position. This uses
+    /// the same bounded flushing-seek queue as scrubbing. GStreamer 1.28's
+    /// playbin3/scaletempo path accepts an instant-rate request but leaves its
+    /// audio segment unable to handle the next time-format seek, so that path
+    /// is not compatible with the required seeking and looping behavior.
+    pub fn set_playback_rate(&self, rate: f64) -> Result<f64, PlaybackRateError> {
+        if !PLAYBACK_RATES
+            .iter()
+            .any(|candidate| same_rate(*candidate, rate))
+        {
+            return Err(PlaybackRateError::SeekRefused);
+        }
+        if same_rate(rate, self.playback_rate()) {
+            return Ok(rate);
+        }
+        if !self.pitch_preserving && !same_rate(rate, 1.0) {
+            return Err(PlaybackRateError::PitchFilterUnavailable);
+        }
+
+        let position = self
+            .progress()
+            .map(|(position, _)| position)
+            .or_else(|| {
+                self.playbin
+                    .query_position::<gst::ClockTime>()
+                    .map(gst::ClockTime::seconds_f64)
+            })
+            .ok_or(PlaybackRateError::PositionUnavailable)?;
+        let request = SeekRequest { position, rate };
+        let issue_now = self.seek.borrow_mut().request(request);
+        if !issue_now {
+            return Ok(rate);
+        }
+
+        if issue_seek(&self.seek_target, &self.seek, &self.playback_rate, request) {
+            Ok(rate)
+        } else {
+            Err(PlaybackRateError::SeekRefused)
         }
     }
 
@@ -926,6 +1080,7 @@ impl Player {
     pub fn rewind(&self) {
         self.seek_to(0.0);
         let _ = self.playbin.set_state(gst::State::Playing);
+        self.playing.set(true);
     }
 
     /// Set the starting volume from config (FR-8.2). The pipeline is
@@ -995,6 +1150,7 @@ fn recover_without_external(
     subtitles: &RefCell<SubtitleState>,
     resume: &RefCell<Option<ResumeState>>,
     seek: &RefCell<SeekState>,
+    playback_rate: &Cell<f64>,
     duration: &Cell<Option<f64>>,
 ) -> bool {
     let had_external = subtitles.borrow().external.is_some();
@@ -1011,10 +1167,12 @@ fn recover_without_external(
     // synchronously by waiting on the streaming thread that just errored.
     // Replacement already owns an exact resume point; an automatic sidecar
     // failing during initial playback safely falls back to the beginning.
-    let (position, play_after_seek) = resume
+    let (position, rate, play_after_seek) = resume
         .borrow()
         .as_ref()
-        .map_or((0.0, true), |state| (state.position, state.play_after_seek));
+        .map_or((0.0, playback_rate.get(), true), |state| {
+            (state.position, state.rate, state.play_after_seek)
+        });
 
     crate::applog!("player: subtitle recovery tearing pipeline down");
     if teardown_pipeline(playbin).is_err() {
@@ -1022,6 +1180,7 @@ fn recover_without_external(
         return false;
     }
     *seek.borrow_mut() = SeekState::default();
+    playback_rate.set(1.0);
     duration.set(None);
     {
         let mut state = subtitles.borrow_mut();
@@ -1034,6 +1193,7 @@ fn recover_without_external(
     }
     *resume.borrow_mut() = Some(ResumeState {
         position,
+        rate,
         play_after_seek,
         stage: ResumeStage::Preroll,
     });
@@ -1356,25 +1516,47 @@ fn missing_decoder_matching(
     )
 }
 
-/// Send the seek and record it as in flight. Free-standing because the
-/// bus watch flushes queued scrub positions without holding a `Player`.
-fn issue_seek(playbin: &gst::Element, seek: &RefCell<SeekState>, secs: f64) -> bool {
-    let secs = secs.max(0.0);
-    let Ok(target) = gst::ClockTime::try_from_seconds_f64(secs) else {
-        crate::applog!("player: refusing invalid seek target {secs}");
+fn same_rate(left: f64, right: f64) -> bool {
+    (left - right).abs() < f64::EPSILON
+}
+
+/// Send the seek and record it as in flight. Free-standing because the bus
+/// watch flushes queued scrub/rate requests without holding a `Player`.
+fn issue_seek(
+    seek_target: &gst::Element,
+    seek: &RefCell<SeekState>,
+    playback_rate: &Cell<f64>,
+    request: SeekRequest,
+) -> bool {
+    let position = request.position.max(0.0);
+    let Ok(target) = gst::ClockTime::try_from_seconds_f64(position) else {
+        crate::applog!("player: refusing invalid seek target {position}");
         return false;
     };
     {
         let mut state = seek.borrow_mut();
-        state.in_flight = Some((secs, Instant::now()));
+        state.in_flight = Some((request, Instant::now()));
         state.queued = None;
     }
-    let sent = playbin.seek_simple(SEEK_FLAGS, target).is_ok();
+    let sent = seek_target
+        .seek(
+            request.rate,
+            SEEK_FLAGS,
+            gst::SeekType::Set,
+            target,
+            gst::SeekType::None,
+            gst::ClockTime::NONE,
+        )
+        .is_ok();
     if sent {
-        crate::applog!("player: seek to {secs:.1}s");
+        playback_rate.set(request.rate);
+        crate::applog!("player: seek to {position:.1}s at {:.2}x", request.rate);
     } else {
         seek.borrow_mut().in_flight = None;
-        crate::applog!("player: seek to {secs:.1}s was refused");
+        crate::applog!(
+            "player: seek to {position:.1}s at {:.2}x was refused",
+            request.rate
+        );
     }
     sent
 }
@@ -1392,35 +1574,50 @@ mod tests {
 
     use super::{
         DecoderFallback, INTEL_VIDEO_DECODERS, Instant, ResumeAction, ResumeStage, ResumeState,
-        SEEK_SETTLE, SeekState, SubtitleChoice, SubtitleState, SubtitleTrack, advance_resume,
-        cycled_subtitle_choice, gst, h264_exceeds_declared_level, matching_sidecar,
+        SEEK_SETTLE, SeekRequest, SeekState, SubtitleChoice, SubtitleState, SubtitleTrack,
+        advance_resume, cycled_subtitle_choice, gst, h264_exceeds_declared_level, matching_sidecar,
         missing_subtitle_decoder, missing_video_decoder, prefer_intel_video_decoders,
         preferred_hardware_rank, refresh_subtitle_tracks, subtitle_selection_ids,
         toggled_subtitle_choice,
     };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
-    fn issued(state: &mut SeekState, secs: f64, ago: std::time::Duration) {
-        state.in_flight = Some((secs, Instant::now() - ago));
+    fn request(position: f64, rate: f64) -> SeekRequest {
+        SeekRequest { position, rate }
+    }
+
+    fn issued(state: &mut SeekState, request: SeekRequest, ago: std::time::Duration) {
+        state.in_flight = Some((request, Instant::now() - ago));
         state.queued = None;
     }
 
     #[test]
     fn first_seek_goes_out_immediately() {
         let mut state = SeekState::default();
-        assert!(state.request(12.0));
+        assert!(state.request(request(12.0, 1.0)));
         assert_eq!(state.queued, None);
     }
 
     #[test]
     fn scrubbing_during_a_seek_keeps_only_the_newest_position() {
         let mut state = SeekState::default();
-        issued(&mut state, 12.0, std::time::Duration::ZERO);
-        assert!(!state.request(20.0));
-        assert!(!state.request(31.0));
-        assert_eq!(state.queued, Some(31.0));
+        issued(&mut state, request(12.0, 1.0), std::time::Duration::ZERO);
+        assert!(!state.request(request(20.0, 1.0)));
+        assert!(!state.request(request(31.0, 1.0)));
+        assert_eq!(state.queued, Some(request(31.0, 1.0)));
         // The UI follows the pointer, not the seek still on its way.
-        assert_eq!(state.pending(), Some(31.0));
+        assert_eq!(state.pending(), Some(request(31.0, 1.0)));
+    }
+
+    #[test]
+    fn speed_change_during_a_seek_is_coalesced_with_the_latest_position() {
+        let mut state = SeekState::default();
+        issued(&mut state, request(12.0, 1.0), std::time::Duration::ZERO);
+        assert!(!state.request(request(12.0, 1.5)));
+        // A later scrub keeps the requested rate while replacing only the
+        // pending position.
+        assert!(!state.request(request(31.0, 1.5)));
+        assert_eq!(state.queued, Some(request(31.0, 1.5)));
     }
 
     #[test]
@@ -1599,6 +1796,7 @@ mod tests {
     fn sidecar_reload_prerolls_seeks_then_restores_playback() {
         let mut resume = Some(ResumeState {
             position: 42.5,
+            rate: 1.5,
             play_after_seek: true,
             stage: ResumeStage::Preroll,
         });
@@ -1606,6 +1804,7 @@ mod tests {
             advance_resume(&mut resume),
             ResumeAction::Seek {
                 position: 42.5,
+                rate: 1.5,
                 resume_playing: true,
             }
         );
@@ -1622,9 +1821,9 @@ mod tests {
     #[test]
     fn a_lost_seek_stops_blocking_and_stops_being_reported() {
         let mut state = SeekState::default();
-        issued(&mut state, 12.0, SEEK_SETTLE);
+        issued(&mut state, request(12.0, 1.0), SEEK_SETTLE);
         assert_eq!(state.pending(), None);
-        assert!(state.request(20.0));
+        assert!(state.request(request(20.0, 1.0)));
     }
 
     #[test]

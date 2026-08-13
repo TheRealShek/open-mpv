@@ -22,7 +22,9 @@ use crate::config::{self, Config, FitMode, SubtitleMode};
 use crate::fileops;
 use crate::folder::Folder;
 use crate::loader::{self, Decoded};
-use crate::player::{self, Player, SubtitleChoice, SubtitleSnapshot, SubtitleTrack};
+use crate::player::{
+    self, PLAYBACK_RATES, Player, SubtitleChoice, SubtitleSnapshot, SubtitleTrack,
+};
 use crate::viewer::ImageView;
 
 const SEEK_STEP_SECONDS: f64 = 10.0;
@@ -40,6 +42,9 @@ enum Action {
     PlayPause,
     SeekBack,
     SeekForward,
+    SpeedDown,
+    SpeedUp,
+    SpeedReset,
     Mute,
     SubtitleOpen,
     SubtitleToggle,
@@ -76,6 +81,9 @@ impl Action {
             Action::PlayPause => "play-pause",
             Action::SeekBack => "seek-back",
             Action::SeekForward => "seek-forward",
+            Action::SpeedDown => "speed-down",
+            Action::SpeedUp => "speed-up",
+            Action::SpeedReset => "speed-reset",
             Action::Mute => "mute",
             Action::SubtitleOpen => "subtitle-open",
             Action::SubtitleToggle => "subtitle-toggle",
@@ -139,6 +147,9 @@ const DEFAULT_BINDS: &[(&str, Action)] = &[
     ("l", Action::SeekForward),
     ("<Shift>Left", Action::SeekBack),
     ("<Shift>Right", Action::SeekForward),
+    ("bracketleft", Action::SpeedDown),
+    ("bracketright", Action::SpeedUp),
+    ("backslash", Action::SpeedReset),
     ("m", Action::Mute),
     // `v` follows mpv. Its subtitle-cycle `j` is already open-mpv's
     // backward seek, so Shift+V keeps the two actions adjacent (FR-10.7).
@@ -171,6 +182,9 @@ const ACTIONS: &[(Action, &str)] = &[
     (Action::PlayPause, "Pause video, or next image"),
     (Action::SeekBack, "Seek back 10 seconds"),
     (Action::SeekForward, "Seek forward 10 seconds"),
+    (Action::SpeedDown, "Slower video playback"),
+    (Action::SpeedUp, "Faster video playback"),
+    (Action::SpeedReset, "Reset video speed to 1x"),
     (Action::Mute, "Mute audio"),
     (Action::SubtitleOpen, "Add an external subtitle"),
     (Action::SubtitleToggle, "Show or hide subtitles"),
@@ -302,6 +316,9 @@ pub struct App {
     transport: gtk::Box,
     play_btn: gtk::Button,
     mute_btn: gtk::Button,
+    speed_btn: gtk::MenuButton,
+    speed_label: gtk::Label,
+    speed_action: gio::SimpleAction,
     subtitle_btn: gtk::MenuButton,
     subtitle_menu: gio::Menu,
     subtitle_context_menu: gio::Menu,
@@ -448,6 +465,14 @@ impl App {
             "Play / pause",
         );
         let mute_btn = bar_button("audio-volume-high-symbolic", "win.mute", "Mute");
+        let speed_menu = playback_speed_menu();
+        let speed_label = gtk::Label::new(Some("1×"));
+        let speed_btn = gtk::MenuButton::builder()
+            .child(&speed_label)
+            .menu_model(&speed_menu)
+            .tooltip_text("Playback speed")
+            .build();
+        speed_btn.add_css_class("flat");
         let subtitle_menu = gio::Menu::new();
         let subtitle_btn = gtk::MenuButton::builder()
             .icon_name("media-view-subtitles-symbolic")
@@ -460,6 +485,7 @@ impl App {
         transport.append(&play_btn);
         transport.append(&seek_bar);
         transport.append(&time_label);
+        transport.append(&speed_btn);
         transport.append(&subtitle_btn);
         transport.append(&mute_btn);
         transport.set_visible(false);
@@ -582,6 +608,11 @@ impl App {
             Some(glib::VariantTy::STRING),
             &"auto".to_variant(),
         );
+        let speed_action = gio::SimpleAction::new_stateful(
+            "speed",
+            Some(glib::VariantTy::DOUBLE),
+            &1.0_f64.to_variant(),
+        );
         let app = Rc::new(App {
             win: win.clone(),
             view: view.clone(),
@@ -602,6 +633,9 @@ impl App {
             transport,
             play_btn,
             mute_btn,
+            speed_btn: speed_btn.clone(),
+            speed_label,
+            speed_action,
             subtitle_btn: subtitle_btn.clone(),
             subtitle_menu,
             subtitle_context_menu,
@@ -657,6 +691,14 @@ impl App {
             }
         ));
         subtitle_btn.connect_active_notify(clone!(
+            #[strong(rename_to = app)]
+            app,
+            move |button| {
+                app.menu_open.set(button.is_active());
+                app.show_chrome();
+            }
+        ));
+        speed_btn.connect_active_notify(clone!(
             #[strong(rename_to = app)]
             app,
             move |button| {
@@ -1000,6 +1042,7 @@ impl App {
             return;
         }
         self.update_subtitles(player.subtitle_snapshot());
+        self.update_playback_rate(player.playback_rate());
         *self.media.borrow_mut() = MediaState::Video(path.to_path_buf());
         self.update_control_mode();
         crate::applog!("play: {}", path.display());
@@ -1140,8 +1183,8 @@ impl App {
 
     /// Keep video controls inside the window. The seek bar gives up width
     /// first; on very narrow windows the duplicated time and mute controls
-    /// and the CC entry duplicated in the right-click menu yield before play,
-    /// Trash, or the seek target (FR-10.5/10.7).
+    /// and the CC/speed menus yield before play, Trash, or the seek target
+    /// (FR-10.5/10.7).
     fn fit_seek_bar(&self) {
         // Every measurement here forces a layout pass, and this is called
         // from the per-frame transport tick. Only the window width and
@@ -1168,6 +1211,7 @@ impl App {
         self.seek_bar.set_size_request(0, -1);
         self.time_label.set_visible(true);
         self.mute_btn.set_visible(true);
+        self.speed_btn.set_visible(true);
         self.subtitle_btn.set_visible(true);
         let others = |s: &Self| s.control_bar.measure(gtk::Orientation::Horizontal, -1).0;
 
@@ -1182,6 +1226,10 @@ impl App {
         }
         if room < SEEK_BAR_MIN_WIDTH {
             self.subtitle_btn.set_visible(false);
+            room = width - others(self);
+        }
+        if room < SEEK_BAR_MIN_WIDTH {
+            self.speed_btn.set_visible(false);
             room = width - others(self);
         }
         self.seek_bar
@@ -1237,6 +1285,7 @@ impl App {
                     "audio-volume-high-symbolic"
                 },
             );
+            self.update_playback_rate(p.playback_rate());
         }
         let progress = self.player.borrow().as_ref().and_then(|p| p.progress());
         let Some((pos, dur)) = progress else {
@@ -1401,6 +1450,14 @@ impl App {
             player::Event::SubtitlesChanged(snapshot) => {
                 if self.is_video_showing() {
                     self.update_subtitles(snapshot);
+                }
+            }
+            player::Event::PlaybackRateError(error) => {
+                if self.is_video_showing() {
+                    if let Some(rate) = self.with_video(Player::playback_rate) {
+                        self.update_playback_rate(rate);
+                    }
+                    self.show_toast(&error.to_string(), false);
                 }
             }
         }
@@ -2054,6 +2111,33 @@ impl App {
         }
     }
 
+    fn update_playback_rate(&self, rate: f64) {
+        let label = format_playback_rate(rate);
+        if self.speed_label.text() != label {
+            self.speed_label.set_text(&label);
+            self.speed_action.set_state(&rate.to_variant());
+            self.fitted_for.set(None);
+        }
+    }
+
+    fn set_playback_rate(self: &Rc<Self>, rate: f64) {
+        match self.with_video(|player| player.set_playback_rate(rate)) {
+            Some(Ok(rate)) => {
+                self.update_playback_rate(rate);
+                self.flash(&format_playback_rate(rate));
+            }
+            Some(Err(error)) => self.show_toast(&error.to_string(), false),
+            None => {}
+        }
+    }
+
+    fn step_playback_rate(self: &Rc<Self>, direction: i32) {
+        let Some(current) = self.with_video(Player::playback_rate) else {
+            return;
+        };
+        self.set_playback_rate(adjacent_playback_rate(current, direction));
+    }
+
     /// Brief top-left indicator: zoom level and edge cues (FR-4.4, FR-3.3).
     fn flash(self: &Rc<Self>, text: &str) {
         self.indicator.set_text(text);
@@ -2180,6 +2264,9 @@ impl App {
                 a.flash_progress();
             }),
         );
+        add(Action::SpeedDown, Box::new(|a| a.step_playback_rate(-1)));
+        add(Action::SpeedUp, Box::new(|a| a.step_playback_rate(1)));
+        add(Action::SpeedReset, Box::new(|a| a.set_playback_rate(1.0)));
         add(
             Action::Mute,
             Box::new(|a| match a.with_video(Player::toggle_mute) {
@@ -2282,6 +2369,15 @@ impl App {
             }
         });
         self.win.add_action(&self.subtitle_action);
+
+        let app = self.clone();
+        self.speed_action.connect_activate(move |_, parameter| {
+            let Some(rate) = parameter.and_then(glib::Variant::get::<f64>) else {
+                return;
+            };
+            app.set_playback_rate(rate);
+        });
+        self.win.add_action(&self.speed_action);
 
         // Defaults merged with user binds (FR-8.2); a user bind takes
         // the key over from the default action.
@@ -2605,6 +2701,47 @@ fn bar_button(icon: &str, action: &str, tooltip: &str) -> gtk::Button {
     b
 }
 
+fn format_playback_rate(rate: f64) -> String {
+    let value = format!("{rate:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string();
+    format!("{value}×")
+}
+
+fn adjacent_playback_rate(current: f64, direction: i32) -> f64 {
+    let index = PLAYBACK_RATES
+        .iter()
+        .position(|rate| (*rate - current).abs() < f64::EPSILON)
+        .unwrap_or_else(|| {
+            PLAYBACK_RATES
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    (**left - current)
+                        .abs()
+                        .total_cmp(&(**right - current).abs())
+                })
+                .map_or(2, |(index, _)| index)
+        });
+    let next = if direction < 0 {
+        index.saturating_sub(1)
+    } else {
+        (index + 1).min(PLAYBACK_RATES.len() - 1)
+    };
+    PLAYBACK_RATES[next]
+}
+
+fn playback_speed_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    for rate in PLAYBACK_RATES {
+        let item = gio::MenuItem::new(Some(&format_playback_rate(*rate)), None);
+        item.set_action_and_target_value(Some("win.speed"), Some(&rate.to_variant()));
+        menu.append_item(&item);
+    }
+    menu
+}
+
 fn append_subtitle_item(menu: &gio::Menu, label: &str, target: &str) {
     let item = gio::MenuItem::new(Some(label), None);
     item.set_action_and_target_value(Some("win.subtitle"), Some(&target.to_variant()));
@@ -2836,10 +2973,10 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 mod tests {
     use super::{
         ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SEEK_STEP_SECONDS,
-        SKIP_BUDGET, cache_budget_bytes, chrome_is_held, excluded_path_message, format_time,
-        looks_like_subtitle, nav_target, position_text, rebuild_subtitle_context,
-        rebuild_subtitle_menu, resize_edge_at, save_control_visible, skip_target,
-        svg_render_dimension, window_dimension,
+        SKIP_BUDGET, adjacent_playback_rate, cache_budget_bytes, chrome_is_held,
+        excluded_path_message, format_playback_rate, format_time, looks_like_subtitle, nav_target,
+        playback_speed_menu, position_text, rebuild_subtitle_context, rebuild_subtitle_menu,
+        resize_edge_at, save_control_visible, skip_target, svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -3107,6 +3244,34 @@ mod tests {
             DEFAULT_BINDS.contains(&("<Shift>Right", Action::SeekForward)),
             "Shift+Right must seek without taking plain Right away from folder navigation"
         );
+    }
+
+    #[test]
+    fn video_speed_presets_are_bounded_rebindable_and_use_typed_targets() {
+        assert_eq!(adjacent_playback_rate(1.0, -1), 0.75);
+        assert_eq!(adjacent_playback_rate(1.0, 1), 1.25);
+        assert_eq!(adjacent_playback_rate(0.5, -1), 0.5);
+        assert_eq!(adjacent_playback_rate(2.0, 1), 2.0);
+        assert_eq!(format_playback_rate(0.75), "0.75×");
+        assert_eq!(format_playback_rate(1.0), "1×");
+
+        assert!(DEFAULT_BINDS.contains(&("bracketleft", Action::SpeedDown)));
+        assert!(DEFAULT_BINDS.contains(&("bracketright", Action::SpeedUp)));
+        assert!(DEFAULT_BINDS.contains(&("backslash", Action::SpeedReset)));
+
+        let menu = playback_speed_menu();
+        assert_eq!(menu.n_items(), crate::player::PLAYBACK_RATES.len() as i32);
+        for (index, rate) in crate::player::PLAYBACK_RATES.iter().enumerate() {
+            assert_eq!(
+                menu.item_attribute_value(
+                    index as i32,
+                    "target",
+                    Some(gtk4::glib::VariantTy::DOUBLE),
+                )
+                .and_then(|value| value.get::<f64>()),
+                Some(*rate)
+            );
+        }
     }
 
     #[test]
