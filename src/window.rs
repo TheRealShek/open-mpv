@@ -2833,13 +2833,17 @@ fn apply_css(background: &str) {
 fn supported_media_filter() -> gtk::FileFilter {
     let filter = gtk::FileFilter::new();
     filter.set_name(Some("Supported Media"));
-    for extension in config::IMAGE_EXTENSIONS
-        .iter()
-        .chain(config::VIDEO_EXTENSIONS)
-    {
+    for extension in supported_media_extensions() {
         filter.add_suffix(extension);
     }
     filter
+}
+
+fn supported_media_extensions() -> impl Iterator<Item = &'static str> {
+    config::IMAGE_EXTENSIONS
+        .iter()
+        .chain(config::VIDEO_EXTENSIONS)
+        .copied()
 }
 
 fn dialog_was_cancelled(error: &glib::Error) -> bool {
@@ -3008,7 +3012,8 @@ mod tests {
         SKIP_BUDGET, cache_budget_bytes, chrome_is_held, dialog_initial_folder_path,
         dialog_was_cancelled, excluded_path_message, format_time, looks_like_subtitle, nav_target,
         open_menu_model, position_text, rebuild_subtitle_context, rebuild_subtitle_menu,
-        resize_edge_at, save_control_visible, skip_target, svg_render_dimension, window_dimension,
+        resize_edge_at, save_control_visible, skip_target, supported_media_extensions,
+        svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -3137,6 +3142,26 @@ mod tests {
         assert!(!dialog_was_cancelled(&gtk4::glib::Error::new(
             gtk4::DialogError::Failed,
             "failed"
+        )));
+    }
+
+    #[test]
+    fn open_file_filter_receives_every_supported_extension() {
+        let actual: Vec<_> = supported_media_extensions().collect();
+        let expected: Vec<_> = crate::config::IMAGE_EXTENSIONS
+            .iter()
+            .chain(crate::config::VIDEO_EXTENSIONS)
+            .copied()
+            .collect();
+
+        assert_eq!(actual, expected);
+        for extension in actual {
+            assert!(crate::config::is_supported(&PathBuf::from(format!(
+                "sample.{extension}"
+            ))));
+        }
+        assert!(!crate::config::is_supported(&PathBuf::from(
+            "photo.jpeg.exe"
         )));
     }
 
