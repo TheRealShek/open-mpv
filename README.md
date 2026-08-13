@@ -16,7 +16,8 @@ the keyboard, and configurable with a plain-text file when you want it to be.
 
 ## What you can do
 
-- Browse supported photos and videos in one folder-navigation flow.
+- Open files or folders in the app and browse supported photos and videos in
+  one folder-navigation flow.
 - Zoom, pan, fit, rotate and use fullscreen with mouse, touchpad or keyboard.
 - Trash files with undo and save supported image rotations losslessly for JPEG.
 - Control local video speed and subtitles, with optional mpv-style
@@ -62,7 +63,9 @@ open-mpv ~/Pictures/photo.jpg
 open-mpv ~/Pictures
 ```
 
-You can also launch open-mpv with no file and drag a file into its window.
+You can also launch open-mpv with no file, then use its Open File or Open
+Folder controls or drag a file into the window. File and folder opening remain
+available from the More menu while viewing media.
 
 ## Everyday controls
 
@@ -74,6 +77,8 @@ three-dot button or by right-clicking the media.
 
 | Key or gesture | Action |
 | --- | --- |
+| `Ctrl+O` | Open a supported image or video |
+| `Ctrl+Shift+O` | Open a folder at its first supported item |
 | `Right` / `Page Down` | Next file; `Right` pans a zoomed image |
 | `Left` / `Page Up` | Previous file; `Left` pans a zoomed image |
 | Scroll / pinch | Zoom at the pointer |

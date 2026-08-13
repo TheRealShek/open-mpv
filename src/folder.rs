@@ -25,7 +25,7 @@ pub struct Folder {
 }
 
 impl Folder {
-    /// Scan `dir` for supported images. Unreadable entries are skipped.
+    /// Scan `dir` for supported media. Unreadable entries are skipped.
     pub fn scan(dir: &Path, sort: Sort) -> std::io::Result<Folder> {
         let mut entries = Vec::new();
         for res in std::fs::read_dir(dir)? {

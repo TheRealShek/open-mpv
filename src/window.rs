@@ -31,6 +31,8 @@ const SEEK_STEP_SECONDS: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Action {
+    OpenFile,
+    OpenFolder,
     Right,
     Left,
     Up,
@@ -70,6 +72,8 @@ enum Action {
 impl Action {
     const fn as_str(self) -> &'static str {
         match self {
+            Action::OpenFile => "open-file",
+            Action::OpenFolder => "open-folder",
             Action::Right => "right",
             Action::Left => "left",
             Action::Up => "up",
@@ -116,6 +120,8 @@ impl Action {
 
 /// Default key → action map; config `bind=` lines override per key.
 const DEFAULT_BINDS: &[(&str, Action)] = &[
+    ("<Control>o", Action::OpenFile),
+    ("<Control><Shift>o", Action::OpenFolder),
     // The arrow keys are contextual (see `App::arrow`), which is why they
     // bind to their own actions rather than straight to next/prev: Page
     // Down must keep stepping through the folder even when a zoomed
@@ -171,6 +177,8 @@ const DEFAULT_BINDS: &[(&str, Action)] = &[
 /// (FR-8.2). `escape` carries no description: its layered behaviour is
 /// spelled out in the footer instead.
 const ACTIONS: &[(Action, &str)] = &[
+    (Action::OpenFile, "Open a file"),
+    (Action::OpenFolder, "Open a folder"),
     (Action::Right, "Next image, or pan when zoomed in"),
     (Action::Left, "Previous image, or pan when zoomed in"),
     (Action::Up, "Volume up, or pan when zoomed in"),
@@ -308,6 +316,7 @@ pub struct App {
     pending_undo: RefCell<Option<PathBuf>>,
     presented: Cell<bool>,
     // Widgets and timers.
+    status_area: gtk::Box,
     status: gtk::Label,
     info_bar: gtk::Box,
     name_label: gtk::Label,
@@ -341,6 +350,9 @@ pub struct App {
     /// True while the pointer rests on the overlay controls, which must
     /// not fade out from under it (FR-6.2).
     pointer_on_chrome: Cell<bool>,
+    /// The always-visible empty/error actions also hold the cursor, but are
+    /// tracked separately so hiding that state cannot leave the hold stuck.
+    pointer_on_status: Cell<bool>,
     /// A popover is outside the bar's widget bounds, but it still owns the
     /// interaction: the bar must remain visible until the menu closes.
     menu_open: Cell<bool>,
@@ -383,14 +395,28 @@ impl App {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&view));
 
-        // Empty / error state (FR-1.4, FR-1.5).
-        let status = gtk::Label::new(Some("Open an image…"));
-        status.set_halign(gtk::Align::Center);
-        status.set_valign(gtk::Align::Center);
+        // Empty / error state (FR-1.4/1.5). These are real buttons rather
+        // than a clickable label, so both choices have distinct accessible
+        // names and normal keyboard focus.
+        let status = gtk::Label::new(Some("Open a file or folder…"));
         status.set_wrap(true);
         status.set_justify(gtk::Justification::Center);
         status.add_css_class("status");
-        overlay.add_overlay(&status);
+        let open_file_btn = gtk::Button::with_label("Open File…");
+        open_file_btn.set_action_name(Some("win.open-file"));
+        let open_folder_btn = gtk::Button::with_label("Open Folder…");
+        open_folder_btn.set_action_name(Some("win.open-folder"));
+        let status_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        status_actions.set_halign(gtk::Align::Center);
+        status_actions.add_css_class("status-actions");
+        status_actions.append(&open_file_btn);
+        status_actions.append(&open_folder_btn);
+        let status_area = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        status_area.set_halign(gtk::Align::Center);
+        status_area.set_valign(gtk::Align::Center);
+        status_area.append(&status);
+        status_area.append(&status_actions);
+        overlay.add_overlay(&status_area);
 
         // Navigation arrows (FR-3.1).
         let prev_btn = osd_button("go-previous-symbolic", "win.prev", "Previous image");
@@ -527,6 +553,8 @@ impl App {
         // Less frequent commands remain discoverable without making the
         // primary strip permanent or wide (FR-6.5, NFR-5.2).
         let more_menu = gio::Menu::new();
+        let open_menu = open_menu_model();
+        more_menu.append_section(None, &open_menu);
         more_menu.append(Some("Fit to Window"), Some("win.zoom-fit"));
         more_menu.append(Some("Actual Size"), Some("win.zoom-actual"));
         more_menu.append(Some("Rotate Left"), Some("win.rotate-ccw"));
@@ -625,6 +653,7 @@ impl App {
             player: RefCell::new(None),
             pending_undo: RefCell::new(None),
             presented: Cell::new(false),
+            status_area,
             status,
             info_bar: info_bar.clone(),
             name_label,
@@ -648,6 +677,7 @@ impl App {
             transport_tick: RefCell::new(None),
             scrubbing: Cell::new(false),
             pointer_on_chrome: Cell::new(false),
+            pointer_on_status: Cell::new(false),
             menu_open: Cell::new(false),
             pointer: Cell::new((0.0, 0.0)),
             inhibit_cookie: Cell::new(None),
@@ -859,6 +889,77 @@ impl App {
         }
     }
 
+    fn choose_media_file(self: &Rc<Self>) {
+        let filter = supported_media_filter();
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Open File");
+        dialog.set_accept_label(Some("Open"));
+        dialog.set_modal(true);
+        dialog.set_filters(Some(&filters));
+        dialog.set_default_filter(Some(&filter));
+        if let Some(folder) = self.dialog_initial_folder() {
+            dialog.set_initial_folder(Some(&folder));
+        }
+        dialog.open(
+            Some(&self.win),
+            gio::Cancellable::NONE,
+            clone!(
+                #[strong(rename_to = app)]
+                self,
+                move |result| match result {
+                    Ok(file) => match file.path() {
+                        Some(path) if config::is_supported(&path) => app.open_path(&path),
+                        Some(_) =>
+                            app.show_toast("Only supported media files can be opened", false),
+                        None => app.show_toast("Only local media files can be opened", false),
+                    },
+                    Err(error) if dialog_was_cancelled(&error) => {}
+                    Err(error) => {
+                        app.show_toast(&format!("Cannot open file chooser: {error}"), false)
+                    }
+                }
+            ),
+        );
+    }
+
+    fn choose_folder(self: &Rc<Self>) {
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Open Folder");
+        dialog.set_accept_label(Some("Open"));
+        dialog.set_modal(true);
+        if let Some(folder) = self.dialog_initial_folder() {
+            dialog.set_initial_folder(Some(&folder));
+        }
+        dialog.select_folder(
+            Some(&self.win),
+            gio::Cancellable::NONE,
+            clone!(
+                #[strong(rename_to = app)]
+                self,
+                move |result| match result {
+                    Ok(folder) => match folder.path() {
+                        Some(path) => app.open_path(&path),
+                        None => app.show_toast("Only local folders can be opened", false),
+                    },
+                    Err(error) if dialog_was_cancelled(&error) => {}
+                    Err(error) => {
+                        app.show_toast(&format!("Cannot open folder chooser: {error}"), false)
+                    }
+                }
+            ),
+        );
+    }
+
+    /// Start from the current media's directory. With no current path the
+    /// initial folder stays unset, leaving location memory to the portal.
+    fn dialog_initial_folder(&self) -> Option<gio::File> {
+        let current = self.current_path();
+        dialog_initial_folder_path(current.as_deref()).map(gio::File::for_path)
+    }
+
     fn open_folder(self: &Rc<Self>, dir: &Path) {
         match Folder::scan(dir, self.cfg.sort) {
             Ok(folder) if !folder.is_empty() => {
@@ -867,14 +968,18 @@ impl App {
             }
             Ok(folder) => {
                 self.install_folder(folder, dir);
-                self.show_error(dir, "no supported images in this folder");
+                self.show_error(dir, "no supported media in this folder");
             }
             Err(e) => self.show_error(dir, &format!("cannot read directory: {e}")),
         }
     }
 
     fn install_folder(self: &Rc<Self>, folder: Folder, dir: &Path) {
-        crate::applog!("folder: {} with {} images", dir.display(), folder.len());
+        crate::applog!(
+            "folder: {} with {} media files",
+            dir.display(),
+            folder.len()
+        );
         *self.folder.borrow_mut() = Some(folder);
         let monitor = gio::File::for_path(dir)
             .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
@@ -1035,7 +1140,7 @@ impl App {
                 return;
             }
         };
-        self.status.set_visible(false);
+        self.hide_status();
         self.view.show_live_paintable(player.paintable());
         if let Err(e) = player.play(path) {
             self.show_error(path, &e.to_string());
@@ -1153,7 +1258,7 @@ impl App {
                             app.show_toast("Only SRT and WebVTT subtitles are supported", false,),
                         None => app.show_toast("Only local subtitle files are supported", false),
                     },
-                    Err(error) if error.matches(gio::IOErrorEnum::Cancelled) => {}
+                    Err(error) if dialog_was_cancelled(&error) => {}
                     Err(error) => app.show_toast(&format!("Cannot open subtitle: {error}"), false),
                 }
             ),
@@ -1480,7 +1585,7 @@ impl App {
         mime: String,
         generation: u64,
     ) {
-        self.status.set_visible(false);
+        self.hide_status();
         *self.media.borrow_mut() = MediaState::Image {
             path,
             decoded: decoded.clone(),
@@ -1658,8 +1763,13 @@ impl App {
     /// Put a message where the image would be (FR-1.4).
     fn show_status(&self, text: &str) {
         self.status.set_text(text);
-        self.status.set_visible(true);
+        self.status_area.set_visible(true);
         self.update_save_enabled();
+    }
+
+    fn hide_status(&self) {
+        self.status_area.set_visible(false);
+        self.pointer_on_status.set(false);
     }
 
     fn show_error(self: &Rc<Self>, path: &Path, message: &str) {
@@ -1867,7 +1977,7 @@ impl App {
     fn after_current_removed(self: &Rc<Self>) {
         let len = self.folder.borrow().as_ref().map_or(0, Folder::len);
         if len == 0 {
-            self.empty_state("No images left in this folder");
+            self.empty_state("No media left in this folder");
         } else {
             // Index of the removed file is gone; land on the same slot.
             let idx = self
@@ -1914,7 +2024,7 @@ impl App {
                         };
                         *app.pending_undo.borrow_mut() = Some(path);
                         if len == 0 {
-                            app.empty_state("No images left in this folder");
+                            app.empty_state("No media left in this folder");
                         } else {
                             app.show_index(idx.min(len - 1), Arrival::Direct);
                         }
@@ -2082,7 +2192,7 @@ impl App {
         // fade-out when the pointer is done.
         if chrome_is_held(
             self.scrubbing.get(),
-            self.pointer_on_chrome.get(),
+            self.pointer_on_chrome.get() || self.pointer_on_status.get(),
             self.menu_open.get(),
         ) {
             return;
@@ -2192,6 +2302,8 @@ impl App {
             action
         };
 
+        add(Action::OpenFile, Box::new(|a| a.choose_media_file()));
+        add(Action::OpenFolder, Box::new(|a| a.choose_folder()));
         add(Action::Next, Box::new(|a| a.navigate(Direction::Next)));
         add(
             Action::Previous,
@@ -2536,6 +2648,23 @@ impl App {
             ));
             w.add_controller(hover);
         }
+        // The status actions do not fade with media chrome, but resting the
+        // pointer on one must still keep the cursor visible until it leaves.
+        let status_hover = gtk::EventControllerMotion::new();
+        status_hover.connect_enter(clone!(
+            #[strong(rename_to = app)]
+            self,
+            move |_, _, _| app.pointer_on_status.set(true)
+        ));
+        status_hover.connect_leave(clone!(
+            #[strong(rename_to = app)]
+            self,
+            move |_| {
+                app.pointer_on_status.set(false);
+                app.show_chrome();
+            }
+        ));
+        self.status_area.add_controller(status_hover);
 
         // Double-click: fullscreen. Middle-click: fit/100% toggle (FR-4.3).
         let click = gtk::GestureClick::new();
@@ -2817,6 +2946,9 @@ fn apply_css(background: &str) {
         .toast {{ background-color: rgba(25, 25, 25, 0.92); color: #eeeeee;
             padding: 8px 14px; border-radius: 8px; }}
         .status {{ color: #999999; font-size: 1.1em; }}
+        .status-actions button {{ background-color: rgba(25, 25, 25, 0.92);
+            color: #eeeeee; border-radius: 7px; }}
+        .status-actions button:hover {{ background-color: rgba(55, 55, 55, 0.96); }}
         .help {{ background-color: rgba(0, 0, 0, 0.85); color: #dddddd;
             padding: 18px 24px; border-radius: 10px; }}
         "#
@@ -2830,6 +2962,47 @@ fn apply_css(background: &str) {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
+}
+
+/// One authoritative chooser filter for every extension that the folder
+/// model accepts. `add_suffix` matches case-insensitively, like config's
+/// extension checks, and avoids a runtime loader query on startup.
+fn supported_media_filter() -> gtk::FileFilter {
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Supported Media"));
+    for extension in supported_media_extensions() {
+        filter.add_suffix(extension);
+    }
+    filter
+}
+
+fn supported_media_extensions() -> impl Iterator<Item = &'static str> {
+    config::IMAGE_EXTENSIONS
+        .iter()
+        .chain(config::VIDEO_EXTENSIONS)
+        .copied()
+}
+
+fn dialog_was_cancelled(error: &glib::Error) -> bool {
+    error.matches(gtk::DialogError::Cancelled)
+        || error.matches(gtk::DialogError::Dismissed)
+        || error.matches(gio::IOErrorEnum::Cancelled)
+}
+
+fn dialog_initial_folder_path(current: Option<&Path>) -> Option<PathBuf> {
+    let path = current?;
+    if path.is_dir() {
+        Some(path.to_path_buf())
+    } else {
+        path.parent().map(Path::to_path_buf)
+    }
+}
+
+fn open_menu_model() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Open File…"), Some("win.open-file"));
+    menu.append(Some("Open Folder…"), Some("win.open-folder"));
+    menu
 }
 
 /// Index to move to for a next/previous step. With nothing on screen —
@@ -2974,9 +3147,11 @@ mod tests {
     use super::{
         ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, MediaState, SEEK_STEP_SECONDS,
         SKIP_BUDGET, adjacent_playback_rate, cache_budget_bytes, chrome_is_held,
-        excluded_path_message, format_playback_rate, format_time, looks_like_subtitle, nav_target,
+        dialog_initial_folder_path, dialog_was_cancelled, excluded_path_message,
+        format_playback_rate, format_time, looks_like_subtitle, nav_target, open_menu_model,
         playback_speed_menu, position_text, rebuild_subtitle_context, rebuild_subtitle_menu,
-        resize_edge_at, save_control_visible, skip_target, svg_render_dimension, window_dimension,
+        resize_edge_at, save_control_visible, skip_target, supported_media_extensions,
+        svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -3075,6 +3250,69 @@ mod tests {
         let files = value.get::<gtk4::gdk::FileList>().unwrap().files();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path(), Some(PathBuf::from("/tmp/subtitle.srt")));
+    }
+
+    #[test]
+    fn open_choosers_start_from_the_current_folder() {
+        let (dir, _) = folder_of("chooser-folder", &["photo.jpg"]);
+        assert_eq!(
+            dialog_initial_folder_path(Some(&dir.join("photo.jpg"))),
+            Some(dir.clone())
+        );
+        assert_eq!(
+            dialog_initial_folder_path(Some(&dir)),
+            Some(dir.clone()),
+            "a folder error should reopen that folder, not its parent"
+        );
+        assert_eq!(dialog_initial_folder_path(None), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn closing_or_cancelling_a_dialog_is_not_an_error() {
+        for error in [
+            gtk4::glib::Error::new(gtk4::DialogError::Dismissed, "closed"),
+            gtk4::glib::Error::new(gtk4::DialogError::Cancelled, "cancelled"),
+            gtk4::glib::Error::new(gtk4::gio::IOErrorEnum::Cancelled, "cancelled"),
+        ] {
+            assert!(dialog_was_cancelled(&error));
+        }
+        assert!(!dialog_was_cancelled(&gtk4::glib::Error::new(
+            gtk4::DialogError::Failed,
+            "failed"
+        )));
+    }
+
+    #[test]
+    fn open_file_filter_receives_every_supported_extension() {
+        let actual: Vec<_> = supported_media_extensions().collect();
+        let expected: Vec<_> = crate::config::IMAGE_EXTENSIONS
+            .iter()
+            .chain(crate::config::VIDEO_EXTENSIONS)
+            .copied()
+            .collect();
+
+        assert_eq!(actual, expected);
+        for extension in actual {
+            assert!(crate::config::is_supported(&PathBuf::from(format!(
+                "sample.{extension}"
+            ))));
+        }
+        assert!(!crate::config::is_supported(&PathBuf::from(
+            "photo.jpeg.exe"
+        )));
+    }
+
+    #[test]
+    fn both_open_actions_share_the_more_and_context_menu_model() {
+        let menu = open_menu_model();
+        assert_eq!(menu.n_items(), 2);
+        let action = |index| {
+            menu.item_attribute_value(index, "action", Some(gtk4::glib::VariantTy::STRING))
+                .and_then(|value| value.str().map(str::to_owned))
+        };
+        assert_eq!(action(0), Some("win.open-file".to_string()));
+        assert_eq!(action(1), Some("win.open-folder".to_string()));
     }
 
     #[test]
@@ -3231,6 +3469,14 @@ mod tests {
                 action.as_str()
             );
         }
+    }
+
+    #[test]
+    fn open_actions_use_distinct_configurable_shortcuts() {
+        assert!(DEFAULT_BINDS.contains(&("<Control>o", Action::OpenFile)));
+        assert!(DEFAULT_BINDS.contains(&("<Control><Shift>o", Action::OpenFolder)));
+        assert_eq!(Action::parse("open-file"), Some(Action::OpenFile));
+        assert_eq!(Action::parse("open-folder"), Some(Action::OpenFolder));
     }
 
     #[test]
