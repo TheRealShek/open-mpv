@@ -361,6 +361,10 @@ pub struct App {
     pointer: Cell<(f64, f64)>,
     /// Session idle-inhibit cookie; `None` when nothing is held.
     inhibit_cookie: Cell<Option<NonZeroU32>>,
+    /// Set before the window is allowed to close. GTK can retain this `App`
+    /// through signal closures until process exit, so `Drop` is too late to
+    /// own GStreamer shutdown (FR-6.7/NFR-2.2).
+    shutting_down: Cell<bool>,
     /// True once the window has been sized from the media on screen. A
     /// video presents before its dimensions are known, so its sizing
     /// arrives late and must still be applied once (FR-6.6).
@@ -681,6 +685,7 @@ impl App {
             menu_open: Cell::new(false),
             pointer: Cell::new((0.0, 0.0)),
             inhibit_cookie: Cell::new(None),
+            shutting_down: Cell::new(false),
             sized_from_media: Cell::new(false),
             indicator,
             toast_revealer,
@@ -706,6 +711,19 @@ impl App {
         app.setup_actions(gtk_app);
         app.setup_controllers();
         app.build_help(gtk_app);
+
+        // Every close route eventually emits close-request, including the
+        // window manager and the typed close/escape actions. Tear playback
+        // down while GTK's main loop and GStreamer libraries are still fully
+        // alive; waiting for `Player::drop` can race process-wide destructors.
+        app.win.connect_close_request(clone!(
+            #[strong(rename_to = app)]
+            app,
+            move |_| {
+                app.shutdown();
+                glib::Propagation::Proceed
+            }
+        ));
 
         more_btn.connect_active_notify(clone!(
             #[strong(rename_to = app)]
@@ -1189,6 +1207,46 @@ impl App {
         // Hiding the bar mid-drag means no button release reaches it.
         self.scrubbing.set(false);
         self.stop_transport_tick();
+    }
+
+    /// Finish session-owned work before GTK destroys the last window.
+    ///
+    /// `App` participates in GTK signal cycles, so its `Player` is not
+    /// guaranteed to drop before C library finalizers run. An active
+    /// GStreamer streaming thread racing those finalizers aborts in GLib or
+    /// a GPU driver. Close-request is the last deterministic point at which
+    /// the GTK main loop, bus watch and pipeline are all still usable.
+    fn shutdown(&self) {
+        if self.shutting_down.replace(true) {
+            return;
+        }
+
+        let started = std::time::Instant::now();
+        crate::applog!("shutdown: started");
+
+        // Invalidate every outstanding media result before releasing its
+        // sources, then prevent monitors and timers from scheduling more UI
+        // work while the close request proceeds.
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.monitor.borrow_mut().take();
+        self.chrome_timer.cancel();
+        self.indicator_timer.cancel();
+        self.toast_timer.cancel();
+        self.svg_timer.cancel();
+        self.stop_transport_tick();
+        self.pending_undo.borrow_mut().take();
+        self.set_idle_inhibited(false);
+
+        // Taking the player also drops its bus-watch guard after stop reaches
+        // Null, so no streaming callback can outlive process shutdown.
+        if let Some(player) = self.player.borrow_mut().take() {
+            player.stop();
+        }
+
+        crate::applog!(
+            "shutdown: complete in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     fn attach_subtitle(self: &Rc<Self>, path: &Path) {
@@ -3130,10 +3188,16 @@ fn format_time(secs: f64) -> String {
 #[derive(Default, Clone)]
 struct TimerSlot(Rc<RefCell<Option<glib::SourceId>>>);
 
-fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
-    if let Some(id) = slot.0.borrow_mut().take() {
-        id.remove();
+impl TimerSlot {
+    fn cancel(&self) {
+        if let Some(id) = self.0.borrow_mut().take() {
+            id.remove();
+        }
     }
+}
+
+fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
+    slot.cancel();
     let inner = slot.0.clone();
     let id = glib::timeout_add_local_once(after, move || {
         inner.borrow_mut().take();
