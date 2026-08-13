@@ -8,18 +8,27 @@ requirements define the finished product; there is no version staging.
 
 ## 1. Functional Requirements
 
-### FR-1 — Opening images
+### FR-1 — Opening media
 
-- **FR-1.1** The app opens an image from `open-mpv <path>` or a desktop
-  "Open with" action.
+- **FR-1.1** The app opens local supported media from `open-mpv <path>`, a
+  desktop "Open with" action, drag-and-drop or the in-app **Open File…**
+  action. Every entry point uses the same opening behavior.
 - **FR-1.2** Opening a file implicitly loads its folder context: all
-  supported images in the same directory become the navigation set.
-- **FR-1.3** Opening a directory path shows the first image of that
-  directory (same sort order as FR-3.2).
+  supported media in the same directory become the navigation set.
+- **FR-1.3** Opening a directory path or choosing **Open Folder…** shows the
+  first supported item in that directory (same sort order as FR-3.2).
 - **FR-1.4** A missing or unreadable path shows a clear in-window error, never
   a crash or silent exit.
-- **FR-1.5** Launching with no argument opens an empty window with a hint
-  ("Open an image…") and accepts drag-and-drop of a file.
+- **FR-1.5** Launching with no argument opens an empty window with keyboard-
+  accessible **Open File…** and **Open Folder…** controls and accepts
+  drag-and-drop of one file.
+- **FR-1.6 In-app opening:** **Open File…** uses `Ctrl+O`; **Open Folder…**
+  uses `Ctrl+Shift+O`. Both actions are rebindable (FR-8.2), appear in the
+  More/secondary-click menu and remain available from empty and error states.
+  The file chooser selects one file and shows only FR-2/FR-10 media types.
+  Choosers start in the current media folder when one exists, otherwise leave
+  location memory to the desktop portal. Cancelling either chooser leaves the
+  current media unchanged; chooser failures are reported non-modally.
 
 ### FR-2 — Supported formats
 
@@ -104,9 +113,9 @@ requirements define the finished product; there is no version staging.
   or corner, with the pointer showing the resize cursor there.
 - **FR-6.5** Every action is reachable from the keyboard and rebindable
   (FR-8.2). The overlay keeps the current medium's primary controls
-  visible and puts Fit, Actual Size, rotate, First, Last and keyboard
-  help in one menu, opened from either the bottom More button or a
-  secondary click on the medium.
+  visible and puts Open File, Open Folder, Fit, Actual Size, rotate, First,
+  Last and keyboard help in one menu, opened from either the bottom More
+  button or a secondary click on the medium.
 - **FR-6.6 Initial window size:** open at 100 % media size up to 85 % of the
   monitor work area, never larger than the media. Video starts at a default
   size and resizes once after preroll provides its dimensions. Subsequent media
