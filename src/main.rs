@@ -1,3 +1,4 @@
+mod annotation;
 mod config;
 mod fileops;
 mod folder;

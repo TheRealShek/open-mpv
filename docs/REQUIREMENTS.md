@@ -94,8 +94,9 @@ requirements define the finished product; there is no version staging.
   Show Save only for a writable image with a pending supported rotation.
 - **FR-5.5** Saves are atomic — a crash or power loss mid-save never
   leaves a corrupt or truncated file in place of the original.
-- **FR-5.6** No other write operation exists. The app never modifies,
-  moves, or creates files except FR-5.1/5.2/5.4.
+- **FR-5.6** No other persistent file operation exists. The app never modifies,
+  moves, or creates files except FR-5.1/5.2/5.4. FR-11 publishes a transient
+  clipboard image but never writes it to disk.
 
 ### FR-6 — Window & UI
 
@@ -107,15 +108,18 @@ requirements define the finished product; there is no version staging.
   but keyboard use never reveals it and a hovered control or open More menu
   holds it open. `hide-cursor` hides the pointer with the overlay except on the
   FR-6.4 resize border.
+  Quick Markup replaces the normal bottom controls with its focused toolbar,
+  which remains visible until that mode ends.
 - **FR-6.3** Fullscreen toggle via `F`/`F11` and double-click.
 - **FR-6.4** Window can be moved by dragging the image (when not panning
-  a zoomed image) and resized by dragging within a few pixels of any edge
-  or corner, with the pointer showing the resize cursor there.
+  a zoomed image or using Quick Markup) and resized by dragging within a few
+  pixels of any edge or corner, with the pointer showing the resize cursor
+  there.
 - **FR-6.5** Every action is reachable from the keyboard and rebindable
   (FR-8.2). The overlay keeps the current medium's primary controls
   visible and puts Open File, Open Folder, Fit, Actual Size, rotate, First,
-  Last and keyboard help in one menu, opened from either the bottom More
-  button or a secondary click on the medium.
+  Last, Quick Markup and keyboard help in one menu, opened from either the
+  bottom More button or a secondary click on the medium.
 - **FR-6.6 Initial window size:** open at 100 % media size up to 85 % of the
   monitor work area, never larger than the media. Video starts at a default
   size and resizes once after preroll provides its dimensions. Subsequent media
@@ -124,7 +128,8 @@ requirements define the finished product; there is no version staging.
   button or the window manager. In fullscreen, the first `Escape` exits
   fullscreen and the second closes; `Q` closes immediately. Closing leaves no
   process (NFR-2.2) and no prompt; pending undo simply lapses with the file in
-  trash.
+  trash. In Quick Markup, `Escape` first cancels an active draft or exits that
+  mode; `Q` and the window manager still close immediately and discard it.
 
 ### FR-7 — Single instance
 
@@ -201,6 +206,48 @@ requirements define the finished product; there is no version staging.
   replacing any prior external attachment; navigation forgets it. Subtitle
   errors are non-modal and never stop otherwise playable video.
 
+### FR-11 — Quick Markup
+
+- **FR-11.1 Availability:** a decoded static raster image offers Quick Markup
+  through `A`, the photo controls and the More/secondary-click menu. Animated
+  images, SVG, video, loading, empty and error states do not offer it.
+- **FR-11.2 Focused controls:** entering Quick Markup replaces the normal
+  bottom controls with persistent Box, Arrow, Undo, Clear, Cancel and Copy
+  controls. Box is selected initially. `B` selects Box, `Shift+A` selects
+  Arrow, `C` clears and `Ctrl+C` copies; every command uses the FR-8.2 action
+  layer. The tools use one fixed high-visibility red style with a contrasting
+  light edge rather than exposing editing preferences.
+- **FR-11.3 Image-relative geometry:** a primary-button drag starting inside
+  the image creates the selected shape and clamps its endpoint to the image.
+  Shapes remain attached to decoded-image pixel coordinates through fit,
+  zoom, pan, resize, view rotation, HiDPI and fractional scaling. Tiny clicks
+  do not create shapes.
+- **FR-11.4 Mode isolation:** primary drag draws instead of panning or moving
+  the window. Folder navigation, Trash, rotate, rotate-save, in-app Open,
+  secondary-click and double-click fullscreen are suppressed until Copy or
+  Cancel; horizontal scroll cannot navigate. Scroll/pinch zoom, arrow-key pan,
+  explicit zoom actions, `F`/`F11`, `Q` and resize edges continue working. A
+  resize cursor wins at an edge, a crosshair identifies the drawing surface,
+  and controls retain the normal pointer.
+- **FR-11.5 Transient history:** `Ctrl+Z` undoes the active draft or most recent
+  shape instead of trash while Quick Markup is active. Clear removes all
+  shapes as one undoable operation, even after a cancelled or tiny subsequent
+  drag. The canvas holds at most 128 shapes; undo storage is also bounded and
+  never persists beyond the current session.
+- **FR-11.6 Clipboard result:** Copy is enabled only after a completed shape.
+  It publishes a bitmap containing the complete decoded image and annotations
+  at the image's native pixel dimensions, with current view rotation baked in.
+  It excludes zoom, pan, canvas, window chrome and source metadata. Success
+  exits the mode and reports non-modally; failure keeps the session available
+  and reports the error non-modally.
+- **FR-11.7 Lifecycle:** `A`, Cancel or `Escape` discards the transient session
+  without a dialog; an in-progress draft consumes the first `Escape`. Opening
+  another path through drag-and-drop or single-instance activation, losing the
+  current file, or closing the app also discards it. Clipboard persistence
+  after open-mpv exits is left to the Wayland compositor and is not promised.
+- **FR-11.8 Data safety:** Quick Markup never changes the source, creates a
+  file, adds a folder entry, or enters `fileops`.
+
 ---
 
 ## 2. Non-Functional Requirements
@@ -216,7 +263,9 @@ requirements define the finished product; there is no version staging.
 - **NFR-1.3 Responsiveness:** decoding never blocks the UI thread; input,
   resize and quit remain responsive for a 100 MP image or broken file.
 - **NFR-1.4 Interaction:** zoom, pan, and overlay animation hold the
-  display's refresh rate for images up to 50 MP.
+  display's refresh rate for images up to 50 MP. Quick Markup preview adds
+  only bounded vector geometry to that render path; bitmap composition occurs
+  only when Copy is explicitly requested.
 
 ### NFR-2 — Footprint
 
@@ -226,6 +275,10 @@ requirements define the finished product; there is no version staging.
   large folders: decoded neighbours are capped, not accumulated, and
   memory, file descriptors, threads and loader processes settle after
   repeated navigation and video/image cycles.
+- **NFR-2.1b** Quick Markup retains at most 128 visible vector shapes and 256
+  shape records across bounded undo snapshots. Copy may retain one additional
+  native-size texture as the current clipboard payload; replacing the
+  clipboard payload releases the prior result.
 - **NFR-2.2** No background daemon, no network access, no telemetry —
   the process exists only while a window is open.
 - **NFR-2.3** Binary and assets total ≤ 15 MB, excluding shared system
@@ -235,7 +288,8 @@ requirements define the finished product; there is no version staging.
 ### NFR-3 — Reliability & data safety
 
 - **NFR-3.1** Never corrupt or lose an image: delete only to trash, save
-  atomically (FR-5.5), and write only when explicitly requested.
+  atomically (FR-5.5), write only when explicitly requested, and never write
+  Quick Markup into the source.
 - **NFR-3.2** Malformed/hostile image files must not crash the app or
   execute code — decoding runs sandboxed/isolated from the app process.
 - **NFR-3.3** A decoder crash on one file shows the error state for that
@@ -258,7 +312,8 @@ requirements define the finished product; there is no version staging.
 - **NFR-5.1** Zero learning curve for the basics: open, scroll, arrows,
   `Delete`, `F`, `Q` behave as any user would guess.
 - **NFR-5.2** Discoverable: a `?` key shows a one-screen keybinding
-  cheat-sheet overlay; nothing else needs documentation.
+  cheat-sheet overlay, including Quick Markup controls; nothing else needs
+  documentation.
 - **NFR-5.3** All destructive-adjacent feedback (delete toast, save
   confirmation, errors) is glanceable and non-modal — no dialog ever
   interrupts flipping through photos.

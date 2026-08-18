@@ -18,6 +18,8 @@ use gtk::gsk;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
+use crate::annotation::{self, Point, Session, Status, Tool};
+
 pub const ZOOM_MIN: f64 = 0.05;
 pub const ZOOM_MAX: f64 = 20.0;
 
@@ -139,6 +141,7 @@ pub struct State {
     default_fit_actual: bool,
     pointer: (f64, f64),
     drag_origin: (f64, f64),
+    annotation: Option<Session>,
 }
 
 impl Default for State {
@@ -153,6 +156,7 @@ impl Default for State {
             default_fit_actual: false,
             pointer: (0.0, 0.0),
             drag_origin: (0.0, 0.0),
+            annotation: None,
         }
     }
 }
@@ -177,6 +181,8 @@ mod imp {
         /// Fired when a live source reports its dimensions; argument is
         /// the source size in logical pixels.
         pub(super) on_source_size: Callback<(f64, f64)>,
+        /// Fired after a Quick Markup command changes its tool or history.
+        pub(super) on_annotation_changed: Callback<Status>,
     }
 
     #[glib::object_subclass]
@@ -202,49 +208,39 @@ mod imp {
             let obj = self.obj();
             // Copy everything out of the state first: a foreign
             // paintable's snapshot must not run under our borrow.
-            let (paintable, source, dims, zoom, rotation, center) = {
+            let (paintable, transform, zoom) = {
                 let state = self.state.borrow();
                 let Some(paintable) = state.paintable.clone() else {
                     return;
                 };
-                let (w, h) = (obj.width() as f64, obj.height() as f64);
-                let (tw, th) = super::image_dims(&state, &paintable);
-                if w <= 0.0 || h <= 0.0 || tw <= 0.0 || th <= 0.0 {
+                let scale = obj.surface_scale();
+                let Some(transform) = super::view_transform_for(
+                    &state,
+                    &paintable,
+                    (obj.width() as f64, obj.height() as f64),
+                    scale,
+                ) else {
                     // Zero source size: a video paintable before preroll.
                     return;
-                }
-                let scale = obj.surface_scale();
-                let zoom = super::effective_zoom(&state, w, h, scale, tw, th);
-                // Displayed size in logical px (unrotated and rotated).
-                let (dw, dh) = (tw * zoom / scale, th * zoom / scale);
-                let (rw, rh) = if state.rotation % 2 == 1 {
-                    (dh, dw)
-                } else {
-                    (dw, dh)
                 };
-                let offset = super::clamp_offset(state.offset, rw, rh, w, h);
-
-                // Snap the image center to the physical pixel grid so a
-                // 100% view is never compositor-blurred (FR-4.7).
-                let cx = ((w / 2.0 + offset.0) * scale).round() / scale;
-                let cy = ((h / 2.0 + offset.1) * scale).round() / scale;
-                (
-                    paintable,
-                    (tw, th),
-                    (dw, dh),
-                    zoom,
-                    state.rotation,
-                    (cx, cy),
-                )
+                let zoom = transform.displayed.0 * scale / transform.source.0;
+                (paintable, transform, zoom)
             };
-            let (tw, th) = source;
-            let (dw, dh) = dims;
+            let (tw, th) = transform.source;
+            let (dw, dh) = transform.displayed;
 
             snapshot.save();
-            snapshot.translate(&graphene::Point::new(center.0 as f32, center.1 as f32));
-            if rotation != 0 {
-                snapshot.rotate(rotation as f32 * 90.0);
+            snapshot.translate(&graphene::Point::new(
+                transform.center.0 as f32,
+                transform.center.1 as f32,
+            ));
+            if transform.rotation != 0 {
+                snapshot.rotate(transform.rotation as f32 * 90.0);
             }
+            snapshot.translate(&graphene::Point::new(
+                (-dw / 2.0) as f32,
+                (-dh / 2.0) as f32,
+            ));
             if let Some(texture) = paintable.downcast_ref::<gtk::gdk::Texture>() {
                 // Still images pick the scaling filter explicitly so
                 // 100% stays pixel-exact and downscales stay smooth.
@@ -258,12 +254,7 @@ mod imp {
                 snapshot.append_scaled_texture(
                     texture,
                     filter,
-                    &graphene::Rect::new(
-                        (-dw / 2.0) as f32,
-                        (-dh / 2.0) as f32,
-                        dw as f32,
-                        dh as f32,
-                    ),
+                    &graphene::Rect::new(0.0, 0.0, dw as f32, dh as f32),
                 );
             } else {
                 // Compose the foreign paintable at its native size, then
@@ -277,13 +268,15 @@ mod imp {
                     scaled.scale((dw / tw) as f32, (dh / th) as f32);
                     scaled.append_node(&frame);
                     if let Some(scaled) = scaled.to_node() {
-                        snapshot.translate(&graphene::Point::new(
-                            (-dw / 2.0) as f32,
-                            (-dh / 2.0) as f32,
-                        ));
                         snapshot.append_node(&scaled);
                     }
                 }
+            }
+            // The foreign paintable has finished snapshotting before this
+            // borrow. GTK callbacks may re-enter the widget, so never hold
+            // its RefCell across paintable.snapshot above.
+            if let Some(session) = self.state.borrow().annotation.as_ref() {
+                annotation::append(snapshot, session, (tw, th), dw / tw, true);
             }
             snapshot.restore();
         }
@@ -335,6 +328,112 @@ fn clamp_offset(offset: (f64, f64), rw: f64, rh: f64, w: f64, h: f64) -> (f64, f
     (clamp1(offset.0, rw, w), clamp1(offset.1, rh, h))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ViewTransform {
+    source: (f64, f64),
+    displayed: (f64, f64),
+    center: (f64, f64),
+    rotation: u8,
+}
+
+impl ViewTransform {
+    /// Convert a widget point into decoded-image pixels. A drag must begin
+    /// inside the image; once begun, its endpoint clamps to the image so a
+    /// quick overshoot does not discard the annotation.
+    fn source_point(self, widget: (f64, f64), clamp: bool) -> Option<Point> {
+        let (mut x, mut y) = (widget.0 - self.center.0, widget.1 - self.center.1);
+        (x, y) = match self.rotation % 4 {
+            0 => (x, y),
+            1 => (y, -x),
+            2 => (-x, -y),
+            _ => (-y, x),
+        };
+        let source = Point::new(
+            (x + self.displayed.0 / 2.0) * self.source.0 / self.displayed.0,
+            (y + self.displayed.1 / 2.0) * self.source.1 / self.displayed.1,
+        );
+        let inside = source.x >= 0.0
+            && source.x <= self.source.0
+            && source.y >= 0.0
+            && source.y <= self.source.1;
+        if !inside && !clamp {
+            return None;
+        }
+        Some(Point::new(
+            source.x.clamp(0.0, self.source.0),
+            source.y.clamp(0.0, self.source.1),
+        ))
+    }
+
+    fn source_distance(self, logical_pixels: f64) -> f64 {
+        logical_pixels * self.source.0 / self.displayed.0
+    }
+}
+
+fn view_transform_for(
+    state: &State,
+    paintable: &gtk::gdk::Paintable,
+    viewport: (f64, f64),
+    surface_scale: f64,
+) -> Option<ViewTransform> {
+    let source = image_dims(state, paintable);
+    if viewport.0 <= 0.0
+        || viewport.1 <= 0.0
+        || source.0 <= 0.0
+        || source.1 <= 0.0
+        || surface_scale <= 0.0
+    {
+        return None;
+    }
+    let zoom = effective_zoom(
+        state,
+        viewport.0,
+        viewport.1,
+        surface_scale,
+        source.0,
+        source.1,
+    );
+    let displayed = (
+        source.0 * zoom / surface_scale,
+        source.1 * zoom / surface_scale,
+    );
+    let rotated = if state.rotation % 2 == 1 {
+        (displayed.1, displayed.0)
+    } else {
+        displayed
+    };
+    let offset = clamp_offset(state.offset, rotated.0, rotated.1, viewport.0, viewport.1);
+    let center = (
+        ((viewport.0 / 2.0 + offset.0) * surface_scale).round() / surface_scale,
+        ((viewport.1 / 2.0 + offset.1) * surface_scale).round() / surface_scale,
+    );
+    Some(ViewTransform {
+        source,
+        displayed,
+        center,
+        rotation: state.rotation,
+    })
+}
+
+#[derive(Debug)]
+pub enum MarkupCopyError {
+    NoImage,
+    NoAnnotations,
+    RendererUnavailable,
+    EmptyRender,
+}
+
+impl std::fmt::Display for MarkupCopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoImage => write!(f, "No image is available for Quick Markup"),
+            Self::NoAnnotations => write!(f, "Draw a box or arrow before copying"),
+            Self::RendererUnavailable => write!(f, "Cannot prepare the annotated image"),
+            Self::EmptyRender => write!(f, "The annotated image could not be rendered"),
+        }
+    }
+}
+
 impl ImageView {
     fn surface_scale(&self) -> f64 {
         self.native()
@@ -375,6 +474,7 @@ impl ImageView {
             st.fit_policy = fit_policy;
             st.rotation = 0;
             st.offset = (0.0, 0.0);
+            st.annotation = None;
             st.mode = if st.default_fit_actual {
                 Mode::Manual(1.0)
             } else {
@@ -433,6 +533,7 @@ impl ImageView {
             }
         }
         self.state().paintable = None;
+        self.state().annotation = None;
         self.queue_draw();
     }
 
@@ -471,6 +572,189 @@ impl ImageView {
     /// Current view rotation in quarter turns (0..4).
     pub fn rotation(&self) -> u8 {
         self.imp().state.borrow().rotation
+    }
+
+    fn view_transform(&self) -> Option<ViewTransform> {
+        let st = self.imp().state.borrow();
+        let paintable = st.paintable.as_ref()?;
+        view_transform_for(
+            &st,
+            paintable,
+            (self.width() as f64, self.height() as f64),
+            self.surface_scale(),
+        )
+    }
+
+    pub fn start_markup(&self) -> bool {
+        let mut st = self.state();
+        if !st
+            .paintable
+            .as_ref()
+            .is_some_and(|p| p.is::<gtk::gdk::Texture>())
+        {
+            return false;
+        }
+        st.annotation = Some(Session::default());
+        let status = st.annotation.as_ref().map(Session::status);
+        drop(st);
+        self.queue_draw();
+        if let Some(status) = status {
+            self.emit_annotation_changed(status);
+        }
+        true
+    }
+
+    pub fn cancel_markup(&self) -> bool {
+        let changed = self.state().annotation.take().is_some();
+        if changed {
+            self.queue_draw();
+        }
+        changed
+    }
+
+    pub fn is_marking_up(&self) -> bool {
+        self.imp().state.borrow().annotation.is_some()
+    }
+
+    pub fn contains_image_point(&self, x: f64, y: f64) -> bool {
+        self.view_transform()
+            .and_then(|transform| transform.source_point((x, y), false))
+            .is_some()
+    }
+
+    pub fn markup_has_draft(&self) -> bool {
+        self.imp()
+            .state
+            .borrow()
+            .annotation
+            .as_ref()
+            .is_some_and(Session::has_draft)
+    }
+
+    pub fn cancel_markup_draft(&self) -> bool {
+        let mut st = self.state();
+        let Some(session) = st.annotation.as_mut() else {
+            return false;
+        };
+        let changed = session.cancel_draft();
+        let status = session.status();
+        drop(st);
+        if changed {
+            self.queue_draw();
+            self.emit_annotation_changed(status);
+        }
+        changed
+    }
+
+    pub fn set_markup_tool(&self, tool: Tool) {
+        let status = {
+            let mut st = self.state();
+            let Some(session) = st.annotation.as_mut() else {
+                return;
+            };
+            session.set_tool(tool);
+            session.status()
+        };
+        self.queue_draw();
+        self.emit_annotation_changed(status);
+    }
+
+    pub fn undo_markup(&self) -> bool {
+        let status = {
+            let mut st = self.state();
+            let Some(session) = st.annotation.as_mut() else {
+                return false;
+            };
+            if !session.undo() {
+                return false;
+            }
+            session.status()
+        };
+        self.queue_draw();
+        self.emit_annotation_changed(status);
+        true
+    }
+
+    pub fn clear_markup(&self) -> bool {
+        let status = {
+            let mut st = self.state();
+            let Some(session) = st.annotation.as_mut() else {
+                return false;
+            };
+            if !session.clear() {
+                return false;
+            }
+            session.status()
+        };
+        self.queue_draw();
+        self.emit_annotation_changed(status);
+        true
+    }
+
+    pub fn markup_status(&self) -> Option<Status> {
+        self.imp()
+            .state
+            .borrow()
+            .annotation
+            .as_ref()
+            .map(Session::status)
+    }
+
+    /// Render only the decoded image and annotations at source resolution.
+    /// Window chrome, background, zoom and pan are deliberately absent.
+    pub fn annotated_texture(&self) -> Result<gtk::gdk::Texture, MarkupCopyError> {
+        let (texture, session, rotation) = {
+            let st = self.imp().state.borrow();
+            let texture = st
+                .paintable
+                .as_ref()
+                .and_then(|paintable| paintable.downcast_ref::<gtk::gdk::Texture>())
+                .cloned()
+                .ok_or(MarkupCopyError::NoImage)?;
+            let session = st.annotation.clone().ok_or(MarkupCopyError::NoImage)?;
+            if session.status().shape_count == 0 {
+                return Err(MarkupCopyError::NoAnnotations);
+            }
+            (texture, session, st.rotation)
+        };
+        let (width, height) = (texture.width() as f64, texture.height() as f64);
+        let (output_width, output_height) = if rotation % 2 == 1 {
+            (height, width)
+        } else {
+            (width, height)
+        };
+
+        let snapshot = gtk::Snapshot::new();
+        snapshot.translate(&graphene::Point::new(
+            (output_width / 2.0) as f32,
+            (output_height / 2.0) as f32,
+        ));
+        if rotation != 0 {
+            snapshot.rotate(rotation as f32 * 90.0);
+        }
+        snapshot.translate(&graphene::Point::new(
+            (-width / 2.0) as f32,
+            (-height / 2.0) as f32,
+        ));
+        snapshot.append_texture(
+            &texture,
+            &graphene::Rect::new(0.0, 0.0, width as f32, height as f32),
+        );
+        annotation::append(&snapshot, &session, (width, height), 1.0, false);
+        let node = snapshot.to_node().ok_or(MarkupCopyError::EmptyRender)?;
+        let renderer = self
+            .native()
+            .and_then(|native| native.renderer())
+            .ok_or(MarkupCopyError::RendererUnavailable)?;
+        Ok(renderer.render_texture(
+            &node,
+            Some(&graphene::Rect::new(
+                0.0,
+                0.0,
+                output_width as f32,
+                output_height as f32,
+            )),
+        ))
     }
 
     /// On-screen size of the image in logical pixels, after zoom and
@@ -585,10 +869,20 @@ impl ImageView {
         *self.imp().on_navigate.borrow_mut() = Some(Box::new(f));
     }
 
+    pub fn connect_annotation_changed(&self, f: impl Fn(Status) + 'static) {
+        *self.imp().on_annotation_changed.borrow_mut() = Some(Box::new(f));
+    }
+
     fn emit_view_changed(&self) {
         let percent = self.zoom_percent();
         if let Some(f) = self.imp().on_view_changed.borrow().as_ref() {
             f(percent);
+        }
+    }
+
+    fn emit_annotation_changed(&self, status: Status) {
+        if let Some(f) = self.imp().on_annotation_changed.borrow().as_ref() {
+            f(status);
         }
     }
 
@@ -634,7 +928,9 @@ impl ImageView {
                 let action = gesture.borrow_mut().event(controller.unit(), dx, dy);
                 match action {
                     ScrollAction::Navigate(dir) => {
-                        if let Some(f) = view.imp().on_navigate.borrow().as_ref() {
+                        if !view.is_marking_up()
+                            && let Some(f) = view.imp().on_navigate.borrow().as_ref()
+                        {
                             f(dir);
                         }
                     }
@@ -649,6 +945,87 @@ impl ImageView {
         ));
         self.add_controller(scroll);
 
+        // Quick Markup owns primary drag while active. Capture phase puts
+        // it ahead of the ordinary pan and window-move gestures, while the
+        // window's resize-edge capture still wins at the outer margin.
+        let markup_drag = gtk::GestureDrag::new();
+        markup_drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+        markup_drag.connect_drag_begin(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |gesture, x, y| {
+                if !view.is_marking_up() {
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                    return;
+                }
+                let Some(point) = view
+                    .view_transform()
+                    .and_then(|transform| transform.source_point((x, y), false))
+                else {
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                    return;
+                };
+                let began = view
+                    .state()
+                    .annotation
+                    .as_mut()
+                    .is_some_and(|session| session.begin(point));
+                if began {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    view.queue_draw();
+                    if let Some(status) = view.markup_status() {
+                        view.emit_annotation_changed(status);
+                    }
+                }
+            }
+        ));
+        markup_drag.connect_drag_update(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |gesture, dx, dy| {
+                if !view.markup_has_draft() {
+                    return;
+                }
+                let (start_x, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
+                let Some(point) = view.view_transform().and_then(|transform| {
+                    transform.source_point((start_x + dx, start_y + dy), true)
+                }) else {
+                    return;
+                };
+                if let Some(session) = view.state().annotation.as_mut() {
+                    session.update(point);
+                }
+                view.queue_draw();
+            }
+        ));
+        markup_drag.connect_drag_end(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_, _, _| {
+                let minimum = view
+                    .view_transform()
+                    .map_or(3.0, |transform| transform.source_distance(3.0));
+                {
+                    let mut st = view.state();
+                    if let Some(session) = st.annotation.as_mut() {
+                        session.commit(minimum);
+                    }
+                }
+                view.queue_draw();
+                if let Some(status) = view.markup_status() {
+                    view.emit_annotation_changed(status);
+                }
+            }
+        ));
+        markup_drag.connect_cancel(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_, _| {
+                view.cancel_markup_draft();
+            }
+        ));
+        self.add_controller(markup_drag);
+
         // Drag pans when the image overflows the viewport; otherwise the
         // gesture is denied so the window's drag-to-move can take over
         // (FR-6.4).
@@ -657,7 +1034,9 @@ impl ImageView {
             #[weak(rename_to = view)]
             self,
             move |gesture, _, _| {
-                if view.is_pannable() {
+                if view.is_marking_up() {
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                } else if view.is_pannable() {
                     // Single borrow: the RHS temporary of a two-borrow
                     // assignment lives until end of statement and aborts
                     // the process inside this non-unwinding GTK callback.
@@ -838,5 +1217,50 @@ mod tests {
         // Image overflows: clamped to edges.
         let (ox, oy) = clamp_offset((500.0, -500.0), 800.0, 800.0, 400.0, 400.0);
         assert_eq!((ox, oy), (200.0, -200.0));
+    }
+
+    #[test]
+    fn markup_points_follow_every_view_rotation() {
+        let transform = |rotation| ViewTransform {
+            source: (100.0, 50.0),
+            displayed: (100.0, 50.0),
+            center: (200.0, 100.0),
+            rotation,
+        };
+        for rotation in 0..4 {
+            assert_eq!(
+                transform(rotation).source_point((200.0, 100.0), false),
+                Some(Point::new(50.0, 25.0)),
+                "image centre at rotation {rotation}"
+            );
+        }
+        for (rotation, widget_top_left) in [
+            (0, (150.0, 75.0)),
+            (1, (225.0, 50.0)),
+            (2, (250.0, 125.0)),
+            (3, (175.0, 150.0)),
+        ] {
+            assert_eq!(
+                transform(rotation).source_point(widget_top_left, false),
+                Some(Point::new(0.0, 0.0)),
+                "source top-left at rotation {rotation}"
+            );
+        }
+    }
+
+    #[test]
+    fn markup_drag_must_start_inside_but_endpoint_clamps() {
+        let transform = ViewTransform {
+            source: (100.0, 50.0),
+            displayed: (50.0, 25.0),
+            center: (200.0, 100.0),
+            rotation: 0,
+        };
+        assert_eq!(transform.source_point((100.0, 20.0), false), None);
+        assert_eq!(
+            transform.source_point((100.0, 20.0), true),
+            Some(Point::new(0.0, 0.0))
+        );
+        assert_eq!(transform.source_distance(3.0), 6.0);
     }
 }

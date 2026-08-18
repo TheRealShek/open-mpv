@@ -18,6 +18,7 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::prelude::*;
 
+use crate::annotation::{MAX_SHAPES, Status as MarkupStatus, Tool as MarkupTool};
 use crate::config::{self, Config, FitMode, SubtitleMode};
 use crate::fileops;
 use crate::folder::Folder;
@@ -60,6 +61,11 @@ enum Action {
     ZoomToggle,
     RotateClockwise,
     RotateCounterclockwise,
+    Markup,
+    MarkupBox,
+    MarkupArrow,
+    MarkupCopy,
+    MarkupClear,
     Save,
     Trash,
     Undo,
@@ -101,6 +107,11 @@ impl Action {
             Action::ZoomToggle => "zoom-toggle",
             Action::RotateClockwise => "rotate-cw",
             Action::RotateCounterclockwise => "rotate-ccw",
+            Action::Markup => "markup",
+            Action::MarkupBox => "markup-box",
+            Action::MarkupArrow => "markup-arrow",
+            Action::MarkupCopy => "markup-copy",
+            Action::MarkupClear => "markup-clear",
             Action::Save => "save",
             Action::Trash => "trash",
             Action::Undo => "undo",
@@ -147,6 +158,11 @@ const DEFAULT_BINDS: &[(&str, Action)] = &[
     ("z", Action::ZoomToggle),
     ("r", Action::RotateClockwise),
     ("<Shift>r", Action::RotateCounterclockwise),
+    ("a", Action::Markup),
+    ("b", Action::MarkupBox),
+    ("<Shift>a", Action::MarkupArrow),
+    ("<Control>c", Action::MarkupCopy),
+    ("c", Action::MarkupClear),
     ("s", Action::Save),
     // Video transport (FR-10.4), mpv-flavored.
     ("j", Action::SeekBack),
@@ -206,9 +222,14 @@ const ACTIONS: &[(Action, &str)] = &[
     (Action::ZoomToggle, "Toggle fit and 100%"),
     (Action::RotateClockwise, "Rotate right"),
     (Action::RotateCounterclockwise, "Rotate left"),
+    (Action::Markup, "Start or cancel Quick Markup"),
+    (Action::MarkupBox, "Quick Markup box tool"),
+    (Action::MarkupArrow, "Quick Markup arrow tool"),
+    (Action::MarkupCopy, "Copy the annotated image"),
+    (Action::MarkupClear, "Clear all annotations"),
     (Action::Save, "Save rotation to the file"),
     (Action::Trash, "Move to trash"),
-    (Action::Undo, "Undo the delete"),
+    (Action::Undo, "Undo delete or last annotation"),
     (Action::Fullscreen, "Fullscreen"),
     (Action::Help, "This list"),
     (Action::Close, "Quit"),
@@ -321,7 +342,14 @@ pub struct App {
     info_bar: gtk::Box,
     name_label: gtk::Label,
     pos_label: gtk::Label,
+    prev_btn: gtk::Button,
+    next_btn: gtk::Button,
+    normal_controls: gtk::Box,
     photo_controls: gtk::Box,
+    markup_btn: gtk::Button,
+    markup_controls: gtk::Box,
+    markup_box_btn: gtk::ToggleButton,
+    markup_arrow_btn: gtk::ToggleButton,
     transport: gtk::Box,
     play_btn: gtk::Button,
     mute_btn: gtk::Button,
@@ -329,6 +357,7 @@ pub struct App {
     speed_label: gtk::Label,
     speed_action: gio::SimpleAction,
     subtitle_btn: gtk::MenuButton,
+    markup_context_menu: gio::Menu,
     subtitle_menu: gio::Menu,
     subtitle_context_menu: gio::Menu,
     subtitle_action: gio::SimpleAction,
@@ -379,6 +408,11 @@ pub struct App {
     indicator_timer: TimerSlot,
     toast_timer: TimerSlot,
     svg_timer: TimerSlot,
+    markup_action: gio::SimpleAction,
+    markup_box_action: gio::SimpleAction,
+    markup_arrow_action: gio::SimpleAction,
+    markup_copy_action: gio::SimpleAction,
+    markup_clear_action: gio::SimpleAction,
     save_action: gio::SimpleAction,
     undo_action: gio::SimpleAction,
 }
@@ -472,6 +506,8 @@ impl App {
         bar.add_css_class("osd-bar");
         bar.set_halign(gtk::Align::Center);
         bar.set_valign(gtk::Align::End);
+        let normal_controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        bar.append(&normal_controls);
         // Video transport: seek bar + position, hidden for images
         // (FR-10.5). The position tick runs only while this is visible.
         let seek_bar = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.01);
@@ -519,7 +555,7 @@ impl App {
         transport.append(&subtitle_btn);
         transport.append(&mute_btn);
         transport.set_visible(false);
-        bar.append(&transport);
+        normal_controls.append(&transport);
 
         let photo_controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let rotate_ccw = bar_button(
@@ -534,6 +570,8 @@ impl App {
         );
         photo_controls.append(&rotate_ccw);
         photo_controls.append(&rotate_cw);
+        let markup_btn = bar_button("document-edit-symbolic", "win.markup", "Quick Markup");
+        photo_controls.append(&markup_btn);
         // Save appears only once an editable image has a pending rotation;
         // an inert floppy icon reads as a broken control (FR-5.4).
         let save_btn = bar_button(
@@ -544,11 +582,11 @@ impl App {
         save_btn.set_visible(false);
         photo_controls.append(&save_btn);
         photo_controls.set_visible(false);
-        bar.append(&photo_controls);
+        normal_controls.append(&photo_controls);
 
         let separator = gtk::Separator::new(gtk::Orientation::Vertical);
-        bar.append(&separator);
-        bar.append(&bar_button(
+        normal_controls.append(&separator);
+        normal_controls.append(&bar_button(
             "user-trash-symbolic",
             "win.trash",
             "Move to trash",
@@ -565,6 +603,10 @@ impl App {
         more_menu.append(Some("Rotate Right"), Some("win.rotate-cw"));
         more_menu.append(Some("First File"), Some("win.first"));
         more_menu.append(Some("Last File"), Some("win.last"));
+        // Filled only for decoded static raster images (FR-11.1). A disabled
+        // editing item on video or animation would imply future support.
+        let markup_context_menu = gio::Menu::new();
+        more_menu.append_section(None, &markup_context_menu);
         // Filled only while a video is active. The same subtitle model is
         // shared with the CC button, so right-click and the transport never
         // disagree about available tracks (FR-10.7).
@@ -577,7 +619,56 @@ impl App {
             .tooltip_text("More controls")
             .build();
         more_btn.add_css_class("flat");
-        bar.append(&more_btn);
+        normal_controls.append(&more_btn);
+
+        // Quick Markup is a focused mode: replace the normal controls so
+        // navigation and file operations are not sitting beside a drawing
+        // gesture that temporarily changes what primary drag means.
+        let markup_controls = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        markup_controls.add_css_class("markup-controls");
+        let markup_tools = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        markup_tools.set_halign(gtk::Align::Center);
+        let markup_decisions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        markup_decisions.set_halign(gtk::Align::Center);
+        let markup_box_btn = gtk::ToggleButton::with_label("Box");
+        markup_box_btn.set_action_name(Some("win.markup-box"));
+        markup_box_btn.set_tooltip_text(Some("Draw a box (B)"));
+        markup_box_btn.add_css_class("flat");
+        markup_box_btn.set_active(true);
+        let markup_arrow_btn = gtk::ToggleButton::with_label("Arrow");
+        markup_arrow_btn.set_group(Some(&markup_box_btn));
+        markup_arrow_btn.set_action_name(Some("win.markup-arrow"));
+        markup_arrow_btn.set_tooltip_text(Some("Draw an arrow (Shift+A)"));
+        markup_arrow_btn.add_css_class("flat");
+        markup_tools.append(&markup_box_btn);
+        markup_tools.append(&markup_arrow_btn);
+        markup_tools.append(&bar_button(
+            "edit-undo-symbolic",
+            "win.undo",
+            "Undo last annotation (Ctrl+Z)",
+        ));
+        markup_decisions.append(&bar_button(
+            "edit-clear-all-symbolic",
+            "win.markup-clear",
+            "Clear all annotations; Ctrl+Z restores them (C)",
+        ));
+        markup_decisions.append(&bar_button(
+            "process-stop-symbolic",
+            "win.markup",
+            "Cancel Quick Markup (A or Escape)",
+        ));
+        let copy_markup_btn = bar_button(
+            "edit-copy-symbolic",
+            "win.markup-copy",
+            "Copy annotated image (Ctrl+C)",
+        );
+        copy_markup_btn.remove_css_class("flat");
+        copy_markup_btn.add_css_class("suggested-action");
+        markup_decisions.append(&copy_markup_btn);
+        markup_controls.append(&markup_tools);
+        markup_controls.append(&markup_decisions);
+        markup_controls.set_visible(false);
+        bar.append(&markup_controls);
 
         // The same commands are also a contextual menu on the medium.
         // It is parented to the view so its pointing rectangle uses the
@@ -662,7 +753,14 @@ impl App {
             info_bar: info_bar.clone(),
             name_label,
             pos_label,
+            prev_btn: prev_btn.clone(),
+            next_btn: next_btn.clone(),
+            normal_controls,
             photo_controls,
+            markup_btn,
+            markup_controls,
+            markup_box_btn,
+            markup_arrow_btn,
             transport,
             play_btn,
             mute_btn,
@@ -670,6 +768,7 @@ impl App {
             speed_label,
             speed_action,
             subtitle_btn: subtitle_btn.clone(),
+            markup_context_menu,
             subtitle_menu,
             subtitle_context_menu,
             subtitle_action,
@@ -703,6 +802,11 @@ impl App {
             indicator_timer: TimerSlot::default(),
             toast_timer: TimerSlot::default(),
             svg_timer: TimerSlot::default(),
+            markup_action: gio::SimpleAction::new(Action::Markup.as_str(), None),
+            markup_box_action: gio::SimpleAction::new(Action::MarkupBox.as_str(), None),
+            markup_arrow_action: gio::SimpleAction::new(Action::MarkupArrow.as_str(), None),
+            markup_copy_action: gio::SimpleAction::new(Action::MarkupCopy.as_str(), None),
+            markup_clear_action: gio::SimpleAction::new(Action::MarkupClear.as_str(), None),
             save_action: gio::SimpleAction::new(Action::Save.as_str(), None),
             undo_action: gio::SimpleAction::new(Action::Undo.as_str(), None),
             cfg,
@@ -775,7 +879,7 @@ impl App {
                     *app.media.borrow(),
                     MediaState::Image { .. } | MediaState::Video(_)
                 );
-                if !showing_media {
+                if !showing_media || app.view.is_marking_up() {
                     return;
                 }
                 gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -857,6 +961,11 @@ impl App {
                 app.schedule_svg_rerender();
             }
         ));
+        app.view.connect_annotation_changed(clone!(
+            #[strong]
+            app,
+            move |status| app.on_markup_changed(status)
+        ));
         app.view.connect_navigate(clone!(
             #[strong]
             app,
@@ -908,6 +1017,9 @@ impl App {
     }
 
     fn choose_media_file(self: &Rc<Self>) {
+        if self.markup_blocks_normal_action() {
+            return;
+        }
         let filter = supported_media_filter();
         let filters = gio::ListStore::new::<gtk::FileFilter>();
         filters.append(&filter);
@@ -944,6 +1056,9 @@ impl App {
     }
 
     fn choose_folder(self: &Rc<Self>) {
+        if self.markup_blocks_normal_action() {
+            return;
+        }
         let dialog = gtk::FileDialog::new();
         dialog.set_title("Open Folder");
         dialog.set_accept_label(Some("Open"));
@@ -1025,6 +1140,9 @@ impl App {
     // ----- showing images ----------------------------------------------
 
     fn show_index(self: &Rc<Self>, idx: usize, arrival: Arrival) {
+        if self.view.cancel_markup() {
+            self.update_cursor();
+        }
         let Some(path) = self
             .folder
             .borrow()
@@ -1515,6 +1633,10 @@ impl App {
         let (x, y) = self.pointer.get();
         let name = cursor_name(
             self.resize_edge(x, y),
+            self.view.is_marking_up()
+                && self.view.contains_image_point(x, y)
+                && !self.pointer_on_chrome.get()
+                && !self.pointer_on_status.get(),
             self.chrome_visible(),
             self.cfg.hide_cursor,
         );
@@ -1563,6 +1685,13 @@ impl App {
         matches!(*self.media.borrow(), MediaState::Video(_))
     }
 
+    fn markup_available(&self) -> bool {
+        matches!(
+            &*self.media.borrow(),
+            MediaState::Image { decoded, .. } if matches!(&**decoded, Decoded::Static { .. })
+        )
+    }
+
     /// Only controls relevant to the current medium occupy the bottom
     /// strip. Loading and error states leave the image unobstructed.
     fn update_control_mode(&self) {
@@ -1571,12 +1700,96 @@ impl App {
         let video = matches!(*media, MediaState::Video(_));
         drop(media);
 
-        self.photo_controls.set_visible(photo);
-        self.transport.set_visible(video);
-        self.subtitle_btn.set_visible(video);
+        let marking = self.view.is_marking_up();
+        let markup_available = self.markup_available();
+        let status = self.view.markup_status();
+        let has_shapes = status.is_some_and(|status| status.shape_count > 0);
+        let can_copy = has_shapes && !self.view.markup_has_draft();
+
+        self.normal_controls.set_visible(!marking);
+        self.photo_controls.set_visible(photo && !marking);
+        self.transport.set_visible(video && !marking);
+        self.subtitle_btn.set_visible(video && !marking);
+        self.markup_btn.set_visible(markup_available);
+        self.markup_controls.set_visible(marking);
+        self.toast_revealer
+            .set_margin_bottom(if marking { 100 } else { 56 });
+        self.prev_btn.set_visible(!marking);
+        self.next_btn.set_visible(!marking);
+        rebuild_markup_context(&self.markup_context_menu, markup_available);
         rebuild_subtitle_context(&self.subtitle_context_menu, &self.subtitle_menu, video);
-        self.control_bar.set_visible(photo || video);
+        self.control_bar.set_visible(photo || video || marking);
+        self.markup_action.set_enabled(markup_available || marking);
+        self.markup_box_action.set_enabled(marking);
+        self.markup_arrow_action.set_enabled(marking);
+        self.markup_copy_action.set_enabled(marking && can_copy);
+        self.markup_clear_action.set_enabled(marking && has_shapes);
+        if let Some(status) = status {
+            self.markup_box_btn
+                .set_active(status.tool == MarkupTool::Box);
+            self.markup_arrow_btn
+                .set_active(status.tool == MarkupTool::Arrow);
+        }
+        self.update_undo_enabled();
         self.fitted_for.set(None);
+    }
+
+    fn toggle_markup(self: &Rc<Self>) {
+        if self.view.cancel_markup() {
+            self.update_control_mode();
+            self.show_chrome();
+            self.update_cursor();
+            return;
+        }
+        if !self.markup_available() || !self.view.start_markup() {
+            self.show_toast("Quick Markup is available for static images only", false);
+            return;
+        }
+        // A previous trash toast describes another workflow. Keep its
+        // timed restoration state, but remove the visual competition with
+        // the focused markup toolbar.
+        self.toast_revealer.set_reveal_child(false);
+        self.toast_undo.set_visible(false);
+        self.update_control_mode();
+        self.show_chrome();
+        self.update_cursor();
+    }
+
+    fn on_markup_changed(self: &Rc<Self>, status: MarkupStatus) {
+        self.update_control_mode();
+        self.show_chrome();
+        if status.shape_count == MAX_SHAPES {
+            self.show_toast("Quick Markup limit reached; undo or clear a shape", false);
+        }
+    }
+
+    fn copy_markup(self: &Rc<Self>) {
+        let started = std::time::Instant::now();
+        match self.view.annotated_texture() {
+            Ok(texture) => {
+                let (width, height) = (texture.width(), texture.height());
+                self.win.clipboard().set_texture(&texture);
+                self.view.cancel_markup();
+                self.update_control_mode();
+                self.update_cursor();
+                crate::applog!(
+                    "markup: copied {}x{} in {:.1} ms",
+                    width,
+                    height,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+                self.show_toast("Annotated image copied", false);
+            }
+            Err(error) => self.show_toast(&error.to_string(), false),
+        }
+    }
+
+    fn markup_blocks_normal_action(self: &Rc<Self>) -> bool {
+        if !self.view.is_marking_up() {
+            return false;
+        }
+        self.flash("Copy or cancel Quick Markup first");
+        true
     }
 
     fn on_player_event(self: &Rc<Self>, event: player::Event) {
@@ -1903,6 +2116,9 @@ impl App {
     }
 
     fn navigate(self: &Rc<Self>, direction: Direction) {
+        if self.markup_blocks_normal_action() {
+            return;
+        }
         let target = {
             let folder = self.folder.borrow();
             let current = self.current_index();
@@ -1948,6 +2164,9 @@ impl App {
             // Moving the view right means moving the image left.
             self.view
                 .pan_by(-f64::from(dx) * PAN_STEP, -f64::from(dy) * PAN_STEP);
+        } else if self.view.is_marking_up() {
+            // At fit there is nowhere to pan. Never reinterpret an arrow
+            // as navigation or volume while the image owns transient work.
         } else if dx != 0 {
             self.navigate(if dx > 0 {
                 Direction::Next
@@ -2050,6 +2269,9 @@ impl App {
     // ----- file operations (FR-5) --------------------------------------
 
     fn trash_current(self: &Rc<Self>) {
+        if self.markup_blocks_normal_action() {
+            return;
+        }
         let Some(path) = self.current_path() else {
             return;
         };
@@ -2144,6 +2366,9 @@ impl App {
     }
 
     fn save_rotation(self: &Rc<Self>) {
+        if self.markup_blocks_normal_action() {
+            return;
+        }
         let rotation = self.view.rotation();
         let Some(path) = self.current_path() else {
             return;
@@ -2211,7 +2436,8 @@ impl App {
         // `set_enabled` can emit into application code; never hold a
         // RefCell borrow across that framework boundary.
         drop(media);
-        let enabled = save_control_visible(reason.is_none(), self.view.rotation());
+        let enabled = !self.view.is_marking_up()
+            && save_control_visible(reason.is_none(), self.view.rotation());
         self.save_action.set_enabled(enabled);
         self.save_btn.set_visible(enabled);
         self.save_btn.set_tooltip_text(Some(&match reason {
@@ -2248,11 +2474,13 @@ impl App {
         // Never pull the controls out from under the pointer: mid-scrub,
         // or while it simply rests on them. Both paths restart the
         // fade-out when the pointer is done.
-        if chrome_is_held(
-            self.scrubbing.get(),
-            self.pointer_on_chrome.get() || self.pointer_on_status.get(),
-            self.menu_open.get(),
-        ) {
+        if self.view.is_marking_up()
+            || chrome_is_held(
+                self.scrubbing.get(),
+                self.pointer_on_chrome.get() || self.pointer_on_status.get(),
+                self.menu_open.get(),
+            )
+        {
             return;
         }
         for w in &self.chrome {
@@ -2326,7 +2554,7 @@ impl App {
     fn show_toast(self: &Rc<Self>, text: &str, with_undo: bool) {
         self.toast_label.set_text(text);
         self.toast_undo.set_visible(with_undo);
-        self.undo_action.set_enabled(with_undo);
+        self.update_undo_enabled();
         self.toast_revealer.set_reveal_child(true);
         reset_timer(
             &self.toast_timer,
@@ -2335,9 +2563,9 @@ impl App {
                 #[strong(rename_to = app)]
                 self,
                 move || {
-                    app.hide_toast();
                     // The undo window lapses; the file stays in trash.
                     *app.pending_undo.borrow_mut() = None;
+                    app.hide_toast();
                 }
             ),
         );
@@ -2345,7 +2573,16 @@ impl App {
 
     fn hide_toast(&self) {
         self.toast_revealer.set_reveal_child(false);
-        self.undo_action.set_enabled(false);
+        self.update_undo_enabled();
+    }
+
+    fn update_undo_enabled(&self) {
+        let markup_undo = self
+            .view
+            .markup_status()
+            .is_some_and(|status| status.can_undo);
+        let trash_undo = !self.view.is_marking_up() && self.pending_undo.borrow().is_some();
+        self.undo_action.set_enabled(markup_undo || trash_undo);
     }
 
     // ----- actions and input -------------------------------------------
@@ -2374,6 +2611,9 @@ impl App {
         add(
             Action::First,
             Box::new(|a| {
+                if a.markup_blocks_normal_action() {
+                    return;
+                }
                 if a.folder.borrow().as_ref().is_some_and(|f| !f.is_empty()) {
                     a.show_index(0, Arrival::Direct);
                 }
@@ -2382,6 +2622,9 @@ impl App {
         add(
             Action::Last,
             Box::new(|a| {
+                if a.markup_blocks_normal_action() {
+                    return;
+                }
                 let len = a.folder.borrow().as_ref().map_or(0, Folder::len);
                 if len > 0 {
                     a.show_index(len - 1, Arrival::Direct);
@@ -2393,10 +2636,21 @@ impl App {
         add(Action::ZoomFit, Box::new(|a| a.view.zoom_fit()));
         add(Action::ZoomActual, Box::new(|a| a.view.zoom_to(1.0, None)));
         add(Action::ZoomToggle, Box::new(|a| a.view.toggle_fit_actual()));
-        add(Action::RotateClockwise, Box::new(|a| a.view.rotate_view(1)));
+        add(
+            Action::RotateClockwise,
+            Box::new(|a| {
+                if !a.markup_blocks_normal_action() {
+                    a.view.rotate_view(1);
+                }
+            }),
+        );
         add(
             Action::RotateCounterclockwise,
-            Box::new(|a| a.view.rotate_view(-1)),
+            Box::new(|a| {
+                if !a.markup_blocks_normal_action() {
+                    a.view.rotate_view(-1);
+                }
+            }),
         );
         add(
             Action::PlayPause,
@@ -2493,7 +2747,13 @@ impl App {
         add(
             Action::Escape,
             Box::new(|a| {
-                if a.help_label.is_visible() {
+                if a.view.cancel_markup_draft() {
+                    a.update_undo_enabled();
+                } else if a.view.cancel_markup() {
+                    a.update_control_mode();
+                    a.show_chrome();
+                    a.update_cursor();
+                } else if a.help_label.is_visible() {
                     a.help_label.set_visible(false);
                 } else if a.win.is_fullscreen() {
                     a.win.unfullscreen();
@@ -2504,6 +2764,34 @@ impl App {
         );
 
         let app = self.clone();
+        self.markup_action
+            .connect_activate(move |_, _| app.toggle_markup());
+        self.win.add_action(&self.markup_action);
+
+        let app = self.clone();
+        self.markup_box_action.connect_activate(move |_, _| {
+            app.view.set_markup_tool(MarkupTool::Box);
+        });
+        self.win.add_action(&self.markup_box_action);
+
+        let app = self.clone();
+        self.markup_arrow_action.connect_activate(move |_, _| {
+            app.view.set_markup_tool(MarkupTool::Arrow);
+        });
+        self.win.add_action(&self.markup_arrow_action);
+
+        let app = self.clone();
+        self.markup_copy_action
+            .connect_activate(move |_, _| app.copy_markup());
+        self.win.add_action(&self.markup_copy_action);
+
+        let app = self.clone();
+        self.markup_clear_action.connect_activate(move |_, _| {
+            app.view.clear_markup();
+        });
+        self.win.add_action(&self.markup_clear_action);
+
+        let app = self.clone();
         self.save_action.set_enabled(false);
         self.save_action
             .connect_activate(move |_, _| app.save_rotation());
@@ -2511,8 +2799,14 @@ impl App {
 
         let app = self.clone();
         self.undo_action.set_enabled(false);
-        self.undo_action
-            .connect_activate(move |_, _| app.undo_trash());
+        self.undo_action.connect_activate(move |_, _| {
+            if app.view.is_marking_up() {
+                app.view.undo_markup();
+                app.update_undo_enabled();
+            } else {
+                app.undo_trash();
+            }
+        });
         self.win.add_action(&self.undo_action);
 
         let app = self.clone();
@@ -2582,6 +2876,7 @@ impl App {
         for (action, keys) in &action_to_keys {
             gtk_app.set_accels_for_action(&format!("win.{}", action.as_str()), keys);
         }
+        self.update_control_mode();
     }
 
     fn build_help(&self, gtk_app: &gtk::Application) {
@@ -2616,7 +2911,9 @@ impl App {
                 .map(|(keys, description)| help_line(keys, description, width)),
         );
         lines.push(String::new());
-        lines.push("<tt>Escape</tt> leaves fullscreen, then closes".to_string());
+        lines.push(
+            "<tt>Escape</tt> cancels Quick Markup, leaves fullscreen, then closes".to_string(),
+        );
         lines.push("Scroll: zoom · horizontal scroll: navigate".to_string());
         lines.push("Drag: pan (zoomed) or move window · double-click: fullscreen".to_string());
         lines.push("Drag an edge or corner: resize the window".to_string());
@@ -2694,7 +2991,10 @@ impl App {
             hover.connect_enter(clone!(
                 #[strong(rename_to = app)]
                 self,
-                move |_, _, _| app.pointer_on_chrome.set(true)
+                move |_, _, _| {
+                    app.pointer_on_chrome.set(true);
+                    app.update_cursor();
+                }
             ));
             hover.connect_leave(clone!(
                 #[strong(rename_to = app)]
@@ -2702,6 +3002,7 @@ impl App {
                 move |_| {
                     app.pointer_on_chrome.set(false);
                     app.show_chrome();
+                    app.update_cursor();
                 }
             ));
             w.add_controller(hover);
@@ -2731,7 +3032,7 @@ impl App {
             #[strong(rename_to = app)]
             self,
             move |_, n_press, _, _| {
-                if n_press == 2 {
+                if n_press == 2 && !app.view.is_marking_up() {
                     WidgetExt::activate_action(&app.win, "win.fullscreen", None).ok();
                 }
             }
@@ -2761,6 +3062,9 @@ impl App {
             #[strong]
             began,
             move |gesture, dx, dy| {
+                if app.view.is_marking_up() {
+                    return;
+                }
                 if began.get() || (dx * dx + dy * dy) < 36.0 {
                     return;
                 }
@@ -2962,6 +3266,13 @@ fn rebuild_subtitle_context(context: &gio::Menu, subtitles: &gio::Menu, video: b
     }
 }
 
+fn rebuild_markup_context(context: &gio::Menu, available: bool) {
+    context.remove_all();
+    if available {
+        context.append(Some("Quick Markup"), Some("win.markup"));
+    }
+}
+
 /// Recognise common subtitle extensions that are deliberately outside the
 /// supported SRT/WebVTT boundary, so dropping one reports non-modally rather
 /// than replacing the current video with an unsupported-file error.
@@ -2999,6 +3310,7 @@ fn apply_css(background: &str) {
         .indicator.invisible {{ opacity: 0; }}
         .osd-btn {{ background-image: none; border: none; box-shadow: none; }}
         .osd-bar {{ padding: 4px 6px; margin: 12px; }}
+        .markup-controls button:checked {{ background-color: rgba(255, 255, 255, 0.22); }}
         .osd-bar separator {{ min-width: 1px; margin: 5px 2px;
             background-color: rgba(255, 255, 255, 0.2); }}
         .toast {{ background-color: rgba(25, 25, 25, 0.92); color: #eeeeee;
@@ -3130,15 +3442,17 @@ fn resize_edge_at(x: f64, y: f64, w: f64, h: f64) -> Option<gdk::SurfaceEdge> {
 }
 
 /// The cursor to show: the resize arrow wins wherever there is an edge to
-/// grab, so the border stays discoverable even after the overlay fades;
-/// otherwise the pointer goes away with the controls (mpv-style).
+/// grab, then Quick Markup uses a crosshair over the image, and otherwise
+/// the pointer goes away with the controls (mpv-style).
 fn cursor_name(
     edge: Option<gdk::SurfaceEdge>,
+    marking_up: bool,
     chrome_visible: bool,
     hide_cursor: bool,
 ) -> Option<&'static str> {
     match edge {
         Some(edge) => Some(edge_cursor_name(edge)),
+        None if marking_up => Some("crosshair"),
         // Only once the controls are gone: a pointer that vanishes while
         // there are still buttons to aim at is just lost.
         None if hide_cursor && !chrome_visible => Some("none"),
@@ -3213,9 +3527,9 @@ mod tests {
         SKIP_BUDGET, adjacent_playback_rate, cache_budget_bytes, chrome_is_held,
         dialog_initial_folder_path, dialog_was_cancelled, excluded_path_message,
         format_playback_rate, format_time, looks_like_subtitle, nav_target, open_menu_model,
-        playback_speed_menu, position_text, rebuild_subtitle_context, rebuild_subtitle_menu,
-        resize_edge_at, save_control_visible, skip_target, supported_media_extensions,
-        svg_render_dimension, window_dimension,
+        playback_speed_menu, position_text, rebuild_markup_context, rebuild_subtitle_context,
+        rebuild_subtitle_menu, resize_edge_at, save_control_visible, skip_target,
+        supported_media_extensions, svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -3424,6 +3738,21 @@ mod tests {
     }
 
     #[test]
+    fn quick_markup_is_absent_instead_of_disabled_for_unsupported_media() {
+        let context = gtk4::gio::Menu::new();
+        rebuild_markup_context(&context, false);
+        assert_eq!(context.n_items(), 0);
+        rebuild_markup_context(&context, true);
+        assert_eq!(context.n_items(), 1);
+        assert_eq!(
+            context
+                .item_attribute_value(0, "action", Some(gtk4::glib::VariantTy::STRING))
+                .and_then(|value| value.str().map(str::to_owned)),
+            Some("win.markup".to_string())
+        );
+    }
+
+    #[test]
     fn an_empty_folder_has_nowhere_to_enter() {
         let (dir, folder) = folder_of("empty", &["notes.txt"]);
         assert_eq!(nav_target(&folder, None, Direction::Next, false), None);
@@ -3487,19 +3816,21 @@ mod tests {
     fn the_pointer_hides_with_the_overlay_but_never_over_a_resize_edge() {
         use super::cursor_name;
         // Overlay up: ordinary pointer.
-        assert_eq!(cursor_name(None, true, true), None);
+        assert_eq!(cursor_name(None, false, true, true), None);
         // Overlay faded: gone, mpv-style.
-        assert_eq!(cursor_name(None, false, true), Some("none"));
+        assert_eq!(cursor_name(None, false, false, true), Some("none"));
         // Opted out via config.
-        assert_eq!(cursor_name(None, false, false), None);
+        assert_eq!(cursor_name(None, false, false, false), None);
+        // Drawing uses a crosshair even if ordinary chrome would hide it.
+        assert_eq!(cursor_name(None, true, false, true), Some("crosshair"));
         // An edge always wins — hiding the pointer on the resize border
         // would make a frameless window impossible to grab.
         assert_eq!(
-            cursor_name(Some(SurfaceEdge::SouthEast), false, true),
+            cursor_name(Some(SurfaceEdge::SouthEast), true, false, true),
             Some("se-resize")
         );
         assert_eq!(
-            cursor_name(Some(SurfaceEdge::North), true, true),
+            cursor_name(Some(SurfaceEdge::North), true, true, true),
             Some("n-resize")
         );
     }
@@ -3541,6 +3872,21 @@ mod tests {
         assert!(DEFAULT_BINDS.contains(&("<Control><Shift>o", Action::OpenFolder)));
         assert_eq!(Action::parse("open-file"), Some(Action::OpenFile));
         assert_eq!(Action::parse("open-folder"), Some(Action::OpenFolder));
+    }
+
+    #[test]
+    fn quick_markup_tools_and_copy_use_configurable_actions() {
+        for (key, action) in [
+            ("a", Action::Markup),
+            ("b", Action::MarkupBox),
+            ("<Shift>a", Action::MarkupArrow),
+            ("<Control>c", Action::MarkupCopy),
+            ("c", Action::MarkupClear),
+        ] {
+            assert!(DEFAULT_BINDS.contains(&(key, action)));
+            assert_eq!(Action::parse(action.as_str()), Some(action));
+        }
+        assert!(DEFAULT_BINDS.contains(&("<Control>z", Action::Undo)));
     }
 
     #[test]

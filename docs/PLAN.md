@@ -20,7 +20,7 @@ default image viewer.
 4. **mpv-style configuration.** Use sane defaults and one optional text file.
 5. **Never surprising with files.** The only writes it ever performs are the
    explicit trash/restore and rotate-save operations. Trash is recoverable and
-   saves are atomic.
+   saves are atomic. Quick Markup is transient and never changes the source.
 
 ## Scope
 
@@ -32,6 +32,8 @@ default image viewer.
   transport, preset playback speeds and local subtitle support.
 - Zoom, pan, fit, view-rotate and use a frameless contextual interface through
   mouse, touchpad or configurable keyboard actions.
+- Add a transient box or arrow to a static image and copy the composited result
+  for pasting elsewhere, without changing or creating a file.
 - Trash with undo and explicitly save supported image rotations. These are the
   only persistent file operations.
 - Optional mpv-style configuration, single-instance activation and GNOME
@@ -45,8 +47,10 @@ controls and acceptance criteria belong only in [REQUIREMENTS.md](REQUIREMENTS.m
 - File explorer / thumbnail grid; architecture may prepare for it, but the UI
   is a later iteration.
 - Library management, indexing, tagging, ratings, search or cloud features.
-- Editing beyond rotate (crop, color, filters).
-- EXIF panels, slideshows, clipboard copy, export and screenshots.
+- Editing beyond transient Quick Markup and rotate (crop, color, filters,
+  freehand, text, blur or persistent annotations).
+- EXIF panels, slideshows, generic clipboard copy, export, Save As and
+  screenshots.
 - Network or online playback, telemetry, background services and an in-app
   updater.
 - General media-player growth such as playlists.

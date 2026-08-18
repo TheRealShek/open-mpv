@@ -19,6 +19,8 @@ the keyboard, and configurable with a plain-text file when you want it to be.
 - Open files or folders in the app and browse supported photos and videos in
   one folder-navigation flow.
 - Zoom, pan, fit, rotate and use fullscreen with mouse, touchpad or keyboard.
+- Draw a quick box or arrow on a still image and copy the annotated result for
+  pasting elsewhere, without changing the original file.
 - Trash files with undo and save supported image rotations losslessly for JPEG.
 - Control local video speed and subtitles, with optional mpv-style
   configuration.
@@ -85,9 +87,13 @@ three-dot button or by right-clicking the media.
 | Horizontal scroll | Previous or next file |
 | `0` / `1` / `Z` | Fit / actual size / toggle between them |
 | `R` / `Shift+R` | Rotate right / left |
+| `A` | Start or cancel Quick Markup on a static image |
+| `B` / `Shift+A` | Select the box / arrow Quick Markup tool |
+| `Ctrl+C` | Copy the annotated image and leave Quick Markup |
+| `C` / `Ctrl+Z` | Clear all / undo the last Quick Markup change |
 | `S` | Save the current rotation |
 | `Delete` | Move the current file to trash |
-| `Ctrl+Z` | Undo the most recent trash action while offered |
+| `Ctrl+Z` | Outside Quick Markup, undo the most recent trash action while offered |
 | `Space` | Pause or resume video; next file for an image |
 | `J` / `Shift+Left` | Seek video back 10 seconds |
 | `L` / `Shift+Right` | Seek video forward 10 seconds |
@@ -96,7 +102,7 @@ three-dot button or by right-clicking the media.
 | `V` / `Shift+V` | Show or hide subtitles / cycle subtitle tracks |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Q` | Quit |
-| `Escape` | Leave fullscreen, then quit |
+| `Escape` | Cancel Quick Markup, leave fullscreen, then quit |
 
 ## Configuration
 

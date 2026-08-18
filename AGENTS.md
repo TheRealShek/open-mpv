@@ -35,7 +35,8 @@ Keep responsibility in these modules:
 | `config` | parsing, defaults, supported extensions and configured bindings | GTK UI or runtime media state |
 | `folder` | pure sorted-path model, insertion/removal and navigation | GTK or GIO types, monitors or decoding |
 | `loader` | async glycin decode and bounded decoded-image cache | UI assembly or file writes |
-| `viewer` | zoom, pan, fit and view rotation over any `GdkPaintable` | file-type policy or GStreamer |
+| `annotation` | bounded transient shape model and shared preview/copy drawing geometry | window actions, clipboard ownership or file writes |
+| `viewer` | zoom, pan, fit, view rotation and source/view transforms over any `GdkPaintable` | file-type policy or GStreamer |
 | `player` | all GStreamer setup, playback, seeking and stream selection | GTK window assembly or image decoding |
 | `fileops` | trash, restore and rotate-save | any other persistent write |
 | `window` | assembly, GIO folder monitor, media state, overlays and the single action layer | codec implementation or duplicated business rules |
@@ -58,7 +59,7 @@ Important architectural rules:
 - **Only `fileops` writes to disk, and only for trash, restore and rotate-save
   (FR-5.6).** Exporting, screenshots, disk caches, generated thumbnails,
   history, state files or writing configuration require a product decision
-  first.
+  first. FR-11 clipboard publication is transient and never enters `fileops`.
 - **No new dependency without a stated justification.** Prefer the standard
   library and existing GTK/GIO/Glycin/GStreamer capabilities. Natural sort,
   `key=value` parsing and CLI handling are deliberately hand-rolled.
@@ -82,6 +83,9 @@ Important architectural rules:
   UI.** A late decode, animation frame, metadata result or SVG re-render must
   drop itself instead of flashing old media over the current item.
 - Never log from `ImageView::snapshot` or another render path.
+- Quick Markup geometry stays in decoded-image coordinates. Preview and copy
+  must share one drawing implementation; source/view transforms must cover all
+  four rotations, pan, zoom and fractional surface scales.
 - `gtk::Application` already provides D-Bus uniqueness. Handle its `open`
   signal; do not add a lockfile, socket or custom IPC.
 - The `gtk4` crate exposes GTK 4.0 by default. A newer API needs the matching
@@ -156,6 +160,10 @@ Important architectural rules:
   advances still images. Arrows pan zoomed media; otherwise they navigate or
   adjust volume. Page Up/Down must keep folder navigation independent of that
   context.
+- Quick Markup capture owns primary drag ahead of pan and window move, but the
+  frameless resize-edge capture still wins. `update_cursor` remains the single
+  cursor owner: resize first, then the markup crosshair over media, then normal
+  chrome hiding.
 
 ---
 
