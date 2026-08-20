@@ -1,123 +1,131 @@
 # open-mpv
 
-open-mpv is a fast, distraction-free photo and video viewer for GNOME on
-Wayland. Open a file and the window gets out of the way: no library to set up,
-no database, and no toolbar covering your picture.
+open-mpv is a fast, minimal photo and video viewer for GNOME on Wayland. It
+opens local media without a library, database or network connection. Its
+controls stay out of the way until you need them.
 
-It takes its cues from [mpv](https://mpv.io/): simple by default, quick from
-the keyboard, and configurable with a plain-text file when you want it to be.
+> **Current support:** Fedora 44 Workstation, GNOME, Wayland and x86-64. Other
+> Linux distributions and desktop environments are not supported yet.
 
-> open-mpv currently targets Fedora 44 Workstation on x86-64 with GNOME and
-> Wayland. Packaged releases use GitHub RPM assets; other Linux
-> distributions are not currently supported. See
-> [Distribution and updates](docs/DISTRIBUTION.md) for the release model.
-
-![open-mpv displaying a landscape with its overlay controls visible](docs/assets/open-mpv.webp)
-
-## What you can do
-
-- Open files or folders in the app and browse supported photos and videos in
-  one folder-navigation flow.
-- Zoom, pan, fit, rotate and use fullscreen with mouse, touchpad or keyboard.
-- Draw a quick box or arrow on a still image and copy the annotated result for
-  pasting elsewhere, without changing the original file.
-- Trash files with undo and save supported image rotations losslessly for JPEG.
-- Control local video speed and subtitles, with optional mpv-style
-  configuration.
-
-Images are sandbox-decoded through
-[glycin](https://gitlab.gnome.org/GNOME/glycin). The app has no network,
-telemetry, media library or background service.
-
-## Supported files
-
-open-mpv supports JPEG, PNG, WebP, AVIF, HEIF/HEIC, JPEG XL, TIFF, SVG, GIF,
-and many other image formats provided by the installed glycin loaders.
-Animated GIF, WebP, and PNG files play automatically.
-
-MP4, MKV, WebM, MOV, and AVI videos play through the system's GStreamer
-codecs. Hardware decoding is used when available. The RPM recommends
-`gstreamer1-plugins-bad-free` for the preferred Intel QSV hardware decoders.
-The optional `gstreamer1-plugin-libav` package provides a software fallback
-for some videos. Playback-speed audio keeps its pitch through `scaletempo`
-from the `gstreamer1-plugins-good` package; without it, videos remain at 1×.
+![open-mpv showing a photo with its controls visible](docs/assets/open-mpv.webp)
 
 ## Install on Fedora 44
 
-After the first RPM appears on the
-[Releases page](https://github.com/TheRealShek/open-mpv/releases), install or
-update the latest x86-64 release directly from GitHub:
+There is no published package yet. Install the current version for your user
+account from source:
 
 ```sh
-sudo dnf install \
-  https://github.com/TheRealShek/open-mpv/releases/latest/download/open-mpv-fedora44-x86_64.rpm
+sudo dnf install cargo desktop-file-utils gcc git glycin-devel glycin-loaders \
+  gstreamer1-devel gstreamer1-plugin-gtk4 gstreamer1-plugins-base \
+  gstreamer1-plugins-good gtk4-devel rust xdg-utils
+git clone https://github.com/TheRealShek/open-mpv.git
+cd open-mpv
+./install.sh
 ```
 
-Until that first release is approved and published, the URL returns 404; use
-the source installation under [Development](#development) instead.
+The installer writes under `~/.local` and does not change your default apps.
 
-DNF downloads the RPM, resolves its Fedora dependencies and tracks every
-installed file. The package does not change default applications. Choose
-open-mpv through Files' **Open With** dialog if you want it to handle a media
-type by default.
-
-GitHub is not a DNF repository, so `dnf upgrade` cannot discover a new
-open-mpv release. Re-run the command above when a release is announced; DNF
-will upgrade the installed package. Remove it with:
+Optional: make open-mpv the default for every supported photo and video type:
 
 ```sh
-sudo dnf remove open-mpv
+./install.sh --set-default
 ```
 
-After installation, open a supported file from Files or run:
+To change only one file type, right-click that type of file in Files, choose
+**Open With**, then select open-mpv.
+
+To update an existing source installation:
+
+```sh
+cd open-mpv
+git pull --ff-only
+./install.sh
+```
+
+To remove it, run this from the same checkout:
+
+```sh
+./uninstall.sh
+```
+
+## Open a photo, video or folder
+
+Open media from Files, drag a file into the window, or use the command line:
 
 ```sh
 open-mpv ~/Pictures/photo.jpg
+open-mpv ~/Videos/video.mp4
 open-mpv ~/Pictures
 ```
 
-You can also launch open-mpv with no file, then use its Open File or Open
-Folder controls or drag a file into the window. File and folder opening remain
-available from the More menu while viewing media.
+You can also start open-mpv with no path and choose **Open File** or
+**Open Folder**.
 
-## Everyday controls
+## What it does
 
-Press `?` inside the app to see the complete shortcut guide.
+- Opens photos, animated images, SVG files and local videos in one window.
+- Lets you move through every supported media file in the current folder.
+- Supports zoom, pan, fit, rotation and fullscreen.
+- Plays local videos with seeking, volume, speed and subtitle controls.
+- Moves files to trash and offers a short Undo action.
+- Saves supported image rotations. JPEG rotation is lossless.
+- Lets you draw a box or arrow on a still image and copy the result without
+  changing the original file.
+- Supports optional mpv-style configuration and custom key bindings.
 
-Moving the pointer reveals file information, navigation and media-specific
-controls. Less frequent actions live in the More menu, available from its
-three-dot button or by right-clicking the media.
+## Privacy and file safety
+
+- open-mpv has no network access, telemetry or persistent background service.
+- glycin decodes images in a separate sandboxed process.
+- The app writes only when you trash, restore or explicitly save a rotation.
+- Quick Markup copies an image to the clipboard. It never changes or creates a
+  media file.
+
+## Supported media
+
+Images include JPEG, PNG, WebP, AVIF, HEIF/HEIC, JPEG XL, TIFF, SVG, GIF and
+other formats supported by the installed glycin loaders. Animated GIF, WebP
+and PNG files play automatically.
+
+Videos include MP4, MKV, WebM, MOV and AVI. Playback uses the system GStreamer
+codecs and hardware decoding when available. The optional
+`gstreamer1-plugin-libav` package adds a software fallback for more videos.
+Pitch-preserving playback speed needs `gstreamer1-plugins-good`.
+
+## Main controls
+
+Press `?` inside the app for the complete shortcut guide.
 
 | Key or gesture | Action |
 | --- | --- |
-| `Ctrl+O` | Open a supported image or video |
-| `Ctrl+Shift+O` | Open a folder at its first supported item |
-| `Right` / `Page Down` | Next file; `Right` pans a zoomed image |
-| `Left` / `Page Up` | Previous file; `Left` pans a zoomed image |
+| `Ctrl+O` | Open a file |
+| `Ctrl+Shift+O` | Open a folder |
+| `Right` / `Page Down` | Next file; pan right when zoomed |
+| `Left` / `Page Up` | Previous file; pan left when zoomed |
 | Scroll / pinch | Zoom at the pointer |
 | Horizontal scroll | Previous or next file |
 | `0` / `1` / `Z` | Fit / actual size / toggle between them |
 | `R` / `Shift+R` | Rotate right / left |
-| `A` | Start or cancel Quick Markup on a static image |
-| `B` / `Shift+A` | Select the box / arrow Quick Markup tool |
-| `Ctrl+C` | Copy the annotated image and leave Quick Markup |
-| `C` / `Ctrl+Z` | Clear all / undo the last Quick Markup change |
-| `S` | Save the current rotation |
+| `S` | Save the current rotation when supported |
 | `Delete` | Move the current file to trash |
-| `Ctrl+Z` | Outside Quick Markup, undo the most recent trash action while offered |
-| `Space` | Pause or resume video; next file for an image |
-| `J` / `Shift+Left` | Seek video back 10 seconds |
-| `L` / `Shift+Right` | Seek video forward 10 seconds |
-| `[` / `]` / `\` | Decrease / increase / reset video playback speed |
-| `M` | Mute video |
-| `V` / `Shift+V` | Show or hide subtitles / cycle subtitle tracks |
+| `Ctrl+Z` | Undo Quick Markup or the latest offered trash action |
+| `Space` | Pause or resume video; move to the next still image |
+| `J` / `L` | Seek video back / forward 10 seconds |
+| `[` / `]` / `\` | Slower / faster / normal video speed |
+| `V` / `Shift+V` | Show or hide / cycle subtitles |
+| `A` | Start or cancel Quick Markup |
+| `B` / `Shift+A` | Choose the box / arrow markup tool |
+| `Ctrl+C` | Copy the marked-up image |
 | `F` / `F11` / double-click | Toggle fullscreen |
 | `Q` | Quit |
-| `Escape` | Cancel Quick Markup, leave fullscreen, then quit |
+| `Escape` | Cancel the current mode, leave fullscreen or quit |
+
+Move the pointer to show controls. Right-click the media or use the three-dot
+button for less common actions.
 
 ## Configuration
 
-Configuration is optional. Create `~/.config/open-mpv/open-mpv.conf` only if
+Configuration is optional. Create `~/.config/open-mpv/open-mpv.conf` only when
 you want to change a default:
 
 ```ini
@@ -141,52 +149,43 @@ bind = bracketright speed-up
 bind = q none          # remove a default binding
 ```
 
-Unknown or invalid settings are ignored with a warning, so a broken config
-does not prevent the viewer from opening.
+Unknown or invalid settings produce a warning but do not stop the app from
+opening.
 
 ## Troubleshooting
 
-open-mpv writes a diagnostic trace to stderr. When it was opened from Files,
-view the log with:
+If images do not open, check that `glycin-loaders` is installed. Video support
+depends on the installed GStreamer plugins and codecs.
+
+open-mpv writes diagnostic messages to stderr. When it was opened from Files,
+view them with:
 
 ```sh
 journalctl -b _COMM=open-mpv
 ```
 
-Add `-f` to follow a reproduction live. The `_COMM` filter includes both the
-application trace and GTK/GStreamer diagnostics from the desktop launch.
-
-Disable routine diagnostic logging with `OPEN_MPV_LOG=0`. Errors are still
-reported.
+Add `-f` to follow the log while reproducing a problem. Set `OPEN_MPV_LOG=0`
+to hide routine diagnostics; errors are still reported.
 
 ## Development
 
-Start with [AGENTS.md](AGENTS.md), which routes contributors to the
-authoritative requirements, scope and distribution documents and records the
-repository's engineering constraints.
-
-Install the complete Fedora build and runtime stack before building from
-source:
-
-```sh
-sudo dnf install cargo desktop-file-utils gcc glycin-devel glycin-loaders \
-  gstreamer1-devel gstreamer1-plugin-gtk4 gstreamer1-plugins-base \
-  gstreamer1-plugins-good gtk4-devel rust xdg-utils
-git clone https://github.com/TheRealShek/open-mpv.git
-cd open-mpv
-./install.sh
-```
-
-The source installer writes under `~/.local` and leaves default applications
-unchanged. Use `./install.sh --set-default` to opt into every supported image
-and video association, and `./uninstall.sh` to remove the source installation.
+After following the installation steps above, these are the main development
+commands:
 
 ```sh
 cargo run -- <file-or-folder>
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 ```
+
+## Project documents
+
+- [Requirements](docs/REQUIREMENTS.md) define the exact product behavior and
+  performance limits.
+- [Product plan](docs/PLAN.md) explains the product goal and what is out of
+  scope.
+- [Distribution](docs/DISTRIBUTION.md) explains packaging and release choices.
 
 ## License
 
