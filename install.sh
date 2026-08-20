@@ -109,7 +109,7 @@ rm -f "${APP_DIR}/${LEGACY_APP_ID}.desktop" \
 
 if [ -z "$DESTDIR" ]; then
     update-desktop-database "${INSTALL_DATA_DIR}/applications" 2>/dev/null || true
-    gtk-update-icon-cache -q "${INSTALL_DATA_DIR}/icons/hicolor" 2>/dev/null || true
+    gtk-update-icon-cache -f -t -q "${INSTALL_DATA_DIR}/icons/hicolor" 2>/dev/null || true
 fi
 
 if [ "$SET_DEFAULT" = true ]; then
