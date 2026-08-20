@@ -52,6 +52,6 @@ rm -f "${PREFIX%/}/bin/open-mpv" \
     "${DATA_DIR}/licenses/open-mpv/LICENSE"
 rmdir "${DATA_DIR}/licenses/open-mpv" 2>/dev/null || true
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
-gtk-update-icon-cache -q "${DATA_DIR}/icons/hicolor" 2>/dev/null || true
+gtk-update-icon-cache -f -t -q "${DATA_DIR}/icons/hicolor" 2>/dev/null || true
 
 echo "Removed open-mpv. Default applications were unchanged."
