@@ -7,10 +7,10 @@ no database, and no toolbar covering your picture.
 It takes its cues from [mpv](https://mpv.io/): simple by default, quick from
 the keyboard, and configurable with a plain-text file when you want it to be.
 
-> open-mpv currently targets Fedora Workstation with GNOME on Wayland. It is
-> usable today, but installation still requires building it from source. See
-> [Distribution and updates](docs/DISTRIBUTION.md) for the path to packaged
-> releases.
+> open-mpv currently targets Fedora 44 Workstation on x86-64 with GNOME and
+> Wayland. Packaged releases use GitHub RPM assets; other Linux
+> distributions are not currently supported. See
+> [Distribution and updates](docs/DISTRIBUTION.md) for the release model.
 
 ![open-mpv displaying a landscape with its overlay controls visible](docs/assets/open-mpv.webp)
 
@@ -36,27 +36,38 @@ and many other image formats provided by the installed glycin loaders.
 Animated GIF, WebP, and PNG files play automatically.
 
 MP4, MKV, WebM, MOV, and AVI videos play through the system's GStreamer
-codecs. Hardware decoding is used when available. The optional
-`gstreamer1-plugin-libav` package provides a software fallback for some
-videos. Playback-speed audio keeps its pitch through `scaletempo` from the
-`gstreamer1-plugins-good` package; without it, videos remain at 1×.
+codecs. Hardware decoding is used when available. The RPM recommends
+`gstreamer1-plugins-bad-free` for the preferred Intel QSV hardware decoders.
+The optional `gstreamer1-plugin-libav` package provides a software fallback
+for some videos. Playback-speed audio keeps its pitch through `scaletempo`
+from the `gstreamer1-plugins-good` package; without it, videos remain at 1×.
 
-## Install on Fedora
+## Install on Fedora 44
 
-To install the current version for your user account:
+After the first RPM appears on the
+[Releases page](https://github.com/TheRealShek/open-mpv/releases), install or
+update the latest x86-64 release directly from GitHub:
 
 ```sh
-git clone https://github.com/TheRealShek/open-mpv.git
-cd open-mpv
-sudo dnf install gtk4-devel glycin-devel gstreamer1-devel gstreamer1-plugins-good
-sudo dnf install gstreamer1-plugin-libav # optional video fallback
-./install.sh
+sudo dnf install \
+  https://github.com/TheRealShek/open-mpv/releases/latest/download/open-mpv-fedora44-x86_64.rpm
 ```
 
-The install script builds a release binary, installs it under `~/.local`, and
-makes open-mpv the default viewer for supported photos and videos. Run
-`./uninstall.sh` from the same checkout to remove it and restore Loupe and mpv
-as the defaults.
+Until that first release is approved and published, the URL returns 404; use
+the source installation under [Development](#development) instead.
+
+DNF downloads the RPM, resolves its Fedora dependencies and tracks every
+installed file. The package does not change default applications. Choose
+open-mpv through Files' **Open With** dialog if you want it to handle a media
+type by default.
+
+GitHub is not a DNF repository, so `dnf upgrade` cannot discover a new
+open-mpv release. Re-run the command above when a release is announced; DNF
+will upgrade the installed package. Remove it with:
+
+```sh
+sudo dnf remove open-mpv
+```
 
 After installation, open a supported file from Files or run:
 
@@ -153,6 +164,22 @@ reported.
 Start with [AGENTS.md](AGENTS.md), which routes contributors to the
 authoritative requirements, scope and distribution documents and records the
 repository's engineering constraints.
+
+Install the complete Fedora build and runtime stack before building from
+source:
+
+```sh
+sudo dnf install cargo desktop-file-utils gcc glycin-devel glycin-loaders \
+  gstreamer1-devel gstreamer1-plugin-gtk4 gstreamer1-plugins-base \
+  gstreamer1-plugins-good gtk4-devel rust xdg-utils
+git clone https://github.com/TheRealShek/open-mpv.git
+cd open-mpv
+./install.sh
+```
+
+The source installer writes under `~/.local` and leaves default applications
+unchanged. Use `./install.sh --set-default` to opt into every supported image
+and video association, and `./uninstall.sh` to remove the source installation.
 
 ```sh
 cargo run -- <file-or-folder>
