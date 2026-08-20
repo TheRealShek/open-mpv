@@ -30,6 +30,7 @@ jobs:
           dnf --setopt=install_weak_deps=False -y install \
             ImageMagick \
             ShellCheck \
+            appstream \
             cargo \
             clippy \
             dbus-daemon \
@@ -43,6 +44,7 @@ jobs:
             gstreamer1-plugins-good \
             gtk4-devel \
             pkgconf-pkg-config \
+            rpm-build \
             rust \
             rustfmt
 
@@ -51,9 +53,11 @@ jobs:
 
       - name: Validate repository files
         run: |
-          shellcheck install.sh uninstall.sh
-          sh -n install.sh uninstall.sh
+          shellcheck install.sh uninstall.sh packaging/build-rpm.sh
+          sh -n install.sh uninstall.sh packaging/build-rpm.sh
           desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
+          appstreamcli validate --no-net data/io.github.TheRealShek.OpenMpv.metainfo.xml
+          rpmspec -P packaging/fedora/open-mpv.spec >/dev/null
 
       - name: Check formatting
         run: cargo fmt --check

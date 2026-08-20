@@ -1,0 +1,142 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Signed release tag to verify and prepare (for example, v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify, package and prepare
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+      RELEASE_TAG: ${{ inputs.tag }}
+      XDG_RUNTIME_DIR: /tmp/open-mpv-runtime
+
+    steps:
+      - name: Install Fedora dependencies
+        run: |
+          dnf --setopt=install_weak_deps=False -y install \
+            ImageMagick \
+            ShellCheck \
+            appstream \
+            cargo \
+            clippy \
+            dbus-daemon \
+            desktop-file-utils \
+            gcc \
+            gh \
+            glycin-devel \
+            glycin-loaders \
+            gstreamer1-devel \
+            gstreamer1-plugin-gtk4 \
+            gstreamer1-plugins-good \
+            gtk4-devel \
+            rpm-build \
+            rpmlint \
+            rust \
+            rustfmt
+
+      - name: Resolve verified release tag
+        id: release_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.type)
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)
+          test "$tag_type" = tag
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .verification.verified)" = true
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.type)" = commit
+          commit_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.sha)
+          echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${commit_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out verified source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release_tag.outputs.commit_sha }}
+
+      - name: Run required checks
+        run: |
+          install -d -m 700 "$XDG_RUNTIME_DIR"
+          shellcheck install.sh uninstall.sh packaging/build-rpm.sh
+          sh -n install.sh uninstall.sh packaging/build-rpm.sh
+          desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
+          appstreamcli validate --no-net data/io.github.TheRealShek.OpenMpv.metainfo.xml
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          dbus-run-session -- cargo test --locked
+          cargo build --release --locked
+
+      - name: Build and inspect RPM
+        run: |
+          ./packaging/build-rpm.sh "$RELEASE_TAG"
+          (cd dist && sha256sum -c SHA256SUMS)
+          rpmlint dist/open-mpv-fedora44-x86_64.rpm
+          rpm -qpl dist/open-mpv-fedora44-x86_64.rpm
+          rpm -qp --requires dist/open-mpv-fedora44-x86_64.rpm
+          rpm -qp --provides dist/open-mpv-fedora44-x86_64.rpm | grep -q 'mimehandler(image/jpeg)'
+          rpm -qp --provides dist/open-mpv-fedora44-x86_64.rpm | grep -q 'mimehandler(video/mp4)'
+
+      - name: Test package lifecycle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dnf -y install ./dist/open-mpv-fedora44-x86_64.rpm
+          rpm -V open-mpv
+          test -x /usr/bin/open-mpv
+          desktop-file-validate /usr/share/applications/io.github.TheRealShek.OpenMpv.desktop
+          dnf -y reinstall ./dist/open-mpv-fedora44-x86_64.rpm
+          rpm -V open-mpv
+          dnf -y remove open-mpv
+          test ! -e /usr/bin/open-mpv
+          test ! -e /usr/share/applications/io.github.TheRealShek.OpenMpv.desktop
+          test ! -e /usr/share/licenses/open-mpv
+          test ! -e /usr/share/metainfo/io.github.TheRealShek.OpenMpv.metainfo.xml
+
+          previous_tag=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
+          if [ -n "$previous_tag" ]; then
+            install -d /tmp/open-mpv-previous
+            gh release download "$previous_tag" \
+              --pattern open-mpv-fedora44-x86_64.rpm \
+              --dir /tmp/open-mpv-previous
+            previous_rpm=/tmp/open-mpv-previous/open-mpv-fedora44-x86_64.rpm
+            previous_evr=$(rpm -qp --qf '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' "$previous_rpm")
+            current_evr=$(rpm -qp --qf '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' dist/open-mpv-fedora44-x86_64.rpm)
+            dnf -y install "$previous_rpm"
+            dnf -y install ./dist/open-mpv-fedora44-x86_64.rpm
+            test "$(rpm -q --qf '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' open-mpv)" = "$current_evr"
+            dnf -y downgrade "$previous_rpm"
+            test "$(rpm -q --qf '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' open-mpv)" = "$previous_evr"
+            dnf -y install ./dist/open-mpv-fedora44-x86_64.rpm
+            dnf -y remove open-mpv
+          fi
+
+      - name: Create draft GitHub release
+        env:
+          EXPECTED_TAG_SHA: ${{ steps.release_tag.outputs.tag_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)" = "$EXPECTED_TAG_SHA"
+          gh release create "$RELEASE_TAG" \
+            dist/open-mpv-fedora44-x86_64.rpm \
+            dist/SHA256SUMS \
+            --draft \
+            --generate-notes \
+            --title "open-mpv ${RELEASE_TAG#v}" \
+            --verify-tag

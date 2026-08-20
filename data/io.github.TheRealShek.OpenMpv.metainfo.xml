@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.TheRealShek.OpenMpv</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>open-mpv</name>
+  <summary>View local photos and videos without distractions</summary>
+  <developer id="io.github.therealshek">
+    <name>therealshek</name>
+  </developer>
+  <description>
+    <p>
+      open-mpv is a fast, minimalist photo and video viewer for GNOME on
+      Wayland. It opens local media without a library, database, network
+      service, or persistent background process.
+    </p>
+    <p>
+      Browse a folder, zoom and rotate images, play local videos and
+      subtitles, move files to trash with undo, and copy transient Quick
+      Markup annotations without changing the source image.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.TheRealShek.OpenMpv.desktop</launchable>
+  <url type="homepage">https://github.com/TheRealShek/open-mpv</url>
+  <url type="bugtracker">https://github.com/TheRealShek/open-mpv/issues</url>
+  <url type="vcs-browser">https://github.com/TheRealShek/open-mpv</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/TheRealShek/open-mpv/main/docs/assets/open-mpv.webp</image>
+      <caption>Viewing a photo with contextual controls visible</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.0" date="2026-08-20">
+      <description>
+        <p>First packaged release of open-mpv.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>
