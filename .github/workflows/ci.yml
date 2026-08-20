@@ -9,14 +9,63 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Check changed paths
+    runs-on: ubuntu-24.04
+    outputs:
+      run_checks: ${{ steps.classify.outputs.run_checks }}
+
+    steps:
+      - name: Decide whether code checks are needed
+        id: classify
+        env:
+          AFTER_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo "run_checks=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" = pull_request ]; then
+            changed_files=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)')
+          else
+            changed_files=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/compare/${BEFORE_SHA}...${AFTER_SHA}" \
+              --jq '.files[] | .filename, (.previous_filename // empty)')
+          fi
+
+          run_checks=false
+          while IFS= read -r changed_file; do
+            [ -n "$changed_file" ] || continue
+            case "$changed_file" in
+              *.md|docs/*|LICENSE) ;;
+              *) run_checks=true; break ;;
+            esac
+          done <<EOF
+          $changed_files
+          EOF
+
+          echo "run_checks=${run_checks}" >> "$GITHUB_OUTPUT"
+
   checks:
     name: Required checks
+    needs: changes
+    if: >-
+      always() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.run_checks == 'true')
     runs-on: ubuntu-24.04
     container: fedora:44
     timeout-minutes: 30
