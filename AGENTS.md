@@ -173,8 +173,12 @@ Run the complete required checks:
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
+shellcheck install.sh uninstall.sh
+sh -n install.sh uninstall.sh
+desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
 ```
 
 `cargo test` includes real trash and rotate-save tests, requires a user
@@ -214,27 +218,35 @@ into free functions and unit-testing them (`nav_target`, `skip_target`,
 
 ---
 
-## Git workflow
+## Git and CI
 
-**Commit as meaningful pieces are completed, not once at the end.** This
-repository-specific rule overrides the general default that commits need a
-separate request. It does not grant permission to push.
+`main` is protected. Never push directly to it.
 
-- Keep one logical unit per commit: a fix, a feature or a documentation pass.
-- Never fold an unrelated fix into another change.
-- Before every commit, ensure `cargo fmt --check`,
-  `cargo clippy --all-targets -- -D warnings` and `cargo test` pass.
-- Explain why in the commit message. Never add co-author trailers.
+To merge a change:
+
+1. Create a branch from the latest `main`.
+2. Make clear, logical commits on that branch.
+3. Push the branch and open a pull request to `main`.
+4. Wait for the required GitHub CI check to pass.
+5. Complete any needed human Wayland testing.
+6. Merge the pull request. Never merge with failed or skipped required checks.
+
+Local checks are useful but are not required before every commit. GitHub CI is
+the required merge gate and runs the commands in the Verification section.
+
+Agents may create local commits as meaningful pieces are completed. They must
+not push, open a pull request or merge unless the user asks. Keep unrelated
+changes separate, explain why in the commit message and never add co-author
+trailers.
 
 ### Author validation gate
 
-**Before work for any major issue is pushed, the author must either personally
-test the completed behavior and confirm it, or explicitly approve pushing it
-without personal testing.**
+**Before a major change is merged, the author must either personally test the
+completed behavior and confirm it, or explicitly approve merging it without
+personal testing.**
 
 - Apply this gate to substantial features and to changes with meaningful UI,
   playback, file-operation, data-safety, compatibility or performance impact.
 - The gate is per issue/change. Approval for one does not carry to another.
-- Implementation, local verification and commits may be completed first. Then
-  report what passed, what still needs human testing and any remaining risk.
-- A request to implement or commit is not permission to push.
+- Branch work and CI may be completed first. Record what passed, what still
+  needs human testing and any remaining risk before merging.
