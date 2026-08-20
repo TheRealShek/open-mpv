@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Required checks
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      XDG_RUNTIME_DIR: /tmp/open-mpv-runtime
+
+    steps:
+      - name: Install Fedora dependencies
+        run: |
+          dnf --setopt=install_weak_deps=False -y install \
+            ImageMagick \
+            ShellCheck \
+            cargo \
+            clippy \
+            dbus-daemon \
+            desktop-file-utils \
+            gcc \
+            git \
+            glycin-devel \
+            glycin-loaders \
+            gstreamer1-devel \
+            gstreamer1-plugin-gtk4 \
+            gstreamer1-plugins-good \
+            gtk4-devel \
+            pkgconf-pkg-config \
+            rust \
+            rustfmt
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate repository files
+        run: |
+          shellcheck install.sh uninstall.sh
+          sh -n install.sh uninstall.sh
+          desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          install -d -m 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
