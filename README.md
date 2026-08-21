@@ -11,42 +11,22 @@ controls stay out of the way until you need them.
 
 ## Install on Fedora 44
 
-There is no published package yet. Install the current version for your user
-account from source:
+Install the latest release with DNF. This resolves Fedora dependencies and does
+not change your default applications:
 
 ```sh
-sudo dnf install cargo desktop-file-utils gcc git glycin-devel glycin-loaders \
-  gstreamer1-devel gstreamer1-plugin-gtk4 gstreamer1-plugins-base \
-  gstreamer1-plugins-good gtk4-devel rust xdg-utils
-git clone https://github.com/TheRealShek/open-mpv.git
-cd open-mpv
-./install.sh
+sudo dnf install https://github.com/TheRealShek/open-mpv/releases/latest/download/open-mpv-fedora44-x86_64.rpm
 ```
 
-The installer writes under `~/.local` and does not change your default apps.
-
-Optional: make open-mpv the default for every supported photo and video type:
+GitHub Releases are not a DNF repository. Re-run the same command after a new
+release is announced to update the installed package. To remove it:
 
 ```sh
-./install.sh --set-default
+sudo dnf remove open-mpv
 ```
 
-To change only one file type, right-click that type of file in Files, choose
-**Open With**, then select open-mpv.
-
-To update an existing source installation:
-
-```sh
-cd open-mpv
-git pull --ff-only
-./install.sh
-```
-
-To remove it, run this from the same checkout:
-
-```sh
-./uninstall.sh
-```
+To make open-mpv the default for a file type, right-click that type of file in
+Files, choose **Open With**, then select open-mpv.
 
 ## Open a photo, video or folder
 
@@ -169,8 +149,17 @@ to hide routine diagnostics; errors are still reported.
 
 ## Development
 
-After following the installation steps above, these are the main development
-commands:
+Install the build dependencies and clone the repository:
+
+```sh
+sudo dnf install cargo desktop-file-utils gcc git glycin-devel glycin-loaders \
+  gstreamer1-devel gstreamer1-plugin-gtk4 gstreamer1-plugins-base \
+  gstreamer1-plugins-good gtk4-devel rust xdg-utils
+git clone https://github.com/TheRealShek/open-mpv.git
+cd open-mpv
+```
+
+These are the main development commands:
 
 ```sh
 cargo run -- <file-or-folder>

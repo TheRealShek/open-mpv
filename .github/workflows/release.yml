@@ -1,6 +1,9 @@
 name: Prepare release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -12,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +28,7 @@ jobs:
       contents: write
     env:
       CARGO_TERM_COLOR: always
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       XDG_RUNTIME_DIR: /tmp/open-mpv-runtime
 
     steps:
@@ -109,7 +112,18 @@ jobs:
           test ! -e /usr/share/licenses/open-mpv
           test ! -e /usr/share/metainfo/io.github.TheRealShek.OpenMpv.metainfo.xml
 
-          previous_tag=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
+          release_candidates=$(gh release list --exclude-drafts --exclude-pre-releases \
+            --limit 20 --json tagName --jq '.[].tagName')
+          previous_tag=""
+          for candidate in $release_candidates; do
+            asset_names=$(gh release view "$candidate" --json assets \
+              --jq '.assets[].name')
+            if printf '%s\n' "$asset_names" | \
+                grep -qx open-mpv-fedora44-x86_64.rpm; then
+              previous_tag=$candidate
+              break
+            fi
+          done
           if [ -n "$previous_tag" ]; then
             install -d /tmp/open-mpv-previous
             gh release download "$previous_tag" \
