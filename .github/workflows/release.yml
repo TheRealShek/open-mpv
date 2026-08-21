@@ -28,6 +28,7 @@ jobs:
       contents: write
     env:
       CARGO_TERM_COLOR: always
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       XDG_RUNTIME_DIR: /tmp/open-mpv-runtime
 
