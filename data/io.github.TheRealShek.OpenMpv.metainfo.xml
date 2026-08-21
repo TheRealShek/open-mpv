@@ -31,6 +31,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.1" date="2026-08-21">
+      <description>
+        <p>Publish the first installable GitHub Release RPM.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-08-20">
       <description>
         <p>First packaged release of open-mpv.</p>

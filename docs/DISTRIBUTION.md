@@ -103,22 +103,22 @@ changes.
 The update flow should be:
 
 ```text
-version + release metadata -> signed source tag -> manual Prepare release workflow
+version + release metadata -> signed source tag -> automatic Prepare release workflow
                                   -> Fedora 44 verification and RPM build
                                   -> reviewed GitHub draft and assets
                                   -> user re-runs the stable DNF URL
 ```
 
-A maintainer runs the Prepare release workflow with an existing tag. The
+Pushing a signed version tag starts the Prepare release workflow. A maintainer
+can also start it manually with an existing tag when a retry is needed. The
 workflow rejects a lightweight, unsigned or GitHub-unverified tag, checks out
-the verified tag's exact commit, runs the complete required checks, creates
-the RPM from vendored locked Cargo sources, and verifies the package,
-lifecycle and checksum. It then uses GitHub's repository-scoped token to
-create a draft containing generated notes and the assets. It needs no
-maintainer token or release secret. The maintainer completes the known-issue
-and configuration sections, reviews the draft and explicitly publishes it.
-Build stable packages only from tags; GitHub retains older releases for
-explicit downgrade.
+the verified tag's exact commit, runs the complete required checks, creates the
+RPM from vendored locked Cargo sources, and verifies the package, lifecycle and
+checksum. It then uses GitHub's repository-scoped token to create a draft
+containing generated notes and the assets. It needs no maintainer token or
+release secret. The maintainer completes the known-issue and configuration
+sections, reviews the draft and explicitly publishes it. Build stable packages
+only from tags; GitHub retains older releases for explicit downgrade.
 
 Use no fixed calendar. Release meaningful improvements when ready; publish
 security or data-safety fixes promptly with a plain impact statement.
@@ -135,9 +135,9 @@ security or data-safety fixes promptly with a plain impact statement.
    When a previous release exists, the workflow also tests upgrade and
    downgrade against its retained RPM.
 5. Complete the author validation gate and explicitly approve publication.
-6. Enable immutable GitHub Releases, push a signed release tag, manually run
-   the Prepare release workflow for that tag, complete and publish its draft,
-   then verify the stable GitHub URL through DNF.
+6. Enable immutable GitHub Releases, push a signed release tag, wait for the
+   Prepare release workflow, complete and publish its draft, then verify the
+   stable GitHub URL through DNF.
 
 ## Decision checkpoints
 

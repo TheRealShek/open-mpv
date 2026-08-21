@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           open-mpv
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Minimalist local photo and video viewer
 License:        MIT AND Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND ISC AND MPL-2.0 AND Unicode-3.0
@@ -77,5 +77,8 @@ XDG_RUNTIME_DIR=%{_builddir}/open-mpv-runtime \
 %{_datadir}/metainfo/io.github.TheRealShek.OpenMpv.metainfo.xml
 
 %changelog
+* Fri Aug 21 2026 therealshek <TheRealShek@users.noreply.github.com> - 0.1.1-1
+- Publish the first installable GitHub Release RPM
+
 * Thu Aug 20 2026 therealshek <TheRealShek@users.noreply.github.com> - 0.1.0-1
 - First packaged release
