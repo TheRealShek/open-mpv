@@ -1,9 +1,9 @@
 # Distribution and updates
 
 This document owns packaging, release and update decisions. Product behavior
-and scope remain authoritative in [REQUIREMENTS.md](REQUIREMENTS.md) and
-[PLAN.md](PLAN.md). A documented release command becomes usable only after the
-first corresponding GitHub Release has been published.
+and scope remain authoritative in [REQUIREMENTS.md](REQUIREMENTS.md) and the
+[project context](../CONTEXT.md). A documented release command becomes usable
+only after the first corresponding GitHub Release has been published.
 
 ## The outcome we want
 

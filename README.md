@@ -110,16 +110,20 @@ you want to change a default:
 
 ```ini
 background = #121212
-sort = name            # name | date
+# name | date
+sort = name
 sort-reverse = no
 wrap = no
-fit = fit              # fit | actual
+# fit | actual
+fit = fit
 overlay-timeout = 2.0
 hide-cursor = yes
 start-fullscreen = no
 loop = yes
-volume = 100           # 0-150
-subtitles = auto       # auto | off
+# 0-150
+volume = 100
+# auto | off
+subtitles = auto
 cache-budget-mb = 256
 
 # Add or replace key bindings.
@@ -170,10 +174,9 @@ cargo test --locked
 
 ## Project documents
 
+- [Context](CONTEXT.md) defines the product language and boundaries.
 - [Requirements](docs/REQUIREMENTS.md) define the exact product behavior and
   performance limits.
-- [Product plan](docs/PLAN.md) explains the product goal and what is out of
-  scope.
 - [Distribution](docs/DISTRIBUTION.md) explains packaging and release choices.
 
 ## License

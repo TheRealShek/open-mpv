@@ -1,7 +1,6 @@
-//! The only module that writes to the filesystem (FR-5.6): move to
-//! trash, restore from trash, and rotate-save. Saves are atomic —
-//! either sparse in-place byte changes via glycin, or a full rewrite
-//! staged in a temp file and renamed over the original (FR-5.5).
+//! Source-media writes (FR-5): move to trash, restore from trash, and
+//! rotate-save. Complete rewrites are staged in a temp file and renamed
+//! over the original; sparse Glycin edits are applied in place.
 
 use std::collections::BTreeSet;
 use std::fmt;
