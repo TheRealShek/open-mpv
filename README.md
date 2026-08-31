@@ -46,7 +46,7 @@ You can also start open-mpv with no path and choose **Open File** or
 - Opens photos, animated images, SVG files and local videos in one window.
 - Lets you move through every supported media file in the current folder.
 - Supports zoom, pan, fit, rotation and fullscreen.
-- Plays local videos with seeking, volume, speed and subtitle controls.
+- Plays local videos with seeking, volume, speed, audio-track and subtitle controls.
 - Moves files to trash and offers a short Undo action.
 - Saves supported image rotations. JPEG rotation is lossless.
 - Lets you draw a box or arrow on a still image and copy the result without
