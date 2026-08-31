@@ -74,13 +74,13 @@ module.
 | --- | --- | --- |
 | `main` | GTK application lifecycle, activation and single-instance entry | custom IPC or media behavior |
 | `config` | defaults, parsing, extensions and key bindings | GTK UI or runtime media state |
-| `folder` | sorted paths, insertion, removal and navigation | GTK, GIO, monitoring or decoding |
+| `folder` | selected-folder identity, sorted Navigation set, logical destination, generation and mutation outcomes | GTK, GIO, monitoring or decoding |
 | `loader` | asynchronous glycin decoding and the bounded image cache | UI assembly or file writes |
 | `annotation` | bounded shapes and shared preview/copy drawing | window actions, clipboard ownership or file writes |
 | `viewer` | zoom, pan, fit, view rotation and source/view transforms over any `GdkPaintable` | file policy or GStreamer |
 | `player` | GStreamer setup, playback, seeking and stream selection | window assembly or image decoding |
 | `fileops` | trash, restore and rotate-save | every other persistent write |
-| `window` | UI assembly, folder monitoring, media state, overlays and actions | codec code or copied business rules |
+| `window` | UI assembly, folder-monitor adapters, presented media state, overlays and actions | codec code or copied Navigation set rules |
 | `log` | timed diagnostic messages | render-path logging |
 
 ## Important implementation details
@@ -90,9 +90,9 @@ module.
 - Do not take two `RefCell` borrows in one statement. A borrow panic inside a
   GTK `extern "C"` callback aborts the process. Read each needed value before
   calling back into a widget. See the scroll code in `viewer.rs`.
-- Every asynchronous media result must compare `App::generation` before it
-  changes the UI. Late decode, animation, metadata and SVG results must drop
-  themselves instead of showing old media.
+- Every asynchronous media result must compare the Navigation-owned generation
+  before it changes the UI. Late decode, animation, metadata and SVG results
+  must drop themselves instead of showing old media.
 - Never log from `ImageView::snapshot` or another render path.
 - Quick Markup shapes use decoded-image coordinates. Preview and clipboard
   copy must share drawing code and work through all rotations, pan, zoom and
@@ -132,7 +132,7 @@ module.
   folder monitor.
 - `preload_neighbors` may start a rare duplicate decode. Measurements showed
   that this is cheaper and safer than moving its apply guard away from
-  `App::generation`. Change it only with new evidence.
+  the Navigation-owned generation. Change it only with new evidence.
 
 ### Video and subtitles
 
