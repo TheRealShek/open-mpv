@@ -119,7 +119,7 @@ new product decisions rather than incidental implementation.
 
 - **FR-8.1** The canonical optional config is
   `~/.config/open-mpv/open-mpv.conf`, using `key=value` lines and whole-line
-  `#` comments. README examples must parse exactly as shown.
+  `#` comments. Documented configuration examples must parse exactly as shown.
 - **FR-8.2** Supported settings include background, sort, reverse, wrap, initial fit,
   overlay delay, pointer hiding, video looping, volume, fullscreen, subtitles,
   video previews, cache policy and typed keybindings. `none` removes a default

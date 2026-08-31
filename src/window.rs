@@ -3957,6 +3957,19 @@ mod tests {
     }
 
     #[test]
+    fn configuration_guide_lists_every_action() {
+        let guide = include_str!("../docs/CONFIGURATION.md");
+        for (action, _) in ACTIONS {
+            let name = action.as_str();
+            assert!(
+                guide.contains(&format!("`{name}`")),
+                "configuration guide does not document `{name}`"
+            );
+        }
+        assert!(guide.contains("`none`"));
+    }
+
+    #[test]
     fn cheat_sheet_rows_align_regardless_of_markup_escaping() {
         use super::help_line;
 
