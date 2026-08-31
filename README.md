@@ -107,36 +107,8 @@ button for less common actions.
 
 ## Configuration
 
-Configuration is optional. Create `~/.config/open-mpv/open-mpv.conf` only when
-you want to change a default:
-
-```ini
-background = #121212
-# name | date
-sort = name
-sort-reverse = no
-wrap = no
-# fit | actual
-fit = fit
-overlay-timeout = 2.0
-hide-cursor = yes
-start-fullscreen = no
-loop = yes
-# 0-150
-volume = 100
-# auto | off
-subtitles = auto
-cache-budget-mb = 256
-
-# Add or replace key bindings.
-bind = n next
-bind = <Shift>d trash
-bind = bracketright speed-up
-bind = q none          # remove a default binding
-```
-
-Unknown or invalid settings produce a warning but do not stop the app from
-opening.
+Configuration is optional. See the [configuration guide](docs/CONFIGURATION.md)
+for the supported settings, comment syntax and custom key bindings.
 
 ## Troubleshooting
 

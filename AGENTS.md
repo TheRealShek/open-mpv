@@ -11,6 +11,8 @@ GNOME and Wayland. It uses Rust, GTK4, glycin, GStreamer and GIO.
    read-only. A request to build, fix or change allows focused local edits.
 2. Read the document that owns the decision:
    - [README.md](README.md) for user-facing features, installation and usage.
+   - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for user-facing settings,
+     defaults, value meanings and configurable actions.
    - [CONTEXT.md](CONTEXT.md) for product language and boundaries.
    - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for exact behavior and
      performance limits. Read it before changing behavior.
@@ -20,8 +22,10 @@ GNOME and Wayland. It uses Rust, GTK4, glycin, GStreamer and GIO.
 4. Make the smallest complete change. Reuse an existing helper when it fits.
    Do not add unrelated cleanup or speculative abstractions.
 5. Update product documents in the same change when behavior, scope or a
-   packaging decision changes. Use requirement names such as FR-5.4 and
-   NFR-1.1 when they help connect code to the specification.
+   packaging decision changes. Any change to configuration syntax, settings,
+   defaults, value meanings or configurable action names must also update
+   [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Use requirement names such
+   as FR-5.4 and NFR-1.1 when they help connect code to the specification.
 6. Run checks that match the risk, then run the complete required checks when
    the change is ready.
 7. If the built app or package changed and all relevant checks pass, install

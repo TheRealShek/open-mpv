@@ -1,6 +1,6 @@
 //! mpv-style plain-text configuration (FR-8).
 //!
-//! Format: `key=value` lines, `#` comments. Keybindings use repeated
+//! Format: `key=value` lines and whole-line `#` comments. Keybindings use repeated
 //! `bind=<key> <action>` lines; a user bind for a key overrides the
 //! default binding of that key. Unknown or malformed lines warn on
 //! stderr and are skipped — a bad config never prevents startup (FR-8.3).
@@ -285,6 +285,58 @@ mod tests {
         assert_eq!(c.subtitles, SubtitleMode::Off);
         assert_eq!(c.binds.get("n").map(String::as_str), Some("next"));
         assert_eq!(c.binds.get("BackSpace").map(String::as_str), Some("prev"));
+    }
+
+    #[test]
+    fn documented_config_example_parses_as_shown() {
+        let guide = include_str!("../docs/CONFIGURATION.md");
+        let example = guide
+            .split_once("```ini\n")
+            .and_then(|(_, rest)| rest.split_once("\n```"))
+            .map(|(example, _)| example)
+            .expect("configuration guide must contain an ini example");
+
+        let c = Config::parse(example, "docs/CONFIGURATION.md");
+        assert_eq!(c.background, "#202020");
+        assert_eq!(c.sort.order, SortOrder::Date);
+        assert_eq!(c.fit, FitMode::Actual);
+        assert_eq!(c.volume, 0.7);
+        assert_eq!(c.subtitles, SubtitleMode::Off);
+        assert!(!c.sort.reverse);
+        assert!(!c.wrap);
+        assert_eq!(c.overlay_timeout, 2.0);
+        assert!(c.hide_cursor);
+        assert!(!c.start_fullscreen);
+        assert!(c.loop_video);
+        assert_eq!(c.cache_budget_mb, 256);
+        assert_eq!(c.binds.get("q").map(String::as_str), Some("none"));
+    }
+
+    #[test]
+    fn configuration_guide_lists_every_setting() {
+        let guide = include_str!("../docs/CONFIGURATION.md");
+        let settings = [
+            "background",
+            "sort",
+            "sort-reverse",
+            "wrap",
+            "fit",
+            "overlay-timeout",
+            "hide-cursor",
+            "start-fullscreen",
+            "loop",
+            "volume",
+            "subtitles",
+            "cache-budget-mb",
+            "bind",
+        ];
+
+        for setting in settings {
+            assert!(
+                guide.contains(&format!("`{setting}`")),
+                "configuration guide does not document `{setting}`"
+            );
+        }
     }
 
     #[test]
