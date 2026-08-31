@@ -11,10 +11,9 @@ GNOME and Wayland. It uses Rust, GTK4, glycin, GStreamer and GIO.
    read-only. A request to build, fix or change allows focused local edits.
 2. Read the document that owns the decision:
    - [README.md](README.md) for user-facing features, installation and usage.
+   - [CONTEXT.md](CONTEXT.md) for product language and boundaries.
    - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for exact behavior and
      performance limits. Read it before changing behavior.
-   - [docs/PLAN.md](docs/PLAN.md) for product goals and excluded features.
-     Read it before adding a capability.
    - [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for packaging and releases.
 3. Inspect the relevant module, its callers, its tests and similar code. Find
    the cause before changing anything.
@@ -36,10 +35,11 @@ user asks. Never overwrite unrelated work in a dirty worktree.
 
 ## Rules that must not change
 
-- Only `fileops` may write to disk, and only for trash, restore and rotate-save
-  (FR-5.6). Do not add exports, screenshots, disk caches,
-  thumbnails, history, state files or automatic configuration writes without
-  a product decision. Quick Markup is clipboard-only.
+- Source media changes remain explicit and belong in `fileops`. The other
+  approved persistent writes are atomic Preferences updates to the canonical
+  config and standard freedesktop thumbnails for Explorer. Do not add private
+  caches, history, state files or implicit source writes without a product
+  decision. Quick Markup remains clipboard-only.
 - Do not add a dependency without explaining why existing Rust, GTK, GIO,
   glycin or GStreamer tools are not enough. Natural sort, `key=value` parsing
   and CLI handling are intentionally implemented in this repository.
@@ -51,7 +51,8 @@ user asks. Never overwrite unrelated work in a dirty worktree.
 - GTK's main loop is the only event loop. Use `glib::spawn_future_local`.
   Never add Tokio or async-std.
 - Every user command must go through the typed action layer in `window`
-  (NFR-6.2). Keys, menus and controls must not create separate behavior paths.
+  (NFR-6.2). Direct view manipulation may stay in `viewer`; keys, menus and
+  command-equivalent controls must not create separate behavior paths.
 - `folder` must remain plain Rust without GTK or GIO types so another UI can
   reuse it (NFR-6.1).
 

@@ -1,7 +1,6 @@
-//! The only module that writes to the filesystem (FR-5.6): move to
-//! trash, restore from trash, and rotate-save. Saves are atomic —
-//! either sparse in-place byte changes via glycin, or a full rewrite
-//! staged in a temp file and renamed over the original (FR-5.5).
+//! Source-media writes (FR-5): move to trash, restore from trash, and
+//! rotate-save. Complete rewrites are staged in a temp file and renamed
+//! over the original; sparse Glycin edits are applied in place.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -72,11 +71,11 @@ impl std::error::Error for RestoreError {
 pub enum SaveRotationError {
     Editor {
         path: PathBuf,
-        source: glycin::ErrorCtx,
+        source: Box<glycin::ErrorCtx>,
     },
     Rotation {
         path: PathBuf,
-        source: glycin::ErrorCtx,
+        source: Box<glycin::ErrorCtx>,
     },
     SparseWrite {
         path: PathBuf,
@@ -115,7 +114,7 @@ impl std::error::Error for SaveRotationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SaveRotationError::Editor { source, .. }
-            | SaveRotationError::Rotation { source, .. } => Some(source),
+            | SaveRotationError::Rotation { source, .. } => Some(source.as_ref()),
             SaveRotationError::SparseWrite { source, .. } => Some(source),
             SaveRotationError::ReadEdited(source)
             | SaveRotationError::AtomicWrite { source, .. } => Some(source),
@@ -272,7 +271,7 @@ pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), Save
         .await
         .map_err(|source| SaveRotationError::Editor {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
     let ops = glycin::Operations::new(vec![glycin::Operation::Rotate(rotation)]);
     let edit = editable
@@ -280,7 +279,7 @@ pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), Save
         .await
         .map_err(|source| SaveRotationError::Rotation {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
     match edit {
         glycin::SparseEdit::Sparse(_) => match edit.apply_to(file).await {

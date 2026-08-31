@@ -37,8 +37,8 @@ pub enum Decoded {
 
 #[derive(Debug)]
 pub enum DecodeError {
-    Load(glycin::ErrorCtx),
-    FirstFrame(glycin::ErrorCtx),
+    Load(Box<glycin::ErrorCtx>),
+    FirstFrame(Box<glycin::ErrorCtx>),
 }
 
 impl fmt::Display for DecodeError {
@@ -53,7 +53,7 @@ impl fmt::Display for DecodeError {
 impl std::error::Error for DecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            DecodeError::Load(source) | DecodeError::FirstFrame(source) => Some(source),
+            DecodeError::Load(source) | DecodeError::FirstFrame(source) => Some(source.as_ref()),
         }
     }
 }
@@ -74,9 +74,12 @@ pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), DecodeError> {
     let image = glycin::Loader::new(file)
         .load()
         .await
-        .map_err(DecodeError::Load)?;
+        .map_err(|source| DecodeError::Load(Box::new(source)))?;
     let mime = image.mime_type().to_string();
-    let frame = image.next_frame().await.map_err(DecodeError::FirstFrame)?;
+    let frame = image
+        .next_frame()
+        .await
+        .map_err(|source| DecodeError::FirstFrame(Box::new(source)))?;
     crate::applog!(
         "decode: {} {}x{} {} in {:.1} ms",
         path.display(),

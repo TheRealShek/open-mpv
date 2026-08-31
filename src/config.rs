@@ -209,8 +209,8 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Video containers routed to the GStreamer player instead of glycin
-/// (FR-10.1). The codec set inside is whatever the system's VA-API /
-/// GStreamer plugins decode.
+/// (FR-10.1). The codec set inside is whatever the installed hardware and
+/// software GStreamer plugins decode.
 pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov", "avi"];
 
 /// Text sidecars whose rendering is supplied by the base GStreamer stack

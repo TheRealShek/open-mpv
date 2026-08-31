@@ -2,8 +2,8 @@
 //! `gtk4paintablesink`, whose `GdkPaintable` the viewer displays like
 //! any other paintable.
 //!
-//! This is the resource-minimal path on this machine: VA-API decoders
-//! decode on the iGPU and frames reach GTK as dmabufs — no CPU pixel
+//! This is the resource-minimal path on this machine: preferred Intel QSV
+//! decoders use the iGPU and frames reach GTK as dmabufs — no CPU pixel
 //! copies. GStreamer is initialized lazily on the first video so
 //! image-only sessions keep their cold-start and footprint (NFR-1.1,
 //! NFR-2.1). The pipeline is reused across videos; `stop` drops it to
