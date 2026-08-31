@@ -24,7 +24,8 @@ use crate::fileops;
 use crate::folder::Folder;
 use crate::loader::{self, Decoded};
 use crate::player::{
-    self, PLAYBACK_RATES, Player, SubtitleChoice, SubtitleSnapshot, SubtitleTrack,
+    self, AudioChoice, AudioSnapshot, PLAYBACK_RATES, Player, SubtitleChoice, SubtitleSnapshot,
+    SubtitleTrack,
 };
 use crate::viewer::ImageView;
 
@@ -358,6 +359,9 @@ pub struct App {
     speed_action: gio::SimpleAction,
     subtitle_btn: gtk::MenuButton,
     markup_context_menu: gio::Menu,
+    audio_menu: gio::Menu,
+    audio_context_menu: gio::Menu,
+    audio_action: gio::SimpleAction,
     subtitle_menu: gio::Menu,
     subtitle_context_menu: gio::Menu,
     subtitle_action: gio::SimpleAction,
@@ -607,6 +611,11 @@ impl App {
         // editing item on video or animation would imply future support.
         let markup_context_menu = gio::Menu::new();
         more_menu.append_section(None, &markup_context_menu);
+        // Audio-track selection is contextual and appears only when the
+        // current video exposes multiple tracks (FR-10.8).
+        let audio_menu = gio::Menu::new();
+        let audio_context_menu = gio::Menu::new();
+        more_menu.append_section(None, &audio_context_menu);
         // Filled only while a video is active. The same subtitle model is
         // shared with the CC button, so right-click and the transport never
         // disagree about available tracks (FR-10.7).
@@ -731,6 +740,11 @@ impl App {
             Some(glib::VariantTy::STRING),
             &"auto".to_variant(),
         );
+        let audio_action = gio::SimpleAction::new_stateful(
+            "audio",
+            Some(glib::VariantTy::STRING),
+            &"auto".to_variant(),
+        );
         let speed_action = gio::SimpleAction::new_stateful(
             "speed",
             Some(glib::VariantTy::DOUBLE),
@@ -769,6 +783,9 @@ impl App {
             speed_action,
             subtitle_btn: subtitle_btn.clone(),
             markup_context_menu,
+            audio_menu,
+            audio_context_menu,
+            audio_action,
             subtitle_menu,
             subtitle_context_menu,
             subtitle_action,
@@ -1283,6 +1300,7 @@ impl App {
             return;
         }
         self.update_subtitles(player.subtitle_snapshot());
+        self.update_audio(player.audio_snapshot());
         self.update_playback_rate(player.playback_rate());
         *self.media.borrow_mut() = MediaState::Video(path.to_path_buf());
         self.update_control_mode();
@@ -1309,14 +1327,15 @@ impl App {
             .borrow()
             .as_ref()
             .is_some_and(|player| player.has_external_subtitle());
-        let snapshot = if let Some(p) = self.player.borrow().as_ref() {
+        let snapshots = if let Some(p) = self.player.borrow().as_ref() {
             p.stop();
-            Some(p.subtitle_snapshot())
+            Some((p.audio_snapshot(), p.subtitle_snapshot()))
         } else {
             None
         };
-        if let Some(snapshot) = snapshot {
-            self.update_subtitles(snapshot);
+        if let Some((audio, subtitles)) = snapshots {
+            self.update_audio(audio);
+            self.update_subtitles(subtitles);
         }
         if discard_player {
             self.player.borrow_mut().take();
@@ -1524,6 +1543,30 @@ impl App {
         self.fitted_for.set(None);
     }
 
+    fn update_audio(&self, snapshot: AudioSnapshot) {
+        rebuild_audio_menu(&self.audio_menu, &snapshot);
+        rebuild_audio_context(
+            &self.audio_context_menu,
+            &self.audio_menu,
+            self.is_video_showing(),
+            snapshot.tracks.len(),
+        );
+        self.audio_action
+            .set_state(&snapshot.choice.action_target().to_variant());
+    }
+
+    fn flash_audio_choice(self: &Rc<Self>, snapshot: &AudioSnapshot) {
+        let label = match &snapshot.choice {
+            AudioChoice::Automatic => snapshot.active_label.as_deref().unwrap_or("Automatic"),
+            AudioChoice::Track(id) => snapshot
+                .tracks
+                .iter()
+                .find(|track| track.id == *id)
+                .map_or("Audio changed", |track| track.label.as_str()),
+        };
+        self.flash(&format!("Audio: {label}"));
+    }
+
     fn flash_subtitle_choice(self: &Rc<Self>, snapshot: &SubtitleSnapshot) {
         let text = match &snapshot.choice {
             SubtitleChoice::Off => "Subtitles off".to_string(),
@@ -1717,6 +1760,15 @@ impl App {
         self.prev_btn.set_visible(!marking);
         self.next_btn.set_visible(!marking);
         rebuild_markup_context(&self.markup_context_menu, markup_available);
+        let audio_track_count = self
+            .with_video(Player::audio_snapshot)
+            .map_or(0, |snapshot| snapshot.tracks.len());
+        rebuild_audio_context(
+            &self.audio_context_menu,
+            &self.audio_menu,
+            video,
+            audio_track_count,
+        );
         rebuild_subtitle_context(&self.subtitle_context_menu, &self.subtitle_menu, video);
         self.control_bar.set_visible(photo || video || marking);
         self.markup_action.set_enabled(markup_available || marking);
@@ -1821,6 +1873,11 @@ impl App {
             player::Event::SubtitleError(description) => {
                 if self.is_video_showing() {
                     self.show_toast(&description, false);
+                }
+            }
+            player::Event::AudioChanged(snapshot) => {
+                if self.is_video_showing() {
+                    self.update_audio(snapshot);
                 }
             }
             player::Event::SubtitlesChanged(snapshot) => {
@@ -2835,6 +2892,30 @@ impl App {
         self.win.add_action(&self.subtitle_action);
 
         let app = self.clone();
+        self.audio_action.connect_activate(move |_, parameter| {
+            let Some(target) = parameter.and_then(glib::Variant::str) else {
+                return;
+            };
+            let choice = match target {
+                "auto" => AudioChoice::Automatic,
+                target => {
+                    let Some(id) = target.strip_prefix("track:") else {
+                        return;
+                    };
+                    AudioChoice::Track(id.to_string())
+                }
+            };
+            let Some(changed) = app.with_video(|player| player.choose_audio(choice)) else {
+                return;
+            };
+            if changed && let Some(snapshot) = app.with_video(Player::audio_snapshot) {
+                app.update_audio(snapshot.clone());
+                app.flash_audio_choice(&snapshot);
+            }
+        });
+        self.win.add_action(&self.audio_action);
+
+        let app = self.clone();
         self.speed_action.connect_activate(move |_, parameter| {
             let Some(rate) = parameter.and_then(glib::Variant::get::<f64>) else {
                 return;
@@ -3233,10 +3314,30 @@ fn playback_speed_menu() -> gio::Menu {
     menu
 }
 
-fn append_subtitle_item(menu: &gio::Menu, label: &str, target: &str) {
+fn append_choice_item(menu: &gio::Menu, action: &str, label: &str, target: &str) {
     let item = gio::MenuItem::new(Some(label), None);
-    item.set_action_and_target_value(Some("win.subtitle"), Some(&target.to_variant()));
+    item.set_action_and_target_value(Some(action), Some(&target.to_variant()));
     menu.append_item(&item);
+}
+
+fn rebuild_audio_menu(menu: &gio::Menu, snapshot: &AudioSnapshot) {
+    menu.remove_all();
+    append_choice_item(menu, "win.audio", "Automatic", "auto");
+    for track in &snapshot.tracks {
+        let target = AudioChoice::Track(track.id.clone()).action_target();
+        append_choice_item(menu, "win.audio", &track.label, &target);
+    }
+}
+
+fn rebuild_audio_context(context: &gio::Menu, audio: &gio::Menu, video: bool, track_count: usize) {
+    context.remove_all();
+    if video && track_count > 1 {
+        context.append_submenu(Some("Audio Track"), audio);
+    }
+}
+
+fn append_subtitle_item(menu: &gio::Menu, label: &str, target: &str) {
+    append_choice_item(menu, "win.subtitle", label, target);
 }
 
 fn append_subtitle_track(menu: &gio::Menu, track: &SubtitleTrack) {
@@ -3527,15 +3628,18 @@ mod tests {
         SKIP_BUDGET, adjacent_playback_rate, cache_budget_bytes, chrome_is_held,
         dialog_initial_folder_path, dialog_was_cancelled, excluded_path_message,
         format_playback_rate, format_time, looks_like_subtitle, nav_target, open_menu_model,
-        playback_speed_menu, position_text, rebuild_markup_context, rebuild_subtitle_context,
-        rebuild_subtitle_menu, resize_edge_at, save_control_visible, skip_target,
-        supported_media_extensions, svg_render_dimension, window_dimension,
+        playback_speed_menu, position_text, rebuild_audio_context, rebuild_audio_menu,
+        rebuild_markup_context, rebuild_subtitle_context, rebuild_subtitle_menu, resize_edge_at,
+        save_control_visible, skip_target, supported_media_extensions, svg_render_dimension,
+        window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
     use crate::folder::Folder;
     use crate::loader;
-    use crate::player::{SubtitleChoice, SubtitleSnapshot, SubtitleTrack};
+    use crate::player::{
+        AudioChoice, AudioSnapshot, AudioTrack, SubtitleChoice, SubtitleSnapshot, SubtitleTrack,
+    };
     use gtk4::gdk::SurfaceEdge;
     use gtk4::glib::value::ToValue;
     use gtk4::prelude::{FileExt, MenuModelExt};
@@ -3734,6 +3838,45 @@ mod tests {
             context
                 .item_link(0, gtk4::gio::MENU_LINK_SUBMENU.as_str())
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn audio_menu_appears_only_for_multiple_tracks() {
+        let audio = gtk4::gio::Menu::new();
+        let context = gtk4::gio::Menu::new();
+        let snapshot = |tracks| AudioSnapshot {
+            tracks,
+            choice: AudioChoice::Automatic,
+            active_label: None,
+        };
+        let single = snapshot(vec![AudioTrack {
+            id: "english".into(),
+            label: "English".into(),
+        }]);
+        rebuild_audio_menu(&audio, &single);
+        rebuild_audio_context(&context, &audio, true, single.tracks.len());
+        assert_eq!(context.n_items(), 0);
+
+        let multiple = snapshot(vec![
+            single.tracks[0].clone(),
+            AudioTrack {
+                id: "commentary".into(),
+                label: "Director Commentary".into(),
+            },
+        ]);
+        rebuild_audio_menu(&audio, &multiple);
+        rebuild_audio_context(&context, &audio, true, multiple.tracks.len());
+        assert_eq!(context.n_items(), 1);
+        let choices = context
+            .item_link(0, gtk4::gio::MENU_LINK_SUBMENU.as_str())
+            .unwrap();
+        assert_eq!(choices.n_items(), 3);
+        assert_eq!(
+            choices
+                .item_attribute_value(2, "action", Some(gtk4::glib::VariantTy::STRING))
+                .and_then(|value| value.str().map(str::to_owned)),
+            Some("win.audio".to_string())
         );
     }
 

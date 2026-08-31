@@ -56,8 +56,38 @@ pub enum Event {
     Error(glib::Error),
     MissingVideoDecoder(String),
     SubtitleError(String),
+    AudioChanged(AudioSnapshot),
     SubtitlesChanged(SubtitleSnapshot),
     PlaybackRateError(PlaybackRateError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioTrack {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AudioChoice {
+    #[default]
+    Automatic,
+    Track(String),
+}
+
+impl AudioChoice {
+    pub fn action_target(&self) -> String {
+        match self {
+            AudioChoice::Automatic => "auto".to_string(),
+            AudioChoice::Track(id) => format!("track:{id}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioSnapshot {
+    pub tracks: Vec<AudioTrack>,
+    pub choice: AudioChoice,
+    pub active_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,13 +207,15 @@ impl std::error::Error for PlayerError {
 }
 
 #[derive(Default)]
-struct SubtitleState {
+struct StreamState {
     collection: Option<gst::StreamCollection>,
     selected: BTreeSet<String>,
-    tracks: Vec<SubtitleTrack>,
-    choice: SubtitleChoice,
+    audio_tracks: Vec<AudioTrack>,
+    audio_choice: AudioChoice,
+    subtitle_tracks: Vec<SubtitleTrack>,
+    subtitle_choice: SubtitleChoice,
     /// The track visibility toggling should restore after `Off`.
-    last_visible_choice: SubtitleChoice,
+    last_visible_subtitle_choice: SubtitleChoice,
     external: Option<PathBuf>,
 }
 
@@ -413,7 +445,7 @@ pub struct Player {
     /// Cached so the per-frame transport update does not re-query the
     /// demuxer; invalidated on `DurationChanged` and on every new video.
     duration: Rc<Cell<Option<f64>>>,
-    subtitles: Rc<RefCell<SubtitleState>>,
+    stream_state: Rc<RefCell<StreamState>>,
     current_video: Rc<RefCell<Option<PathBuf>>>,
     subtitles_default_on: Cell<bool>,
     resume: Rc<RefCell<Option<ResumeState>>>,
@@ -457,7 +489,7 @@ impl Player {
         let playback_rate = Rc::new(Cell::new(1.0));
         let playing = Rc::new(Cell::new(false));
         let duration = Rc::new(Cell::new(None));
-        let subtitles = Rc::new(RefCell::new(SubtitleState::default()));
+        let stream_state = Rc::new(RefCell::new(StreamState::default()));
         let resume = Rc::new(RefCell::new(None::<ResumeState>));
         let current_video = Rc::new(RefCell::new(None::<PathBuf>));
         let error_pending = Rc::new(Cell::new(false));
@@ -537,7 +569,7 @@ impl Player {
                 let playback_rate = playback_rate.clone();
                 let playing = playing.clone();
                 let duration = duration.clone();
-                let subtitles = subtitles.clone();
+                let stream_state = stream_state.clone();
                 let resume = resume.clone();
                 let current_video = current_video.clone();
                 let error_pending = error_pending.clone();
@@ -561,11 +593,11 @@ impl Player {
                                 return glib::ControlFlow::Continue;
                             }
                             let failed_video = current_video.borrow().clone();
-                            let failed_external = subtitles.borrow().external.clone();
+                            let failed_external = stream_state.borrow().external.clone();
                             let error = e.error();
                             let playbin = playbin.clone();
                             let current_video = current_video.clone();
-                            let subtitles = subtitles.clone();
+                            let stream_state = stream_state.clone();
                             let resume = resume.clone();
                             let seek = seek.clone();
                             let playback_rate = playback_rate.clone();
@@ -578,7 +610,7 @@ impl Player {
                             // the streaming thread that posted this message.
                             glib::idle_add_local_once(move || {
                                 let still_current = *current_video.borrow() == failed_video
-                                    && subtitles.borrow().external == failed_external;
+                                    && stream_state.borrow().external == failed_external;
                                 if !still_current {
                                     crate::applog!("player: stale pipeline error superseded");
                                     error_pending.set(false);
@@ -587,7 +619,7 @@ impl Player {
                                 let recovered = recover_without_external(
                                     &playbin,
                                     &current_video,
-                                    &subtitles,
+                                    &stream_state,
                                     &resume,
                                     &seek,
                                     &playback_rate,
@@ -693,46 +725,41 @@ impl Player {
                         }
                         gst::MessageView::StreamCollection(streams) => {
                             let collection = streams.stream_collection();
-                            let choice = {
-                                let mut state = subtitles.borrow_mut();
-                                state.collection = Some(collection);
-                                refresh_subtitle_tracks(&mut state);
-                                if matches!(
-                                    &state.choice,
-                                    SubtitleChoice::Track(id)
-                                        if !state.tracks.iter().any(|track| track.id == *id)
-                                ) {
-                                    state.choice = SubtitleChoice::Automatic;
-                                }
-                                if matches!(
-                                    &state.last_visible_choice,
-                                    SubtitleChoice::Track(id)
-                                        if !state.tracks.iter().any(|track| track.id == *id)
-                                ) {
-                                    state.last_visible_choice = SubtitleChoice::Automatic;
-                                }
-                                state.choice.clone()
+                            let should_apply = {
+                                let mut state = stream_state.borrow_mut();
+                                replace_stream_collection(&mut state, collection);
+                                state.audio_choice != AudioChoice::Automatic
+                                    || state.subtitle_choice != SubtitleChoice::Automatic
+                            };
+                            let (audio_count, subtitle_count) = {
+                                let state = stream_state.borrow();
+                                (state.audio_tracks.len(), state.subtitle_tracks.len())
                             };
                             crate::applog!(
-                                "player: discovered {} subtitle track(s)",
-                                subtitles.borrow().tracks.len()
+                                "player: discovered {audio_count} audio and {subtitle_count} subtitle track(s)"
                             );
-                            if choice != SubtitleChoice::Automatic {
-                                apply_subtitle_choice(&playbin, &subtitles, &choice);
+                            if should_apply {
+                                apply_stream_choices(&playbin, &stream_state, None, None);
                             }
-                            on_event(Event::SubtitlesChanged(subtitle_snapshot(
-                                &subtitles.borrow(),
-                            )));
+                            let (audio, subtitles) = {
+                                let state = stream_state.borrow();
+                                (audio_snapshot(&state), subtitle_snapshot(&state))
+                            };
+                            on_event(Event::AudioChanged(audio));
+                            on_event(Event::SubtitlesChanged(subtitles));
                         }
                         gst::MessageView::StreamsSelected(streams) => {
                             let selected = streams
                                 .streams()
                                 .filter_map(|stream| stream.stream_id().map(|id| id.to_string()))
                                 .collect();
-                            subtitles.borrow_mut().selected = selected;
-                            on_event(Event::SubtitlesChanged(subtitle_snapshot(
-                                &subtitles.borrow(),
-                            )));
+                            stream_state.borrow_mut().selected = selected;
+                            let (audio, subtitles) = {
+                                let state = stream_state.borrow();
+                                (audio_snapshot(&state), subtitle_snapshot(&state))
+                            };
+                            on_event(Event::AudioChanged(audio));
+                            on_event(Event::SubtitlesChanged(subtitles));
                         }
                         gst::MessageView::DurationChanged(_) => duration.set(None),
                         _ => {}
@@ -751,7 +778,7 @@ impl Player {
             pitch_preserving,
             playing,
             duration,
-            subtitles,
+            stream_state,
             current_video,
             subtitles_default_on: Cell::new(true),
             resume,
@@ -765,7 +792,7 @@ impl Player {
     }
 
     pub fn has_external_subtitle(&self) -> bool {
-        self.subtitles.borrow().external.is_some()
+        self.stream_state.borrow().external.is_some()
     }
 
     pub fn path_has_sidecar(path: &Path) -> bool {
@@ -784,7 +811,7 @@ impl Player {
         let _ = teardown_pipeline(&self.playbin);
         self.forget_stream();
         *self.current_video.borrow_mut() = Some(path.to_path_buf());
-        self.subtitles.borrow_mut().external = subtitle;
+        self.stream_state.borrow_mut().external = subtitle;
         configure_uris(&self.playbin, &uri, suburi.as_deref());
         self.playbin
             .set_state(gst::State::Playing)
@@ -819,9 +846,9 @@ impl Player {
         } else {
             SubtitleChoice::Off
         };
-        *self.subtitles.borrow_mut() = SubtitleState {
-            choice,
-            ..SubtitleState::default()
+        *self.stream_state.borrow_mut() = StreamState {
+            subtitle_choice: choice,
+            ..StreamState::default()
         };
     }
 
@@ -837,7 +864,7 @@ impl Player {
     pub fn set_subtitles_default(&self, enabled: bool) {
         self.subtitles_default_on.set(enabled);
         if self.current_video.borrow().is_none() {
-            self.subtitles.borrow_mut().choice = if enabled {
+            self.stream_state.borrow_mut().subtitle_choice = if enabled {
                 SubtitleChoice::Automatic
             } else {
                 SubtitleChoice::Off
@@ -862,16 +889,16 @@ impl Player {
                     path: path.to_path_buf(),
                     source: io::Error::new(io::ErrorKind::InvalidInput, "no video is playing"),
                 })?;
-        let already_attached = self.subtitles.borrow().external.as_deref() == Some(path);
+        let already_attached = self.stream_state.borrow().external.as_deref() == Some(path);
         if already_attached {
             crate::applog!(
                 "player: subtitle {} already attached; selecting existing track",
                 path.display()
             );
             if !self.choose_subtitle(SubtitleChoice::Automatic) {
-                let mut state = self.subtitles.borrow_mut();
-                state.choice = SubtitleChoice::Automatic;
-                state.last_visible_choice = SubtitleChoice::Automatic;
+                let mut state = self.stream_state.borrow_mut();
+                state.subtitle_choice = SubtitleChoice::Automatic;
+                state.last_visible_subtitle_choice = SubtitleChoice::Automatic;
             }
             return Ok(());
         }
@@ -902,13 +929,14 @@ impl Player {
         crate::applog!("player: subtitle rebuild reached null");
         self.forget_timing();
         {
-            let mut subtitles = self.subtitles.borrow_mut();
-            subtitles.collection = None;
-            subtitles.selected.clear();
-            subtitles.tracks.clear();
-            subtitles.choice = SubtitleChoice::Automatic;
-            subtitles.last_visible_choice = SubtitleChoice::Automatic;
-            subtitles.external = Some(path.to_path_buf());
+            let mut streams = self.stream_state.borrow_mut();
+            streams.collection = None;
+            streams.selected.clear();
+            streams.audio_tracks.clear();
+            streams.subtitle_tracks.clear();
+            streams.subtitle_choice = SubtitleChoice::Automatic;
+            streams.last_visible_subtitle_choice = SubtitleChoice::Automatic;
+            streams.external = Some(path.to_path_buf());
         }
         *self.resume.borrow_mut() = Some(ResumeState {
             position,
@@ -923,7 +951,7 @@ impl Player {
             let _ = recover_without_external(
                 &self.playbin,
                 &self.current_video,
-                &self.subtitles,
+                &self.stream_state,
                 &self.resume,
                 &self.seek,
                 &self.playback_rate,
@@ -938,44 +966,67 @@ impl Player {
     }
 
     pub fn subtitle_snapshot(&self) -> SubtitleSnapshot {
-        subtitle_snapshot(&self.subtitles.borrow())
+        subtitle_snapshot(&self.stream_state.borrow())
     }
 
-    pub fn choose_subtitle(&self, choice: SubtitleChoice) -> bool {
-        if let SubtitleChoice::Track(id) = &choice
+    pub fn audio_snapshot(&self) -> AudioSnapshot {
+        audio_snapshot(&self.stream_state.borrow())
+    }
+
+    pub fn choose_audio(&self, choice: AudioChoice) -> bool {
+        if let AudioChoice::Track(id) = &choice
             && !self
-                .subtitles
+                .stream_state
                 .borrow()
-                .tracks
+                .audio_tracks
                 .iter()
                 .any(|track| track.id == *id)
         {
             return false;
         }
-        let sent = apply_subtitle_choice(&self.playbin, &self.subtitles, &choice);
+        let sent = apply_stream_choices(&self.playbin, &self.stream_state, Some(&choice), None);
+        if sent {
+            crate::applog!("player: audio selection {}", choice.action_target());
+            self.stream_state.borrow_mut().audio_choice = choice;
+        }
+        sent
+    }
+
+    pub fn choose_subtitle(&self, choice: SubtitleChoice) -> bool {
+        if let SubtitleChoice::Track(id) = &choice
+            && !self
+                .stream_state
+                .borrow()
+                .subtitle_tracks
+                .iter()
+                .any(|track| track.id == *id)
+        {
+            return false;
+        }
+        let sent = apply_stream_choices(&self.playbin, &self.stream_state, None, Some(&choice));
         if sent {
             crate::applog!("player: subtitle selection {}", choice.action_target());
-            let mut state = self.subtitles.borrow_mut();
+            let mut state = self.stream_state.borrow_mut();
             if choice != SubtitleChoice::Off {
-                state.last_visible_choice = choice.clone();
+                state.last_visible_subtitle_choice = choice.clone();
             }
-            state.choice = choice;
+            state.subtitle_choice = choice;
         }
         sent
     }
 
     pub fn toggle_subtitles(&self) -> SubtitleSnapshot {
-        if self.subtitles.borrow().tracks.is_empty() {
+        if self.stream_state.borrow().subtitle_tracks.is_empty() {
             return self.subtitle_snapshot();
         }
-        let choice = toggled_subtitle_choice(&self.subtitles.borrow());
+        let choice = toggled_subtitle_choice(&self.stream_state.borrow());
         self.choose_subtitle(choice);
         self.subtitle_snapshot()
     }
 
     pub fn cycle_subtitles(&self) -> SubtitleSnapshot {
-        let state = self.subtitles.borrow();
-        if state.tracks.is_empty() {
+        let state = self.stream_state.borrow();
+        if state.subtitle_tracks.is_empty() {
             return subtitle_snapshot(&state);
         }
         let choice = cycled_subtitle_choice(&state);
@@ -1191,13 +1242,13 @@ fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError
 fn recover_without_external(
     playbin: &gst::Element,
     current_video: &RefCell<Option<PathBuf>>,
-    subtitles: &RefCell<SubtitleState>,
+    streams: &RefCell<StreamState>,
     resume: &RefCell<Option<ResumeState>>,
     seek: &RefCell<SeekState>,
     playback_rate: &Cell<f64>,
     duration: &Cell<Option<f64>>,
 ) -> bool {
-    let had_external = subtitles.borrow().external.is_some();
+    let had_external = streams.borrow().external.is_some();
     if !had_external {
         return false;
     }
@@ -1227,12 +1278,13 @@ fn recover_without_external(
     playback_rate.set(1.0);
     duration.set(None);
     {
-        let mut state = subtitles.borrow_mut();
+        let mut state = streams.borrow_mut();
         state.collection = None;
         state.selected.clear();
-        state.tracks.clear();
-        state.choice = SubtitleChoice::Automatic;
-        state.last_visible_choice = SubtitleChoice::Automatic;
+        state.audio_tracks.clear();
+        state.subtitle_tracks.clear();
+        state.subtitle_choice = SubtitleChoice::Automatic;
+        state.last_visible_subtitle_choice = SubtitleChoice::Automatic;
         state.external = None;
     }
     *resume.borrow_mut() = Some(ResumeState {
@@ -1299,11 +1351,20 @@ fn matching_sidecar(video: &Path) -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
-fn refresh_subtitle_tracks(state: &mut SubtitleState) {
+fn refresh_stream_tracks(state: &mut StreamState) {
     let Some(collection) = state.collection.as_ref() else {
-        state.tracks.clear();
+        state.audio_tracks.clear();
+        state.subtitle_tracks.clear();
         return;
     };
+    state.audio_tracks = streams_of_type(collection, gst::StreamType::AUDIO)
+        .enumerate()
+        .filter_map(|(index, stream)| {
+            let id = stream.stream_id()?.to_string();
+            let label = stream_tag_label(&stream).unwrap_or_else(|| format!("Audio {}", index + 1));
+            Some(AudioTrack { id, label })
+        })
+        .collect();
     let text_streams: Vec<gst::Stream> = (0..collection.size())
         .filter_map(|index| collection.stream(index))
         .filter(|stream| stream.stream_type().contains(gst::StreamType::TEXT))
@@ -1319,26 +1380,12 @@ fn refresh_subtitle_tracks(state: &mut SubtitleState) {
             path.file_name()
                 .map(|name| format!("External — {}", name.to_string_lossy()))
         });
-    state.tracks = text_streams
+    state.subtitle_tracks = text_streams
         .into_iter()
         .enumerate()
         .filter_map(|(index, stream)| {
             let id = stream.stream_id()?.to_string();
-            let tags = stream.tags();
-            let label = tags
-                .as_ref()
-                .and_then(|tags| tags.get::<gst::tags::Title>())
-                .map(|value| value.get().to_string())
-                .or_else(|| {
-                    tags.as_ref()
-                        .and_then(|tags| tags.get::<gst::tags::LanguageName>())
-                        .map(|value| value.get().to_string())
-                })
-                .or_else(|| {
-                    tags.as_ref()
-                        .and_then(|tags| tags.get::<gst::tags::LanguageCode>())
-                        .map(|value| value.get().to_string())
-                })
+            let label = stream_tag_label(&stream)
                 .or_else(|| external_label.take())
                 .unwrap_or_else(|| format!("Subtitle {}", index + 1));
             Some(SubtitleTrack { id, label })
@@ -1346,27 +1393,84 @@ fn refresh_subtitle_tracks(state: &mut SubtitleState) {
         .collect();
 }
 
-fn subtitle_snapshot(state: &SubtitleState) -> SubtitleSnapshot {
+fn stream_tag_label(stream: &gst::Stream) -> Option<String> {
+    let tags = stream.tags();
+    tags.as_ref()
+        .and_then(|tags| tags.get::<gst::tags::Title>())
+        .map(|value| value.get().to_string())
+        .or_else(|| {
+            tags.as_ref()
+                .and_then(|tags| tags.get::<gst::tags::LanguageName>())
+                .map(|value| value.get().to_string())
+        })
+        .or_else(|| {
+            tags.as_ref()
+                .and_then(|tags| tags.get::<gst::tags::LanguageCode>())
+                .map(|value| value.get().to_string())
+        })
+}
+
+fn replace_stream_collection(state: &mut StreamState, collection: gst::StreamCollection) {
+    state.collection = Some(collection);
+    refresh_stream_tracks(state);
+    if matches!(
+        &state.audio_choice,
+        AudioChoice::Track(id) if !state.audio_tracks.iter().any(|track| track.id == *id)
+    ) {
+        state.audio_choice = AudioChoice::Automatic;
+    }
+    if matches!(
+        &state.subtitle_choice,
+        SubtitleChoice::Track(id)
+            if !state.subtitle_tracks.iter().any(|track| track.id == *id)
+    ) {
+        state.subtitle_choice = SubtitleChoice::Automatic;
+    }
+    if matches!(
+        &state.last_visible_subtitle_choice,
+        SubtitleChoice::Track(id)
+            if !state.subtitle_tracks.iter().any(|track| track.id == *id)
+    ) {
+        state.last_visible_subtitle_choice = SubtitleChoice::Automatic;
+    }
+}
+
+fn audio_snapshot(state: &StreamState) -> AudioSnapshot {
+    let active_label = selected_stream_id(state, gst::StreamType::AUDIO).and_then(|id| {
+        state
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == id)
+            .map(|track| track.label.clone())
+    });
+    AudioSnapshot {
+        tracks: state.audio_tracks.clone(),
+        choice: state.audio_choice.clone(),
+        active_label,
+    }
+}
+
+fn subtitle_snapshot(state: &StreamState) -> SubtitleSnapshot {
     let active_label = selected_text_id(state).and_then(|id| {
         state
-            .tracks
+            .subtitle_tracks
             .iter()
             .find(|track| track.id == id)
             .map(|track| track.label.clone())
     });
     SubtitleSnapshot {
-        tracks: state.tracks.clone(),
-        choice: state.choice.clone(),
+        tracks: state.subtitle_tracks.clone(),
+        choice: state.subtitle_choice.clone(),
         active_label,
     }
 }
 
-fn toggled_subtitle_choice(state: &SubtitleState) -> SubtitleChoice {
-    if state.choice != SubtitleChoice::Off {
+fn toggled_subtitle_choice(state: &StreamState) -> SubtitleChoice {
+    if state.subtitle_choice != SubtitleChoice::Off {
         return SubtitleChoice::Off;
     }
-    match &state.last_visible_choice {
-        SubtitleChoice::Track(id) if state.tracks.iter().any(|track| track.id == *id) => {
+    match &state.last_visible_subtitle_choice {
+        SubtitleChoice::Track(id) if state.subtitle_tracks.iter().any(|track| track.id == *id) => {
             SubtitleChoice::Track(id.clone())
         }
         SubtitleChoice::Automatic | SubtitleChoice::Track(_) | SubtitleChoice::Off => {
@@ -1375,42 +1479,55 @@ fn toggled_subtitle_choice(state: &SubtitleState) -> SubtitleChoice {
     }
 }
 
-fn cycled_subtitle_choice(state: &SubtitleState) -> SubtitleChoice {
-    if state.choice == SubtitleChoice::Off {
-        return state.tracks.first().map_or(SubtitleChoice::Off, |track| {
-            SubtitleChoice::Track(track.id.clone())
-        });
+fn cycled_subtitle_choice(state: &StreamState) -> SubtitleChoice {
+    if state.subtitle_choice == SubtitleChoice::Off {
+        return state
+            .subtitle_tracks
+            .first()
+            .map_or(SubtitleChoice::Off, |track| {
+                SubtitleChoice::Track(track.id.clone())
+            });
     }
-    let current = match &state.choice {
+    let current = match &state.subtitle_choice {
         SubtitleChoice::Track(id) => Some(id.as_str()),
         SubtitleChoice::Automatic => selected_text_id(state),
         SubtitleChoice::Off => None,
     };
     current
-        .and_then(|id| state.tracks.iter().position(|track| track.id == id))
-        .and_then(|index| state.tracks.get(index + 1))
+        .and_then(|id| {
+            state
+                .subtitle_tracks
+                .iter()
+                .position(|track| track.id == id)
+        })
+        .and_then(|index| state.subtitle_tracks.get(index + 1))
         .map_or(SubtitleChoice::Off, |track| {
             SubtitleChoice::Track(track.id.clone())
         })
 }
 
-fn selected_text_id(state: &SubtitleState) -> Option<&str> {
-    state
-        .tracks
-        .iter()
-        .find(|track| state.selected.contains(&track.id))
-        .map(|track| track.id.as_str())
+fn selected_text_id(state: &StreamState) -> Option<&str> {
+    selected_stream_id(state, gst::StreamType::TEXT)
 }
 
-fn apply_subtitle_choice(
-    playbin: &gst::Element,
-    subtitles: &RefCell<SubtitleState>,
-    choice: &SubtitleChoice,
-) -> bool {
-    let state = subtitles.borrow();
-    let selected = subtitle_selection_ids(&state, choice);
-    drop(state);
+fn selected_stream_id(state: &StreamState, kind: gst::StreamType) -> Option<&str> {
+    let collection = state.collection.as_ref()?;
+    state
+        .selected
+        .iter()
+        .find(|id| {
+            stream_by_id(collection, id).is_some_and(|stream| stream.stream_type().contains(kind))
+        })
+        .map(String::as_str)
+}
 
+fn apply_stream_choices(
+    playbin: &gst::Element,
+    streams: &RefCell<StreamState>,
+    audio_request: Option<&AudioChoice>,
+    subtitle_request: Option<&SubtitleChoice>,
+) -> bool {
+    let selected = stream_selection_ids(&streams.borrow(), audio_request, subtitle_request);
     if selected.is_empty() {
         return false;
     }
@@ -1418,60 +1535,69 @@ fn apply_subtitle_choice(
     playbin.send_event(event)
 }
 
-fn subtitle_selection_ids(state: &SubtitleState, choice: &SubtitleChoice) -> Vec<String> {
+fn stream_selection_ids(
+    state: &StreamState,
+    audio_request: Option<&AudioChoice>,
+    subtitle_request: Option<&SubtitleChoice>,
+) -> Vec<String> {
     let Some(collection) = state.collection.as_ref() else {
         return Vec::new();
     };
 
-    let mut selected: Vec<String> = (0..collection.size())
-        .filter_map(|index| collection.stream(index))
-        .filter(|stream| !stream.stream_type().contains(gst::StreamType::TEXT))
-        .filter_map(|stream| {
-            let id = stream.stream_id()?.to_string();
-            state.selected.contains(&id).then_some(id)
-        })
-        .collect();
-
-    // A collection can arrive before StreamsSelected. Preserve its default
-    // audio/video choices rather than sending a text-only selection event.
-    for kind in [gst::StreamType::VIDEO, gst::StreamType::AUDIO] {
-        let already_selected = selected.iter().any(|id| {
-            stream_by_id(collection, id).is_some_and(|stream| stream.stream_type().contains(kind))
-        });
-        if already_selected {
-            continue;
-        }
-        let candidate = streams_of_type(collection, kind)
-            .find(|stream| stream.stream_flags().contains(gst::StreamFlags::SELECT))
-            .or_else(|| {
-                streams_of_type(collection, kind)
-                    .find(|stream| !stream.stream_flags().contains(gst::StreamFlags::UNSELECT))
-            });
-        if let Some(id) = candidate.and_then(|stream| stream.stream_id()) {
-            selected.push(id.to_string());
-        }
+    let mut selected = Vec::new();
+    let video_id = selected_stream_id(state, gst::StreamType::VIDEO)
+        .map(str::to_string)
+        .or_else(|| default_stream_id(collection, gst::StreamType::VIDEO));
+    if let Some(id) = video_id {
+        selected.push(id);
     }
 
-    let text_id: Option<String> = match choice {
+    let audio_choice = audio_request.unwrap_or(&state.audio_choice);
+    let audio_id = match audio_choice {
+        AudioChoice::Track(id) if state.audio_tracks.iter().any(|track| track.id == *id) => {
+            Some(id.clone())
+        }
+        AudioChoice::Automatic if audio_request.is_none() => {
+            selected_stream_id(state, gst::StreamType::AUDIO)
+                .map(str::to_string)
+                .or_else(|| default_stream_id(collection, gst::StreamType::AUDIO))
+        }
+        AudioChoice::Automatic | AudioChoice::Track(_) => {
+            default_stream_id(collection, gst::StreamType::AUDIO)
+        }
+    };
+    if let Some(id) = audio_id {
+        selected.push(id);
+    }
+
+    let subtitle_choice = subtitle_request.unwrap_or(&state.subtitle_choice);
+    let text_id = match subtitle_choice {
         SubtitleChoice::Off => None,
-        SubtitleChoice::Track(id) => state
-            .tracks
-            .iter()
-            .any(|track| track.id == *id)
-            .then(|| id.clone()),
-        SubtitleChoice::Automatic => streams_of_type(collection, gst::StreamType::TEXT)
-            .find(|stream| stream.stream_flags().contains(gst::StreamFlags::SELECT))
-            .or_else(|| {
-                streams_of_type(collection, gst::StreamType::TEXT)
-                    .find(|stream| !stream.stream_flags().contains(gst::StreamFlags::UNSELECT))
-            })
-            .and_then(|stream| stream.stream_id())
-            .map(String::from),
+        SubtitleChoice::Track(id) if state.subtitle_tracks.iter().any(|track| track.id == *id) => {
+            Some(id.clone())
+        }
+        SubtitleChoice::Automatic if subtitle_request.is_none() => selected_text_id(state)
+            .map(str::to_string)
+            .or_else(|| default_stream_id(collection, gst::StreamType::TEXT)),
+        SubtitleChoice::Automatic | SubtitleChoice::Track(_) => {
+            default_stream_id(collection, gst::StreamType::TEXT)
+        }
     };
     if let Some(id) = text_id {
         selected.push(id);
     }
     selected
+}
+
+fn default_stream_id(collection: &gst::StreamCollection, kind: gst::StreamType) -> Option<String> {
+    streams_of_type(collection, kind)
+        .find(|stream| stream.stream_flags().contains(gst::StreamFlags::SELECT))
+        .or_else(|| {
+            streams_of_type(collection, kind)
+                .find(|stream| !stream.stream_flags().contains(gst::StreamFlags::UNSELECT))
+        })
+        .and_then(|stream| stream.stream_id())
+        .map(String::from)
 }
 
 fn streams_of_type(
@@ -1617,12 +1743,13 @@ mod tests {
     use gstreamer::prelude::PluginFeatureExtManual;
 
     use super::{
-        DecoderFallback, INTEL_VIDEO_DECODERS, Instant, ResumeAction, ResumeStage, ResumeState,
-        SEEK_SETTLE, SeekRequest, SeekState, SubtitleChoice, SubtitleState, SubtitleTrack,
-        advance_resume, cycled_subtitle_choice, gst, h264_exceeds_declared_level, matching_sidecar,
-        missing_subtitle_decoder, missing_video_decoder, prefer_intel_video_decoders,
-        preferred_hardware_rank, refresh_subtitle_tracks, subtitle_selection_ids,
-        toggled_subtitle_choice, video_stream_summary,
+        AudioChoice, DecoderFallback, INTEL_VIDEO_DECODERS, Instant, ResumeAction, ResumeStage,
+        ResumeState, SEEK_SETTLE, SeekRequest, SeekState, StreamState, SubtitleChoice,
+        SubtitleTrack, advance_resume, cycled_subtitle_choice, gst, h264_exceeds_declared_level,
+        matching_sidecar, missing_subtitle_decoder, missing_video_decoder,
+        prefer_intel_video_decoders, preferred_hardware_rank, refresh_stream_tracks,
+        replace_stream_collection, stream_selection_ids, toggled_subtitle_choice,
+        video_stream_summary,
     };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
@@ -1699,7 +1826,7 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_selection_preserves_default_video_and_audio() {
+    fn stream_selection_preserves_chosen_audio_video_and_subtitle() {
         gst::init().unwrap();
         let video = gst::Stream::new(
             Some("video"),
@@ -1707,11 +1834,17 @@ mod tests {
             gst::StreamType::VIDEO,
             gst::StreamFlags::SELECT,
         );
-        let audio = gst::Stream::new(
-            Some("audio"),
+        let english_audio = gst::Stream::new(
+            Some("english-audio"),
             None,
             gst::StreamType::AUDIO,
             gst::StreamFlags::SELECT,
+        );
+        let commentary = gst::Stream::new(
+            Some("commentary"),
+            None,
+            gst::StreamType::AUDIO,
+            gst::StreamFlags::empty(),
         );
         let english = gst::Stream::new(
             Some("english"),
@@ -1726,25 +1859,166 @@ mod tests {
             gst::StreamFlags::empty(),
         );
         let collection = gst::StreamCollection::builder(None)
-            .streams([video, audio, english, hindi])
+            .streams([video, english_audio, commentary, english, hindi])
             .build();
-        let mut state = SubtitleState {
+        let mut state = StreamState {
             collection: Some(collection),
-            ..SubtitleState::default()
+            audio_choice: AudioChoice::Track("commentary".into()),
+            subtitle_choice: SubtitleChoice::Track("hindi".into()),
+            ..StreamState::default()
         };
-        refresh_subtitle_tracks(&mut state);
+        refresh_stream_tracks(&mut state);
 
         assert_eq!(
-            subtitle_selection_ids(&state, &SubtitleChoice::Off),
-            ["video", "audio"]
+            stream_selection_ids(&state, None, None),
+            ["video", "commentary", "hindi"]
+        );
+    }
+
+    #[test]
+    fn subtitle_change_preserves_the_active_automatic_audio_stream() {
+        gst::init().unwrap();
+        let stream = |id, kind, flags| gst::Stream::new(Some(id), None, kind, flags);
+        let collection = gst::StreamCollection::builder(None)
+            .streams([
+                stream("video", gst::StreamType::VIDEO, gst::StreamFlags::SELECT),
+                stream(
+                    "english-audio",
+                    gst::StreamType::AUDIO,
+                    gst::StreamFlags::SELECT,
+                ),
+                stream(
+                    "commentary",
+                    gst::StreamType::AUDIO,
+                    gst::StreamFlags::empty(),
+                ),
+                stream(
+                    "english-text",
+                    gst::StreamType::TEXT,
+                    gst::StreamFlags::SELECT,
+                ),
+                stream(
+                    "hindi-text",
+                    gst::StreamType::TEXT,
+                    gst::StreamFlags::empty(),
+                ),
+            ])
+            .build();
+        let mut state = StreamState {
+            collection: Some(collection),
+            ..StreamState::default()
+        };
+        refresh_stream_tracks(&mut state);
+        state.selected.extend([
+            "video".to_string(),
+            "commentary".to_string(),
+            "hindi-text".to_string(),
+        ]);
+
+        assert_eq!(
+            stream_selection_ids(
+                &state,
+                None,
+                Some(&SubtitleChoice::Track("english-text".into())),
+            ),
+            ["video", "commentary", "english-text"]
         );
         assert_eq!(
-            subtitle_selection_ids(&state, &SubtitleChoice::Automatic),
-            ["video", "audio", "english"]
+            stream_selection_ids(&state, Some(&AudioChoice::Automatic), None),
+            ["video", "english-audio", "hindi-text"]
         );
+    }
+
+    #[test]
+    fn replacement_collection_retains_valid_audio_choice_and_resets_missing_choice() {
+        gst::init().unwrap();
+        let collection = |audio_ids: &[&str]| {
+            let video = gst::Stream::new(
+                Some("video"),
+                None,
+                gst::StreamType::VIDEO,
+                gst::StreamFlags::SELECT,
+            );
+            let audio = audio_ids.iter().enumerate().map(|(index, id)| {
+                gst::Stream::new(
+                    Some(id),
+                    None,
+                    gst::StreamType::AUDIO,
+                    if index == 0 {
+                        gst::StreamFlags::SELECT
+                    } else {
+                        gst::StreamFlags::empty()
+                    },
+                )
+            });
+            gst::StreamCollection::builder(None)
+                .streams(std::iter::once(video).chain(audio))
+                .build()
+        };
+        let mut state = StreamState {
+            audio_choice: AudioChoice::Track("commentary".into()),
+            ..StreamState::default()
+        };
+
+        replace_stream_collection(&mut state, collection(&["english", "commentary"]));
+        assert_eq!(state.audio_choice, AudioChoice::Track("commentary".into()));
+
+        replace_stream_collection(&mut state, collection(&["english", "descriptive"]));
+        assert_eq!(state.audio_choice, AudioChoice::Automatic);
+    }
+
+    #[test]
+    fn audio_track_labels_use_title_language_then_stable_fallback() {
+        gst::init().unwrap();
+        let titled = gst::Stream::new(
+            Some("commentary"),
+            None,
+            gst::StreamType::AUDIO,
+            gst::StreamFlags::SELECT,
+        );
+        let mut title_tags = gst::TagList::new();
+        title_tags
+            .get_mut()
+            .unwrap()
+            .add::<gst::tags::Title>(&"Director Commentary", gst::TagMergeMode::Append);
+        titled.set_tags(Some(&title_tags));
+
+        let language = gst::Stream::new(
+            Some("hindi"),
+            None,
+            gst::StreamType::AUDIO,
+            gst::StreamFlags::empty(),
+        );
+        let mut language_tags = gst::TagList::new();
+        language_tags
+            .get_mut()
+            .unwrap()
+            .add::<gst::tags::LanguageName>(&"Hindi", gst::TagMergeMode::Append);
+        language.set_tags(Some(&language_tags));
+
+        let untagged = gst::Stream::new(
+            Some("other"),
+            None,
+            gst::StreamType::AUDIO,
+            gst::StreamFlags::empty(),
+        );
+        let mut state = StreamState {
+            collection: Some(
+                gst::StreamCollection::builder(None)
+                    .streams([titled, language, untagged])
+                    .build(),
+            ),
+            ..StreamState::default()
+        };
+        refresh_stream_tracks(&mut state);
+
         assert_eq!(
-            subtitle_selection_ids(&state, &SubtitleChoice::Track("hindi".into())),
-            ["video", "audio", "hindi"]
+            state
+                .audio_tracks
+                .iter()
+                .map(|track| track.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Director Commentary", "Hindi", "Audio 3"]
         );
     }
 
@@ -1758,28 +2032,28 @@ mod tests {
             id: "hindi".into(),
             label: "Hindi".into(),
         };
-        let mut state = SubtitleState {
-            tracks: vec![hindi],
-            choice: SubtitleChoice::Track("hindi".into()),
-            last_visible_choice: SubtitleChoice::Track("hindi".into()),
-            ..SubtitleState::default()
+        let mut state = StreamState {
+            subtitle_tracks: vec![hindi],
+            subtitle_choice: SubtitleChoice::Track("hindi".into()),
+            last_visible_subtitle_choice: SubtitleChoice::Track("hindi".into()),
+            ..StreamState::default()
         };
 
         assert_eq!(toggled_subtitle_choice(&state), SubtitleChoice::Off);
-        state.choice = SubtitleChoice::Off;
+        state.subtitle_choice = SubtitleChoice::Off;
         assert_eq!(
             toggled_subtitle_choice(&state),
             SubtitleChoice::Track("hindi".into())
         );
 
-        state.tracks.clear();
+        state.subtitle_tracks.clear();
         assert_eq!(toggled_subtitle_choice(&state), SubtitleChoice::Automatic);
     }
 
     #[test]
     fn rapid_subtitle_cycles_follow_the_requested_track_not_stale_bus_state() {
-        let mut state = SubtitleState {
-            tracks: vec![
+        let mut state = StreamState {
+            subtitle_tracks: vec![
                 SubtitleTrack {
                     id: "english".into(),
                     label: "English".into(),
@@ -1789,13 +2063,13 @@ mod tests {
                     label: "Hindi".into(),
                 },
             ],
-            choice: SubtitleChoice::Track("hindi".into()),
-            ..SubtitleState::default()
+            subtitle_choice: SubtitleChoice::Track("hindi".into()),
+            ..StreamState::default()
         };
         state.selected.insert("english".into());
 
         assert_eq!(cycled_subtitle_choice(&state), SubtitleChoice::Off);
-        state.choice = SubtitleChoice::Off;
+        state.subtitle_choice = SubtitleChoice::Off;
         assert_eq!(
             cycled_subtitle_choice(&state),
             SubtitleChoice::Track("english".into())
@@ -1813,27 +2087,27 @@ mod tests {
                 gst::StreamFlags::SELECT,
             )
         };
-        let mut state = SubtitleState {
+        let mut state = StreamState {
             collection: Some(
                 gst::StreamCollection::builder(None)
                     .streams([text("embedded"), text("external")])
                     .build(),
             ),
             external: Some(std::path::PathBuf::from("movie.en.srt")),
-            ..SubtitleState::default()
+            ..StreamState::default()
         };
 
-        refresh_subtitle_tracks(&mut state);
-        assert_eq!(state.tracks[0].label, "Subtitle 1");
-        assert_eq!(state.tracks[1].label, "Subtitle 2");
+        refresh_stream_tracks(&mut state);
+        assert_eq!(state.subtitle_tracks[0].label, "Subtitle 1");
+        assert_eq!(state.subtitle_tracks[1].label, "Subtitle 2");
 
         state.collection = Some(
             gst::StreamCollection::builder(None)
                 .streams([text("external")])
                 .build(),
         );
-        refresh_subtitle_tracks(&mut state);
-        assert_eq!(state.tracks[0].label, "External — movie.en.srt");
+        refresh_stream_tracks(&mut state);
+        assert_eq!(state.subtitle_tracks[0].label, "External — movie.en.srt");
     }
 
     #[test]
