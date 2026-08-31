@@ -36,8 +36,9 @@ const SEEK_FLAGS: gst::SeekFlags = gst::SeekFlags::FLUSH.union(gst::SeekFlags::A
 const VOLUME_MAX: f64 = 1.5;
 pub const PLAYBACK_RATES: &[f64] = &[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 /// Hardware decoders proven on the target machine. GStreamer's libav
-/// decoders rank at `Primary`, while these QSV factories normally rank
-/// lower. Prefer QSV for streams its caps accept and leave libav as the
+/// decoders rank at `Primary`, while VA-API and NVDEC can rank at
+/// `Primary + 1` and these QSV factories normally rank lower. Prefer QSV
+/// for streams its caps accept and leave other installed decoders as the
 /// automatic fallback for streams the iGPU cannot decode (FR-10.1).
 const INTEL_VIDEO_DECODERS: &[(&str, &str)] = &[
     ("qsvh264dec", "avdec_h264"),
@@ -281,6 +282,31 @@ fn h264_exceeds_declared_level(caps: &gst::CapsRef) -> bool {
     frame_mbs > max_frame_mbs
 }
 
+/// Compact encoded-stream facts for diagnostics. Raw caps dumps are noisy and
+/// unstable across GStreamer versions; these fields explain the decoder choice
+/// and the common hardware-limit failures without logging from the render path.
+fn video_stream_summary(caps: &gst::CapsRef) -> Option<String> {
+    let structure = caps.structure(0)?;
+    let mut summary = structure.name().to_string();
+
+    for field in ["profile", "level"] {
+        if let Ok(value) = structure.get::<String>(field) {
+            summary.push_str(&format!(" {field}={value}"));
+        }
+    }
+    if let (Ok(width), Ok(height)) = (
+        structure.get::<i32>("width"),
+        structure.get::<i32>("height"),
+    ) {
+        summary.push_str(&format!(" {width}x{height}"));
+    }
+    if let Ok(rate) = structure.get::<gst::Fraction>("framerate") {
+        summary.push_str(&format!(" {}/{} fps", rate.numer(), rate.denom()));
+    }
+
+    Some(summary)
+}
+
 /// H.264 Annex A `MaxFS` in macroblocks.
 fn h264_level_max_frame_mbs(level: &str) -> Option<u64> {
     Some(match level {
@@ -449,10 +475,20 @@ impl Player {
                     if factory.name() == "avdec_h264" {
                         lock_decoder_fallback(&decoder_fallback).restore();
                     }
-                    if INTEL_VIDEO_DECODERS.iter().any(|(hardware, software)| {
-                        factory.name() == *hardware || factory.name() == *software
-                    }) {
-                        crate::applog!("player: selected decoder {}", factory.name());
+                    if factory.has_type(
+                        gst::ElementFactoryType::DECODER | gst::ElementFactoryType::MEDIA_VIDEO,
+                    ) {
+                        let kind = if factory.has_type(gst::ElementFactoryType::HARDWARE) {
+                            "hardware"
+                        } else {
+                            "software"
+                        };
+                        crate::applog!(
+                            "player: selected decoder {}: {} ({kind}, rank {})",
+                            factory.name(),
+                            factory.longname(),
+                            factory.rank()
+                        );
                     }
                 }
             ),
@@ -465,10 +501,18 @@ impl Player {
                 if let gst::MessageView::StreamCollection(streams) = msg.view() {
                     let collection = streams.stream_collection();
                     for index in 0..collection.size() {
-                        let Some(caps) = collection.stream(index).and_then(|stream| stream.caps())
-                        else {
+                        let Some(stream) = collection.stream(index) else {
                             continue;
                         };
+                        if !stream.stream_type().contains(gst::StreamType::VIDEO) {
+                            continue;
+                        }
+                        let Some(caps) = stream.caps() else {
+                            continue;
+                        };
+                        if let Some(summary) = video_stream_summary(&caps) {
+                            crate::applog!("player: video stream {summary}");
+                        }
                         if let Some(fallback) =
                             lock_decoder_fallback(&decoder_fallback).bypass_qsv_h264(&caps)
                         {
@@ -1445,11 +1489,11 @@ fn stream_by_id(collection: &gst::StreamCollection, id: &str) -> Option<gst::Str
         .find(|stream| stream.stream_id().as_deref() == Some(id))
 }
 
-/// Give a working hardware decoder priority over the `Primary` software
-/// fallback. `None` means preserve an explicit disable (`Rank::None`) or
-/// a choice already ranked above ours.
+/// Give the verified Intel decoder priority over standard `Primary + 1`
+/// hardware and `Primary` software decoders. `None` means preserve an
+/// explicit disable (`Rank::None`) or a choice already ranked above ours.
 fn preferred_hardware_rank(current: gst::Rank) -> Option<gst::Rank> {
-    let preferred = gst::Rank::PRIMARY + 1;
+    let preferred = gst::Rank::PRIMARY + 2;
     (current != gst::Rank::NONE && current < preferred).then_some(preferred)
 }
 
@@ -1578,7 +1622,7 @@ mod tests {
         advance_resume, cycled_subtitle_choice, gst, h264_exceeds_declared_level, matching_sidecar,
         missing_subtitle_decoder, missing_video_decoder, prefer_intel_video_decoders,
         preferred_hardware_rank, refresh_subtitle_tracks, subtitle_selection_ids,
-        toggled_subtitle_choice,
+        toggled_subtitle_choice, video_stream_summary,
     };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
@@ -1830,14 +1874,18 @@ mod tests {
     fn hardware_preference_preserves_explicit_rank_choices() {
         assert_eq!(
             preferred_hardware_rank(gst::Rank::MARGINAL),
-            Some(gst::Rank::PRIMARY + 1)
+            Some(gst::Rank::PRIMARY + 2)
+        );
+        assert_eq!(
+            preferred_hardware_rank(gst::Rank::PRIMARY + 1),
+            Some(gst::Rank::PRIMARY + 2)
         );
         assert_eq!(preferred_hardware_rank(gst::Rank::NONE), None);
-        assert_eq!(preferred_hardware_rank(gst::Rank::PRIMARY + 2), None);
+        assert_eq!(preferred_hardware_rank(gst::Rank::PRIMARY + 3), None);
     }
 
     #[test]
-    fn installed_intel_video_decoders_outrank_software_fallbacks() {
+    fn installed_intel_video_decoders_outrank_standard_hardware() {
         gst::init().unwrap();
         prefer_intel_video_decoders();
 
@@ -1846,7 +1894,7 @@ mod tests {
                 continue;
             };
             if factory.rank() != gst::Rank::NONE {
-                assert!(factory.rank() > gst::Rank::PRIMARY, "{name}");
+                assert!(factory.rank() > gst::Rank::PRIMARY + 1, "{name}");
             }
         }
     }
@@ -1892,6 +1940,27 @@ mod tests {
             .build();
 
         assert!(!h264_exceeds_declared_level(&caps));
+    }
+
+    #[test]
+    fn video_diagnostics_include_decoder_relevant_stream_facts() {
+        gst::init().unwrap();
+        let caps = gst::Caps::builder("video/x-h264")
+            .field("profile", "high")
+            .field("level", "4.1")
+            .field("width", 1_920i32)
+            .field("height", 1_080i32)
+            .field("framerate", gst::Fraction::new(30, 1))
+            .build();
+
+        assert_eq!(
+            video_stream_summary(&caps),
+            Some("video/x-h264 profile=high level=4.1 1920x1080 30/1 fps".to_string())
+        );
+        assert_eq!(
+            video_stream_summary(&gst::Caps::builder("video/x-vp9").build()),
+            Some("video/x-vp9".to_string())
+        );
     }
 
     #[test]

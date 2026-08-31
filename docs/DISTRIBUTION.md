@@ -70,7 +70,8 @@ source and spec rather than becoming a second packaging implementation.
 Flatpak broadens reach but changes filesystem and runtime boundaries. Prototype
 a disposable manifest on real Wayland and run the requirements with particular
 attention to folder access and monitoring, trash/restore and atomic saves,
-glycin loaders, codecs and VA-API/libav, configuration location,
+glycin loaders, codecs, compatible hardware decoding and software fallback,
+configuration location,
 single-instance activation, cold start, PSS and installed size.
 
 The result should use the narrowest permissions that preserve the product. If

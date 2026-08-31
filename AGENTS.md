@@ -46,6 +46,11 @@ overwrite unrelated work in a dirty worktree.
 - Panics are bugs. Broken media, unreadable paths, missing codecs, invalid
   configuration and failed file operations are normal errors. Show the
   specified in-window or stderr error instead of crashing.
+- Hardware-dependent behavior must stay portable. Prefer a measured backend
+  only when the native framework exposes it as available, preserve explicit
+  system disables, and leave unverified hardware to the framework's normal
+  selection. Test alternate-backend, no-hardware and software-fallback paths;
+  claim support for a backend only after testing it on the real device.
 - The NFR-1 performance limits are requirements. Keep startup lazy, caches
   bounded and rendering free from diagnostic logging.
 - GTK's main loop is the only event loop. Use `glib::spawn_future_local`.
@@ -136,7 +141,8 @@ module.
   `playbin3` when entering or leaving it because GStreamer 1.28 can keep stale
   subtitle-pad ownership.
 - libav is a fallback. After lazy `gst::init`, raise installed Intel QSV
-  decoders to `Primary + 1` unless their rank is explicitly `None`. An
+  decoders to `Primary + 2` unless their rank is explicitly `None`, keeping
+  the verified iGPU path above standard `Primary + 1` hardware decoders. An
   oversized, incorrectly levelled H.264 stream may bypass only `qsvh264dec`.
   Restore its rank on setup, error, navigation and close.
 - Release idle inhibit on pause, image switch, playback error and close.
