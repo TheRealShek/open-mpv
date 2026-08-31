@@ -30,8 +30,8 @@ GNOME and Wayland. It uses Rust, GTK4, glycin, GStreamer and GIO.
 8. Report why the change was needed, what changed, what passed and anything
    still requiring human testing.
 
-Do not commit, push, create a branch, open a pull request or merge unless the
-user asks. Never overwrite unrelated work in a dirty worktree.
+Do not commit, push, open a pull request or merge unless the user asks. Never
+overwrite unrelated work in a dirty worktree.
 
 ## Rules that must not change
 
