@@ -1,175 +1,174 @@
-# AGENTS.md
+# Working on open-mpv
 
-This file tells coding agents how to work safely in this repository.
+open-mpv is a fast, minimal viewer for local photos and videos. It is built for
+Fedora Workstation, GNOME and Wayland with Rust, GTK4, Glycin, GStreamer and
+GIO.
 
-open-mpv is a small local photo and video viewer for Fedora Workstation,
-GNOME and Wayland. It uses Rust, GTK4, glycin, GStreamer and GIO.
+The application should feel immediate and stay out of the user's way. It does
+not manage a library, use the network or take ownership of the user's files.
+Images and videos are equally important.
 
-## Work in this order
+## Product direction
 
-1. Understand the request. A request to explain, review or diagnose is
-   read-only. A request to build, fix or change allows focused local edits.
-2. Read the document that owns the decision:
-   - [README.md](README.md) for user-facing features, installation and usage.
-   - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for user-facing settings,
-     defaults, value meanings and configurable actions.
-   - [CONTEXT.md](CONTEXT.md) for product language and boundaries.
-   - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for exact behavior and
-     performance limits. Read it before changing behavior.
-   - [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for packaging and releases.
-3. Inspect the relevant module, its callers, its tests and similar code. Find
-   the cause before changing anything.
-4. Make the smallest complete change. Reuse an existing helper when it fits.
-   Do not add unrelated cleanup or speculative abstractions.
-5. Update product documents in the same change when behavior, scope or a
-   packaging decision changes. Any change to configuration syntax, settings,
-   defaults, value meanings or configurable action names must also update
-   [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Use requirement names such
-   as FR-5.4 and NFR-1.1 when they help connect code to the specification.
-6. Run checks that match the risk, then run the complete required checks when
-   the change is ready.
-7. If the built app or package changed and all relevant checks pass, install
-   the verified build on the development system with the repository workflow.
-   Never install a failed or unresolved build.
-8. Report why the change was needed, what changed, what passed and anything
-   still requiring human testing.
+Keep these ideas in mind when making decisions:
 
-Do not commit, push, open a pull request or merge unless the user asks. Never
-overwrite unrelated work in a dirty worktree.
+- Opening and moving through media should remain fast, including for large or
+  broken files.
+- Viewing is safe by default. Source files change only after a clear user
+  action.
+- Show controls only when they are useful. Ordinary viewing should not be
+  crowded by advanced controls.
+- The application owns one Workspace. Multiple windows, a media library and
+  other large expansions need a product decision first.
+- Fedora GNOME/Wayland is the Reference environment. Do not claim support for
+  another platform, package or hardware path without the same level of testing.
 
-## Rules that must not change
+The current priority is to make the Viewer solid before adding the Explorer.
+Image Edit mode comes later and needs its own plan. Video editing, frame
+stepping, slideshows, network playback, X11 support and Flatpak distribution
+are not in the current direction.
 
-- Source media changes remain explicit and belong in `fileops`. The other
-  approved persistent writes are atomic Preferences updates to the canonical
-  config and standard freedesktop thumbnails for Explorer. Do not add private
-  caches, history, state files or implicit source writes without a product
-  decision. Quick Markup remains clipboard-only.
-- Do not add a dependency without explaining why existing Rust, GTK, GIO,
-  glycin or GStreamer tools are not enough. Natural sort, `key=value` parsing
-  and CLI handling are intentionally implemented in this repository.
-- Panics are bugs. Broken media, unreadable paths, missing codecs, invalid
-  configuration and failed file operations are normal errors. Show the
-  specified in-window or stderr error instead of crashing.
-- Hardware-dependent behavior must stay portable. Prefer a measured backend
-  only when the native framework exposes it as available, preserve explicit
-  system disables, and leave unverified hardware to the framework's normal
-  selection. Test alternate-backend, no-hardware and software-fallback paths;
-  claim support for a backend only after testing it on the real device.
-- The NFR-1 performance limits are requirements. Keep startup lazy, caches
-  bounded and rendering free from diagnostic logging.
-- GTK's main loop is the only event loop. Use `glib::spawn_future_local`.
-  Never add Tokio or async-std.
-- Every user command must go through the typed action layer in `window`
-  (NFR-6.2). Direct view manipulation may stay in `viewer`; keys, menus and
-  command-equivalent controls must not create separate behavior paths.
-- `folder` must remain plain Rust without GTK or GIO types so another UI can
-  reuse it (NFR-6.1).
+## Sources of truth
+
+Read the document that owns the decision before changing it:
+
+- [README.md](README.md) explains the released product to users, including
+  installation, controls and troubleshooting.
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) explains every setting,
+  default, value and configurable action.
+- [CONTEXT.md](CONTEXT.md) defines product language, boundaries and the meaning
+  of terms such as Viewer, Explorer and Navigation set.
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) defines exact behavior,
+  performance limits and the order in which the product should grow.
+- [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) owns packaging, releases and
+  supported-distribution decisions.
+- Module documentation and tests own detailed code rules.
+
+Do not copy a detailed rule into several documents. Update the document that
+owns it, then link to it where another audience needs to find it.
+
+Documentation is part of a change, not follow-up work. Update affected docs in
+the same change without waiting for a separate request. Keep these files in
+sync:
+
+| Change | Also inspect and update |
+| --- | --- |
+| User-visible behavior or controls | `README.md` and the matching requirement |
+| Configuration syntax, settings, defaults, values or actions | `docs/CONFIGURATION.md`, `src/config.rs`, its tests and FR-8 |
+| Product scope, names or future direction | `CONTEXT.md` and `docs/REQUIREMENTS.md` |
+| Supported media formats | `src/config.rs`, `README.md`, requirements, installer and desktop MIME metadata |
+| Packaging, dependencies or supported systems | `docs/DISTRIBUTION.md`, installer, RPM and application metadata |
+| Architecture or module ownership | module documentation and this file when the high-level map changes |
+
+Every documented configuration example must remain valid input. If a change
+makes a documented command, configuration line or promise untrue, update the
+documentation in the same change.
+
+## How the application fits together
+
+GTK receives a request to open media and passes it to the state and typed
+actions in `window`. `folder` supplies the ordered Navigation set. Images go
+through `loader`; videos go through `player`. `viewer` displays both as a
+`GdkPaintable`.
+
+```text
+open request -> window state/action -> folder
+                                  -> loader or player -> viewer
+```
+
+Changes to source files take a separate, explicit path:
+
+```text
+user action -> typed window action -> fileops -> update folder state
+```
+
+Media work can finish after the user has moved to another file. Before using a
+result, check that it still belongs to the active media.
 
 ## Module ownership
 
-Put a rule in the module that owns it. Do not copy the same rule into another
-module.
+Keep each rule in the module that owns it:
 
-| Module | Owns | Does not own |
-| --- | --- | --- |
-| `main` | GTK application lifecycle, activation and single-instance entry | custom IPC or media behavior |
-| `config` | defaults, parsing, extensions and key bindings | GTK UI or runtime media state |
-| `folder` | selected-folder identity, sorted Navigation set, logical destination, generation and mutation outcomes | GTK, GIO, monitoring or decoding |
-| `loader` | asynchronous glycin decoding and the bounded image cache | UI assembly or file writes |
-| `annotation` | bounded shapes and shared preview/copy drawing | window actions, clipboard ownership or file writes |
-| `viewer` | zoom, pan, fit, view rotation and source/view transforms over any `GdkPaintable` | file policy or GStreamer |
-| `player` | GStreamer setup, playback, seeking and stream selection | window assembly or image decoding |
-| `fileops` | trash, restore and rotate-save | every other persistent write |
-| `window` | UI assembly, folder-monitor adapters, presented media state, overlays and actions | codec code or copied Navigation set rules |
-| `log` | timed diagnostic messages | render-path logging |
+| Module | Owns |
+| --- | --- |
+| `main` | GTK application lifecycle, activation and the single-instance entry point |
+| `config` | defaults, parsing, supported extensions and key bindings |
+| `folder` | selected folder, sorted Navigation set, current destination, generation and changes to the set |
+| `loader` | background Glycin image decoding and the limited image cache |
+| `annotation` | bounded Quick Markup shapes and shared preview/copy drawing |
+| `viewer` | fit, zoom, pan, view rotation and source/view transforms for any paintable |
+| `player` | GStreamer setup, playback, seeking and stream selection |
+| `fileops` | trash, restore and rotate-save operations |
+| `window` | UI composition, folder-monitor adapters, displayed media state, overlays and typed actions |
+| `log` | timed diagnostic messages outside rendering paths |
 
-## Important implementation details
+`folder` must stay independent of GTK and GIO so Viewer and Explorer can share
+the same model. Commands belong to the typed action layer in `window`; direct
+view manipulation can stay in `viewer`.
 
-### Rust and GTK
+## The easiest ways to break open-mpv
 
-- Do not take two `RefCell` borrows in one statement. A borrow panic inside a
-  GTK `extern "C"` callback aborts the process. Read each needed value before
-  calling back into a widget. See the scroll code in `viewer.rs`.
-- Every asynchronous media result must compare the Navigation-owned generation
-  before it changes the UI. Late decode, animation, metadata and SVG results
-  must drop themselves instead of showing old media.
-- Never log from `ImageView::snapshot` or another render path.
-- Quick Markup shapes use decoded-image coordinates. Preview and clipboard
-  copy must share drawing code and work through all rotations, pan, zoom and
-  fractional scales.
-- `gtk::Application` already provides D-Bus single-instance behavior. Use its
-  `open` signal. Do not add a lock file, socket or custom IPC.
-- The `gtk4` crate exposes GTK 4.0 by default. Enable the matching `v4_x`
-  feature before using a newer GTK API. The target currently uses GTK 4.22.
-- A glycin crate version must match the protocol supported by the installed
-  glycin loaders. A mismatch can compile and still fail at runtime.
+### Apply an old result to new media
 
-### Wayland and rendering
+Decode, animation, SVG, metadata and future Explorer preview work can finish
+later. Cancel work when practical and reject results for media or cells that
+are no longer current.
 
-- Do not add X11 assumptions or client-side window movement. Use the
-  compositor's `begin_move` and `begin_resize`. The frameless window owns its
-  resize border (FR-6.4).
-- Account for the surface scale. At 125% and 150%, 100% zoom must still map one
-  image pixel to one physical pixel (FR-4.7).
-- `update_cursor` is the only cursor owner. Priority is resize cursor, Quick
-  Markup crosshair, hidden cursor, then the default cursor. Mark chrome hidden
-  before calling `update_cursor`.
+### Block GTK or let work grow forever
 
-### Images and file operations
+GTK's main loop is the only event loop. Keep decoding, enumeration, metadata
+and file operations away from it, using the GLib integration already present.
+Caches, queues, jobs, shapes, undo history, pipelines, file descriptors and
+threads must have clear limits and settle after repeated use. Never log from a
+snapshot or other render path.
 
-- glycin decodes outside the app in a sandbox. Loader failure is normal. An
-  empty `supported_mime_types()` result usually means loader programs are not
-  installed.
-- `config::IMAGE_EXTENSIONS` is static on purpose. A startup D-Bus lookup would
-  slow the first frame and make `folder` depend on GIO. When adding a format,
-  update `config`, `install.sh` and the desktop entry together. Tests keep the
-  list aligned with installed loaders and desktop MIME registration.
-- JPEG rotate-save changes orientation without re-encoding pixels (FR-5.4).
-  SVG and animated images are view-rotate only.
-- Do not list `trash://` through gvfs. It can hang without a running GUI main
-  loop. Restore reads freedesktop trash folders directly.
-- Undo must handle the same file being added once by restore and once by the
-  folder monitor.
-- `preload_neighbors` may start a rare duplicate decode. Measurements showed
-  that this is cheaper and safer than moving its apply guard away from
-  the Navigation-owned generation. Change it only with new evidence.
+### Write data the user did not ask to change
 
-### Video and subtitles
+The application has no private history, library, state database or on-disk
+media cache. It may save only the main optional configuration, standard
+freedesktop thumbnails for Explorer, and source-file changes owned by
+`fileops`. Quick Markup remains clipboard-only. Any other saved state needs a
+product decision.
 
-- Seek with `FLUSH | ACCURATE`, never `KEY_UNIT`. One-GOP clips otherwise jump
-  to 0:00. `SeekState` allows one seek at a time and keeps only the latest
-  requested position.
-- Start GStreamer only when the first video opens. Never put videos in the
-  decoded image cache. Set a reused pipeline to `Null` while showing an image.
-- External `suburi` playback is the pipeline-reuse exception. Create a fresh
-  `playbin3` when entering or leaving it because GStreamer 1.28 can keep stale
-  subtitle-pad ownership.
-- libav is a fallback. After lazy `gst::init`, raise installed Intel QSV
-  decoders to `Primary + 2` unless their rank is explicitly `None`, keeping
-  the verified iGPU path above standard `Primary + 1` hardware decoders. An
-  oversized, incorrectly levelled H.264 stream may bypass only `qsvh264dec`.
-  Restore its rank on setup, error, navigation and close.
-- Release idle inhibit on pause, image switch, playback error and close.
-- The seek bar's `change-value` callback returns `Propagation::Proceed` so GTK
-  moves the thumb. Position polling must not fight a scrub. Track scrubbing
-  from raw button events because GTK may cancel a gesture.
-- A stream collection may change during playback. Any selection change must
-  preserve the chosen video, audio and subtitle streams together.
+All file replacement must be safe and atomic. Trash, restore, unreadable files
+and failed saves are normal failure paths, not reasons to panic.
 
-### Input
+### Create a second behavior path
 
-- Scroll values include a unit. `Wheel` means detents; `Surface` means logical
-  pixels. Both occur on the target touchpad. Route them through the testable
-  `viewer::ScrollGesture` logic.
-- Space and arrow keys depend on context. Space controls video and advances a
-  still image. Arrows pan zoomed media; otherwise they navigate or change
-  volume. Page Up and Page Down always navigate the folder.
-- Quick Markup owns primary drag before pan and window movement, but the resize
-  border still wins.
+Keys, menus and buttons for the same command must reach the same typed action.
+When changing a command, inspect every way to trigger it, when it is available,
+its configured binding, help text and tests. Gestures that directly pan or zoom
+the view are the exception.
+
+### Claim support without testing it
+
+Use GTK, GIO, Glycin and GStreamer rather than adding X11 behavior, custom IPC
+or another media stack. Hardware and packaging behavior must keep a safe
+fallback and respect an explicit system disable. Test on the real environment
+before claiming that a backend or platform is supported.
+
+## Think across state changes
+
+Think about how every mode starts and ends. Important transitions include
+image to video, video to image, one media item to another, Viewer to Explorer,
+normal viewing to Quick Markup, playback to error or close, and Trash to Undo.
+Release resources, cancel late work and restore shared state on every relevant
+exit path.
+
+When changing file operations, include folder-monitor behavior and Undo. When
+changing rendering or markup, include rotation, zoom, pan and fractional
+scale. When changing playback, include navigation, pipeline cleanup, missing
+codecs and software fallback. Tests should cover the decision and its important
+failure cases rather than merely copy the implementation.
+
+Before adding a dependency or helper, look for a tool or implementation that
+already exists. Add a dependency only when Rust, GTK, GIO, Glycin or GStreamer
+cannot provide a clear and safe solution.
 
 ## Verification
 
-Run these checks for a complete code or packaging change:
+Start with the smallest check that proves the changed behavior. When a code or
+packaging change is ready, run every relevant check:
 
 ```sh
 cargo fmt --check
@@ -183,72 +182,33 @@ appstreamcli validate --no-net data/io.github.TheRealShek.OpenMpv.metainfo.xml
 rpmspec -P packaging/fedora/open-mpv.spec >/dev/null
 ```
 
-`cargo test` performs real trash and rotate-save operations. It needs a user
-session and ImageMagick.
+`cargo test` performs real trash and rotate-save operations and needs a user
+session and ImageMagick. Report checks as passed, failed, skipped or inspected.
+Do not hide an unresolved failure by installing or shipping the build.
 
-For asynchronous media changes, test stale-result cancellation and bounded
-resource use. Start with narrow tests, then run the full list. Report each
-check as passed, failed, skipped or inspected.
+Some promises require more than automated tests:
 
-### Human Wayland testing
+- Human GNOME/Wayland testing covers keyboard, pointer, clipboard, window and
+  visual behavior.
+- Performance work is measured against the limits in the requirements. Use
+  PSS rather than RSS for memory.
+- Hardware decoding is verified on the real device, including alternate,
+  disabled and software-fallback paths.
+- Packaging changes include install, update, removal and desktop integration.
 
-Keyboard, pointer and screenshot automation is not reliable on the target
-GNOME/Wayland session. Never claim an automated visual check. State exactly
-what a person still needs to inspect.
+Do not install a build by default. When human testing is needed, first finish
+the automated checks, prepare the relevant build, and report its path, run
+command and a short manual checklist. Install only when the task requires it
+or the user asks.
 
-Actions can be called without window focus:
+## Git and releases
 
-```sh
-gdbus call --session --dest io.github.TheRealShek.OpenMpv \
-  --object-path /io/github/TheRealShek/OpenMpv/window/1 \
-  --method org.gtk.Actions.Activate <action> "[]" "{}"
-```
+Do not commit, push, open a pull request, merge or publish a release unless the
+user asks. Never overwrite unrelated work in a dirty worktree. `main` is
+protected; requested GitHub work uses a focused branch and the required CI.
 
-Prefer unit tests for decisions such as `nav_target`, `skip_target`,
-`cursor_name` and `help_line` instead of reading the widget tree.
-
-### Performance and resources
-
-- Measure memory with PSS, not RSS. GTK and Mesa share many pages.
-- Recheck cold start after changing startup or lazy initialization.
-- Recheck hardware decoding after changing pipelines, filters or streams.
-- After repeated navigation, make sure cache bytes, file descriptors, threads,
-  loader processes and pipelines settle instead of growing forever.
-
-## Git and CI
-
-`main` is protected. Never push directly to it.
-
-For a requested GitHub change:
-
-1. Start a branch from the latest `main`.
-2. Keep commits clear and limited to one purpose. Never add co-author trailers.
-3. Push and open a pull request only when the user asks.
-4. Wait for the required GitHub check. Every check required for the change
-   must pass; only the intentional docs-only skip is allowed.
-5. Complete any required human Wayland testing.
-6. Merge only when the user asks and the author validation gate below is met.
-
-The full Fedora job runs for any code, script, workflow, package, application
-metadata or build configuration change. When a change contains only Markdown,
-files under `docs/`, or `LICENSE`, a small classifier runs and the expensive
-Fedora job is intentionally skipped. GitHub reports a conditionally skipped
-job as successful, so the protected branch is not left waiting for a check.
-If classification fails, the full Fedora job runs instead of failing open.
-
-Do not use commit-message CI skip instructions or workflow-level path filters.
-They leave a required workflow in Pending state and block the pull request.
-
-### Author validation gate
-
-Before merging a major change, the author must do one of these for that exact
-change:
-
-- personally test the completed behavior and confirm it; or
-- clearly approve merging without personal testing.
-
-Use this gate for major features and for changes with meaningful UI, playback,
-file-operation, data-safety, compatibility or performance impact. Branch work
-and CI may finish first. Record what passed, what still needs human testing and
-the remaining risk before merge. Approval for one change does not cover the
-next change.
+A major change is not ready to merge or release until the author has tested
+that exact change or has clearly approved it without personal testing.
+State what automated checks passed, what still needs human testing and the
+remaining risk. Follow [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for every
+packaging or release decision.
