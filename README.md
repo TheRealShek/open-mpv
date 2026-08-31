@@ -68,9 +68,11 @@ other formats supported by the installed glycin loaders. Animated GIF, WebP
 and PNG files play automatically.
 
 Videos include MP4, MKV, WebM, MOV and AVI. Playback uses the system GStreamer
-codecs and hardware decoding when available. The optional
-`gstreamer1-plugin-libav` package adds a software fallback for more videos.
-Pitch-preserving playback speed needs `gstreamer1-plugins-good`.
+codecs and prefers compatible installed hardware decoding. The Reference
+environment uses Intel QSV; other hardware remains under GStreamer's decoder
+selection. The optional `gstreamer1-plugin-libav` package adds a software
+fallback for more videos. Pitch-preserving playback speed needs
+`gstreamer1-plugins-good`.
 
 ## Main controls
 
@@ -139,7 +141,25 @@ opening.
 ## Troubleshooting
 
 If images do not open, check that `glycin-loaders` is installed. Video support
-depends on the installed GStreamer plugins and codecs.
+depends on the installed GStreamer plugins, graphics driver and codecs. On
+Fedora, `gstreamer1-plugins-bad-free` supplies hardware-decoder plugins;
+GStreamer exposes only the decoder factories available for the detected
+hardware. The Reference environment is verified with Intel QSV. Other systems
+may expose VA-API or NVIDIA NVDEC, while `gstreamer1-plugin-libav` supplies the
+software fallback.
+
+Inspect the available H.264 paths with:
+
+```sh
+gst-inspect-1.0 qsvh264dec
+gst-inspect-1.0 vah264dec
+gst-inspect-1.0 nvh264dec
+gst-inspect-1.0 avdec_h264
+```
+
+A missing hardware factory is normal when that backend or its driver is not
+available. A missing `avdec_h264` means the optional software fallback is not
+installed.
 
 open-mpv writes diagnostic messages to stderr. When it was opened from Files,
 view them with:
@@ -147,6 +167,9 @@ view them with:
 ```sh
 journalctl -b _COMM=open-mpv
 ```
+
+For video, the diagnostics identify the encoded stream and selected decoder,
+including whether GStreamer classifies it as hardware or software.
 
 Add `-f` to follow the log while reproducing a problem. Set `OPEN_MPV_LOG=0`
 to hide routine diagnostics; errors are still reported.
