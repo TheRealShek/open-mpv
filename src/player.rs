@@ -8,6 +8,10 @@
 //! image-only sessions keep their cold-start and footprint (NFR-1.1,
 //! NFR-2.1). The pipeline is reused across videos; `stop` drops it to
 //! `Null`, freeing decoder state while an image is shown.
+//!
+//! `FocusedPlayback` owns the temporal state shared by typed commands and
+//! GStreamer bus observations. `Player` remains the window-facing adapter and
+//! keeps pipeline effects, lazy initialization and paintable ownership here.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -245,25 +249,6 @@ struct ResumeState {
     stage: ResumeStage,
 }
 
-fn advance_resume(pending: &mut Option<ResumeState>) -> ResumeAction {
-    match pending.as_mut() {
-        Some(state) if matches!(state.stage, ResumeStage::Preroll) => {
-            state.stage = ResumeStage::Seek;
-            ResumeAction::Seek {
-                position: state.position,
-                rate: state.rate,
-                resume_playing: state.play_after_seek,
-            }
-        }
-        Some(state) => {
-            let resume_playing = state.play_after_seek;
-            *pending = None;
-            ResumeAction::Finish { resume_playing }
-        }
-        None => ResumeAction::None,
-    }
-}
-
 /// A flushing seek only answers position queries with the new position
 /// once the pipeline has re-prerolled; until then it still reports where
 /// it was. Two consequences the UI would otherwise wear: the seek bar
@@ -282,6 +267,200 @@ struct SeekRequest {
 struct SeekState {
     in_flight: Option<(SeekRequest, Instant)>,
     queued: Option<SeekRequest>,
+}
+
+/// All temporal facts for the active Focused playback session. Commands and
+/// GStreamer observations both enter through this model, so sequencing does
+/// not depend on keeping several independently borrowed cells in sync.
+struct FocusedPlayback {
+    generation: u64,
+    current_video: Option<PathBuf>,
+    playing: bool,
+    /// Last rate accepted by the pipeline. A queued seek may advertise a
+    /// newer requested rate without changing this until GStreamer accepts it.
+    playback_rate: f64,
+    /// Cached so transport updates do not query the demuxer every frame.
+    duration: Option<f64>,
+    seek: SeekState,
+    streams: StreamState,
+    resume: Option<ResumeState>,
+    error_pending: bool,
+}
+
+impl Default for FocusedPlayback {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            current_video: None,
+            playing: false,
+            playback_rate: 1.0,
+            duration: None,
+            seek: SeekState::default(),
+            streams: StreamState::default(),
+            resume: None,
+            error_pending: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ErrorContext {
+    generation: u64,
+    external: Option<PathBuf>,
+}
+
+impl FocusedPlayback {
+    fn reset(&mut self, subtitles_default_on: bool) {
+        let generation = self.generation.wrapping_add(1);
+        *self = Self {
+            generation,
+            streams: StreamState {
+                subtitle_choice: if subtitles_default_on {
+                    SubtitleChoice::Automatic
+                } else {
+                    SubtitleChoice::Off
+                },
+                ..StreamState::default()
+            },
+            ..Self::default()
+        };
+    }
+
+    fn start_video(&mut self, path: &Path, external: Option<PathBuf>, subtitles_default_on: bool) {
+        self.reset(subtitles_default_on);
+        self.current_video = Some(path.to_path_buf());
+        self.streams.external = external;
+    }
+
+    fn playback_started(&mut self) {
+        self.playing = true;
+    }
+
+    fn forget_timing(&mut self) {
+        self.seek = SeekState::default();
+        self.playback_rate = 1.0;
+        self.duration = None;
+    }
+
+    fn requested_rate(&self) -> f64 {
+        self.seek
+            .pending()
+            .map_or(self.playback_rate, |request| request.rate)
+    }
+
+    fn request_seek(&mut self, request: SeekRequest) -> bool {
+        self.seek.request(request)
+    }
+
+    fn begin_seek(&mut self, request: SeekRequest) {
+        self.seek.in_flight = Some((request, Instant::now()));
+        self.seek.queued = None;
+    }
+
+    fn accept_seek(&mut self, request: SeekRequest) {
+        self.playback_rate = request.rate;
+    }
+
+    fn seek_refused(&mut self) {
+        self.seek.in_flight = None;
+    }
+
+    fn prepare_subtitle_rebuild(
+        &mut self,
+        external: Option<PathBuf>,
+        position: f64,
+        rate: f64,
+        play_after_seek: bool,
+    ) {
+        self.forget_timing();
+        self.streams.collection = None;
+        self.streams.selected.clear();
+        self.streams.audio_tracks.clear();
+        self.streams.subtitle_tracks.clear();
+        self.streams.subtitle_choice = SubtitleChoice::Automatic;
+        self.streams.last_visible_subtitle_choice = SubtitleChoice::Automatic;
+        self.streams.external = external;
+        self.resume = Some(ResumeState {
+            position,
+            rate,
+            play_after_seek,
+            stage: ResumeStage::Preroll,
+        });
+    }
+
+    fn observe_async_done(&mut self) -> ResumeAction {
+        match self.resume.as_mut() {
+            Some(state) if matches!(state.stage, ResumeStage::Preroll) => {
+                state.stage = ResumeStage::Seek;
+                ResumeAction::Seek {
+                    position: state.position,
+                    rate: state.rate,
+                    resume_playing: state.play_after_seek,
+                }
+            }
+            Some(state) => {
+                let resume_playing = state.play_after_seek;
+                self.resume = None;
+                ResumeAction::Finish { resume_playing }
+            }
+            None => ResumeAction::None,
+        }
+    }
+
+    fn finish_seek(&mut self) -> Option<SeekRequest> {
+        self.seek.in_flight = None;
+        self.seek.queued.take()
+    }
+
+    fn replace_streams(&mut self, collection: gst::StreamCollection) -> bool {
+        replace_stream_collection(&mut self.streams, collection);
+        self.streams.audio_choice != AudioChoice::Automatic
+            || self.streams.subtitle_choice != SubtitleChoice::Automatic
+    }
+
+    fn select_streams(&mut self, selected: BTreeSet<String>) {
+        self.streams.selected = selected;
+    }
+
+    fn stream_snapshots(&self) -> (AudioSnapshot, SubtitleSnapshot) {
+        (
+            audio_snapshot(&self.streams),
+            subtitle_snapshot(&self.streams),
+        )
+    }
+
+    fn requested_streams(
+        &self,
+        audio_request: Option<&AudioChoice>,
+        subtitle_request: Option<&SubtitleChoice>,
+    ) -> Vec<String> {
+        stream_selection_ids(&self.streams, audio_request, subtitle_request)
+    }
+
+    fn begin_error(&mut self) -> Option<ErrorContext> {
+        if self.error_pending {
+            return None;
+        }
+        self.error_pending = true;
+        Some(self.context())
+    }
+
+    fn context(&self) -> ErrorContext {
+        ErrorContext {
+            generation: self.generation,
+            external: self.streams.external.clone(),
+        }
+    }
+
+    fn error_is_current(&self, context: &ErrorContext) -> bool {
+        self.generation == context.generation && self.streams.external == context.external
+    }
+
+    fn finish_error(&mut self, context: &ErrorContext) {
+        if self.generation == context.generation {
+            self.error_pending = false;
+        }
+    }
 }
 
 /// True when the coded frame exceeds the size limit the stream itself
@@ -432,23 +611,9 @@ pub struct Player {
     playbin: gst::Element,
     seek_target: gst::Element,
     paintable: gdk::Paintable,
-    seek: Rc<RefCell<SeekState>>,
-    /// Last rate accepted by the pipeline. A queued seek can advertise its
-    /// newer requested rate through `playback_rate` without overwriting this
-    /// value until GStreamer accepts it.
-    playback_rate: Rc<Cell<f64>>,
+    playback: Rc<RefCell<FocusedPlayback>>,
     pitch_preserving: bool,
-    /// User-requested play/pause state. Pipeline state briefly transitions
-    /// through Paused while flushing, so it cannot answer a rapid toggle
-    /// truthfully during a seek.
-    playing: Rc<Cell<bool>>,
-    /// Cached so the per-frame transport update does not re-query the
-    /// demuxer; invalidated on `DurationChanged` and on every new video.
-    duration: Rc<Cell<Option<f64>>>,
-    stream_state: Rc<RefCell<StreamState>>,
-    current_video: Rc<RefCell<Option<PathBuf>>>,
     subtitles_default_on: Cell<bool>,
-    resume: Rc<RefCell<Option<ResumeState>>>,
     decoder_fallback: Arc<Mutex<DecoderFallback>>,
     /// Keeps the bus watch alive; dropping it detaches the watch.
     _bus_watch: gst::bus::BusWatchGuard,
@@ -485,14 +650,7 @@ impl Player {
             }
         };
 
-        let seek = Rc::new(RefCell::new(SeekState::default()));
-        let playback_rate = Rc::new(Cell::new(1.0));
-        let playing = Rc::new(Cell::new(false));
-        let duration = Rc::new(Cell::new(None));
-        let stream_state = Rc::new(RefCell::new(StreamState::default()));
-        let resume = Rc::new(RefCell::new(None::<ResumeState>));
-        let current_video = Rc::new(RefCell::new(None::<PathBuf>));
-        let error_pending = Rc::new(Cell::new(false));
+        let playback = Rc::new(RefCell::new(FocusedPlayback::default()));
         let decoder_fallback = Arc::new(Mutex::new(DecoderFallback::default()));
         playbin.connect_closure(
             "element-setup",
@@ -565,14 +723,7 @@ impl Player {
                 // cycle ends with the `Player`.
                 let playbin = playbin.clone();
                 let seek_target = sink.clone();
-                let seek = seek.clone();
-                let playback_rate = playback_rate.clone();
-                let playing = playing.clone();
-                let duration = duration.clone();
-                let stream_state = stream_state.clone();
-                let resume = resume.clone();
-                let current_video = current_video.clone();
-                let error_pending = error_pending.clone();
+                let playback = playback.clone();
                 let decoder_fallback = decoder_fallback.clone();
                 let on_event = on_event.clone();
                 move |_bus, msg| {
@@ -586,46 +737,33 @@ impl Player {
                                 e.debug()
                             );
                             lock_decoder_fallback(&decoder_fallback).restore();
-                            if error_pending.replace(true) {
+                            let Some(error_context) = playback.borrow_mut().begin_error() else {
                                 crate::applog!(
                                     "player: ignoring error queued behind pending recovery"
                                 );
                                 return glib::ControlFlow::Continue;
-                            }
-                            let failed_video = current_video.borrow().clone();
-                            let failed_external = stream_state.borrow().external.clone();
+                            };
                             let error = e.error();
                             let playbin = playbin.clone();
-                            let current_video = current_video.clone();
-                            let stream_state = stream_state.clone();
-                            let resume = resume.clone();
-                            let seek = seek.clone();
-                            let playback_rate = playback_rate.clone();
-                            let duration = duration.clone();
-                            let error_pending = error_pending.clone();
+                            let playback = playback.clone();
                             let on_event = on_event.clone();
                             // Returning from the bus watch before changing
                             // state is mandatory: tearing a failed pipeline
                             // down from inside its Error callback can wait on
                             // the streaming thread that posted this message.
                             glib::idle_add_local_once(move || {
-                                let still_current = *current_video.borrow() == failed_video
-                                    && stream_state.borrow().external == failed_external;
+                                let still_current =
+                                    playback.borrow().error_is_current(&error_context);
                                 if !still_current {
                                     crate::applog!("player: stale pipeline error superseded");
-                                    error_pending.set(false);
+                                    playback.borrow_mut().finish_error(&error_context);
                                     return;
                                 }
                                 let recovered = recover_without_external(
                                     &playbin,
-                                    &current_video,
-                                    &stream_state,
-                                    &resume,
-                                    &seek,
-                                    &playback_rate,
-                                    &duration,
+                                    &playback,
                                 );
-                                error_pending.set(false);
+                                playback.borrow_mut().finish_error(&error_context);
                                 if recovered {
                                     on_event(Event::SubtitleError(error.to_string()));
                                 } else {
@@ -637,11 +775,11 @@ impl Player {
                             let structure = e.structure();
                             if let Some(description) = structure.and_then(missing_video_decoder) {
                                 crate::applog!("player: missing video decoder: {description}");
-                                let failed_video = current_video.borrow().clone();
-                                let current_video = current_video.clone();
+                                let context = playback.borrow().context();
+                                let playback = playback.clone();
                                 let on_event = on_event.clone();
                                 glib::idle_add_local_once(move || {
-                                    if *current_video.borrow() == failed_video {
+                                    if playback.borrow().error_is_current(&context) {
                                         on_event(Event::MissingVideoDecoder(description));
                                     }
                                 });
@@ -659,7 +797,7 @@ impl Player {
                             // same URI, then restores position and
                             // the former playback state without blocking the
                             // GTK main loop (FR-10.7).
-                            let resume_action = advance_resume(&mut resume.borrow_mut());
+                            let resume_action = playback.borrow_mut().observe_async_done();
                             match resume_action {
                                 ResumeAction::Seek {
                                     position,
@@ -667,28 +805,29 @@ impl Player {
                                     resume_playing,
                                 } => {
                                     let needs_seek = position > f64::EPSILON
-                                        || !same_rate(rate, playback_rate.get());
+                                        || !same_rate(rate, playback.borrow().playback_rate);
                                     if !needs_seek
                                         || !issue_seek(
                                             &seek_target,
-                                            &seek,
-                                            &playback_rate,
+                                            &playback,
                                             SeekRequest { position, rate },
                                         )
                                     {
-                                        if needs_seek && !same_rate(rate, playback_rate.get()) {
+                                        if needs_seek
+                                            && !same_rate(rate, playback.borrow().playback_rate)
+                                        {
                                             on_event(Event::PlaybackRateError(
                                                 PlaybackRateError::SeekRefused,
                                             ));
                                         }
-                                        *resume.borrow_mut() = None;
+                                        playback.borrow_mut().resume = None;
                                         let target = if resume_playing {
                                             gst::State::Playing
                                         } else {
                                             gst::State::Paused
                                         };
                                         let _ = playbin.set_state(target);
-                                        playing.set(resume_playing);
+                                        playback.borrow_mut().playing = resume_playing;
                                     }
                                     return glib::ControlFlow::Continue;
                                 }
@@ -699,7 +838,7 @@ impl Player {
                                         gst::State::Paused
                                     };
                                     let _ = playbin.set_state(target);
-                                    playing.set(resume_playing);
+                                    playback.borrow_mut().playing = resume_playing;
                                 }
                                 ResumeAction::None => {}
                             }
@@ -708,13 +847,12 @@ impl Player {
                             // again, and the newest scrub position that piled
                             // up behind it can go out now.
                             let next = {
-                                let mut state = seek.borrow_mut();
-                                state.in_flight = None;
-                                state.queued.take()
+                                playback.borrow_mut().finish_seek()
                             };
                             if let Some(request) = next {
-                                let rate_change = !same_rate(request.rate, playback_rate.get());
-                                if !issue_seek(&seek_target, &seek, &playback_rate, request)
+                                let rate_change =
+                                    !same_rate(request.rate, playback.borrow().playback_rate);
+                                if !issue_seek(&seek_target, &playback, request)
                                     && rate_change
                                 {
                                     on_event(Event::PlaybackRateError(
@@ -726,24 +864,23 @@ impl Player {
                         gst::MessageView::StreamCollection(streams) => {
                             let collection = streams.stream_collection();
                             let should_apply = {
-                                let mut state = stream_state.borrow_mut();
-                                replace_stream_collection(&mut state, collection);
-                                state.audio_choice != AudioChoice::Automatic
-                                    || state.subtitle_choice != SubtitleChoice::Automatic
+                                playback.borrow_mut().replace_streams(collection)
                             };
                             let (audio_count, subtitle_count) = {
-                                let state = stream_state.borrow();
-                                (state.audio_tracks.len(), state.subtitle_tracks.len())
+                                let state = playback.borrow();
+                                (
+                                    state.streams.audio_tracks.len(),
+                                    state.streams.subtitle_tracks.len(),
+                                )
                             };
                             crate::applog!(
                                 "player: discovered {audio_count} audio and {subtitle_count} subtitle track(s)"
                             );
                             if should_apply {
-                                apply_stream_choices(&playbin, &stream_state, None, None);
+                                apply_stream_choices(&playbin, &playback, None, None);
                             }
                             let (audio, subtitles) = {
-                                let state = stream_state.borrow();
-                                (audio_snapshot(&state), subtitle_snapshot(&state))
+                                playback.borrow().stream_snapshots()
                             };
                             on_event(Event::AudioChanged(audio));
                             on_event(Event::SubtitlesChanged(subtitles));
@@ -753,15 +890,14 @@ impl Player {
                                 .streams()
                                 .filter_map(|stream| stream.stream_id().map(|id| id.to_string()))
                                 .collect();
-                            stream_state.borrow_mut().selected = selected;
+                            playback.borrow_mut().select_streams(selected);
                             let (audio, subtitles) = {
-                                let state = stream_state.borrow();
-                                (audio_snapshot(&state), subtitle_snapshot(&state))
+                                playback.borrow().stream_snapshots()
                             };
                             on_event(Event::AudioChanged(audio));
                             on_event(Event::SubtitlesChanged(subtitles));
                         }
-                        gst::MessageView::DurationChanged(_) => duration.set(None),
+                        gst::MessageView::DurationChanged(_) => playback.borrow_mut().duration = None,
                         _ => {}
                     }
                     glib::ControlFlow::Continue
@@ -773,15 +909,9 @@ impl Player {
             playbin,
             seek_target: sink,
             paintable,
-            seek,
-            playback_rate,
+            playback,
             pitch_preserving,
-            playing,
-            duration,
-            stream_state,
-            current_video,
             subtitles_default_on: Cell::new(true),
-            resume,
             decoder_fallback,
             _bus_watch: bus_watch,
         })
@@ -792,7 +922,7 @@ impl Player {
     }
 
     pub fn has_external_subtitle(&self) -> bool {
-        self.stream_state.borrow().external.is_some()
+        self.playback.borrow().streams.external.is_some()
     }
 
     pub fn path_has_sidecar(path: &Path) -> bool {
@@ -809,17 +939,21 @@ impl Player {
         let uri = file_uri(path)?;
         let suburi = subtitle.as_deref().map(file_uri).transpose()?;
         let _ = teardown_pipeline(&self.playbin);
-        self.forget_stream();
-        *self.current_video.borrow_mut() = Some(path.to_path_buf());
-        self.stream_state.borrow_mut().external = subtitle;
+        lock_decoder_fallback(&self.decoder_fallback).restore();
+        self.playback
+            .borrow_mut()
+            .start_video(path, subtitle, self.subtitles_default_on.get());
         configure_uris(&self.playbin, &uri, suburi.as_deref());
         self.playbin
             .set_state(gst::State::Playing)
-            .map_err(|source| PlayerError::Playback {
-                path: path.to_path_buf(),
-                source,
+            .map_err(|source| {
+                lock_decoder_fallback(&self.decoder_fallback).restore();
+                PlayerError::Playback {
+                    path: path.to_path_buf(),
+                    source,
+                }
             })?;
-        self.playing.set(true);
+        self.playback.borrow_mut().playback_started();
         Ok(())
     }
 
@@ -828,7 +962,6 @@ impl Player {
         let (_, current, _) = self.playbin.state(gst::ClockTime::ZERO);
         let _ = teardown_pipeline(&self.playbin);
         self.forget_stream();
-        self.playing.set(false);
         if current != gst::State::Null {
             crate::applog!("player: stopped, pipeline released");
         }
@@ -837,34 +970,18 @@ impl Player {
     /// Drop everything that describes the outgoing stream so the next
     /// video never reports the previous one's duration or seek target.
     fn forget_stream(&self) {
-        self.forget_timing();
-        self.playing.set(false);
-        *self.current_video.borrow_mut() = None;
-        *self.resume.borrow_mut() = None;
-        let choice = if self.subtitles_default_on.get() {
-            SubtitleChoice::Automatic
-        } else {
-            SubtitleChoice::Off
-        };
-        *self.stream_state.borrow_mut() = StreamState {
-            subtitle_choice: choice,
-            ..StreamState::default()
-        };
-    }
-
-    fn forget_timing(&self) {
         lock_decoder_fallback(&self.decoder_fallback).restore();
-        *self.seek.borrow_mut() = SeekState::default();
-        self.playback_rate.set(1.0);
-        self.duration.set(None);
+        self.playback
+            .borrow_mut()
+            .reset(self.subtitles_default_on.get());
     }
 
     /// Set the initial subtitle policy applied independently to every
     /// newly opened video (FR-8.2/10.7).
     pub fn set_subtitles_default(&self, enabled: bool) {
         self.subtitles_default_on.set(enabled);
-        if self.current_video.borrow().is_none() {
-            self.stream_state.borrow_mut().subtitle_choice = if enabled {
+        if self.playback.borrow().current_video.is_none() {
+            self.playback.borrow_mut().streams.subtitle_choice = if enabled {
                 SubtitleChoice::Automatic
             } else {
                 SubtitleChoice::Off
@@ -881,24 +998,25 @@ impl Player {
             path: path.to_path_buf(),
             source,
         })?;
-        let video =
-            self.current_video
-                .borrow()
-                .clone()
-                .ok_or_else(|| PlayerError::SubtitleFile {
-                    path: path.to_path_buf(),
-                    source: io::Error::new(io::ErrorKind::InvalidInput, "no video is playing"),
-                })?;
-        let already_attached = self.stream_state.borrow().external.as_deref() == Some(path);
+        let video = self
+            .playback
+            .borrow()
+            .current_video
+            .clone()
+            .ok_or_else(|| PlayerError::SubtitleFile {
+                path: path.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, "no video is playing"),
+            })?;
+        let already_attached = self.playback.borrow().streams.external.as_deref() == Some(path);
         if already_attached {
             crate::applog!(
                 "player: subtitle {} already attached; selecting existing track",
                 path.display()
             );
             if !self.choose_subtitle(SubtitleChoice::Automatic) {
-                let mut state = self.stream_state.borrow_mut();
-                state.subtitle_choice = SubtitleChoice::Automatic;
-                state.last_visible_subtitle_choice = SubtitleChoice::Automatic;
+                let mut state = self.playback.borrow_mut();
+                state.streams.subtitle_choice = SubtitleChoice::Automatic;
+                state.streams.last_visible_subtitle_choice = SubtitleChoice::Automatic;
             }
             return Ok(());
         }
@@ -922,41 +1040,26 @@ impl Player {
         // A full teardown matters here. READY can retain the old playsink
         // pads, so the new text pad may reach it before the replacement
         // video pad and fail with "Have text pad but no video pad".
-        teardown_pipeline(&self.playbin).map_err(|source| PlayerError::Playback {
-            path: video.clone(),
-            source,
+        teardown_pipeline(&self.playbin).map_err(|source| {
+            lock_decoder_fallback(&self.decoder_fallback).restore();
+            PlayerError::Playback {
+                path: video.clone(),
+                source,
+            }
         })?;
         crate::applog!("player: subtitle rebuild reached null");
-        self.forget_timing();
-        {
-            let mut streams = self.stream_state.borrow_mut();
-            streams.collection = None;
-            streams.selected.clear();
-            streams.audio_tracks.clear();
-            streams.subtitle_tracks.clear();
-            streams.subtitle_choice = SubtitleChoice::Automatic;
-            streams.last_visible_subtitle_choice = SubtitleChoice::Automatic;
-            streams.external = Some(path.to_path_buf());
-        }
-        *self.resume.borrow_mut() = Some(ResumeState {
+        lock_decoder_fallback(&self.decoder_fallback).restore();
+        self.playback.borrow_mut().prepare_subtitle_rebuild(
+            Some(path.to_path_buf()),
             position,
             rate,
             play_after_seek,
-            stage: ResumeStage::Preroll,
-        });
+        );
         configure_uris(&self.playbin, &uri, Some(&suburi));
         crate::applog!("player: attached subtitle {}", path.display());
         if let Err(source) = self.playbin.set_state(gst::State::Playing) {
-            *self.resume.borrow_mut() = None;
-            let _ = recover_without_external(
-                &self.playbin,
-                &self.current_video,
-                &self.stream_state,
-                &self.resume,
-                &self.seek,
-                &self.playback_rate,
-                &self.duration,
-            );
+            self.playback.borrow_mut().resume = None;
+            let _ = recover_without_external(&self.playbin, &self.playback);
             return Err(PlayerError::Playback {
                 path: video,
                 source,
@@ -966,28 +1069,29 @@ impl Player {
     }
 
     pub fn subtitle_snapshot(&self) -> SubtitleSnapshot {
-        subtitle_snapshot(&self.stream_state.borrow())
+        subtitle_snapshot(&self.playback.borrow().streams)
     }
 
     pub fn audio_snapshot(&self) -> AudioSnapshot {
-        audio_snapshot(&self.stream_state.borrow())
+        audio_snapshot(&self.playback.borrow().streams)
     }
 
     pub fn choose_audio(&self, choice: AudioChoice) -> bool {
         if let AudioChoice::Track(id) = &choice
             && !self
-                .stream_state
+                .playback
                 .borrow()
+                .streams
                 .audio_tracks
                 .iter()
                 .any(|track| track.id == *id)
         {
             return false;
         }
-        let sent = apply_stream_choices(&self.playbin, &self.stream_state, Some(&choice), None);
+        let sent = apply_stream_choices(&self.playbin, &self.playback, Some(&choice), None);
         if sent {
             crate::applog!("player: audio selection {}", choice.action_target());
-            self.stream_state.borrow_mut().audio_choice = choice;
+            self.playback.borrow_mut().streams.audio_choice = choice;
         }
         sent
     }
@@ -995,41 +1099,42 @@ impl Player {
     pub fn choose_subtitle(&self, choice: SubtitleChoice) -> bool {
         if let SubtitleChoice::Track(id) = &choice
             && !self
-                .stream_state
+                .playback
                 .borrow()
+                .streams
                 .subtitle_tracks
                 .iter()
                 .any(|track| track.id == *id)
         {
             return false;
         }
-        let sent = apply_stream_choices(&self.playbin, &self.stream_state, None, Some(&choice));
+        let sent = apply_stream_choices(&self.playbin, &self.playback, None, Some(&choice));
         if sent {
             crate::applog!("player: subtitle selection {}", choice.action_target());
-            let mut state = self.stream_state.borrow_mut();
+            let mut state = self.playback.borrow_mut();
             if choice != SubtitleChoice::Off {
-                state.last_visible_subtitle_choice = choice.clone();
+                state.streams.last_visible_subtitle_choice = choice.clone();
             }
-            state.subtitle_choice = choice;
+            state.streams.subtitle_choice = choice;
         }
         sent
     }
 
     pub fn toggle_subtitles(&self) -> SubtitleSnapshot {
-        if self.stream_state.borrow().subtitle_tracks.is_empty() {
+        if self.playback.borrow().streams.subtitle_tracks.is_empty() {
             return self.subtitle_snapshot();
         }
-        let choice = toggled_subtitle_choice(&self.stream_state.borrow());
+        let choice = toggled_subtitle_choice(&self.playback.borrow().streams);
         self.choose_subtitle(choice);
         self.subtitle_snapshot()
     }
 
     pub fn cycle_subtitles(&self) -> SubtitleSnapshot {
-        let state = self.stream_state.borrow();
-        if state.subtitle_tracks.is_empty() {
-            return subtitle_snapshot(&state);
+        let state = self.playback.borrow();
+        if state.streams.subtitle_tracks.is_empty() {
+            return subtitle_snapshot(&state.streams);
         }
-        let choice = cycled_subtitle_choice(&state);
+        let choice = cycled_subtitle_choice(&state.streams);
         drop(state);
         self.choose_subtitle(choice);
         self.subtitle_snapshot()
@@ -1037,7 +1142,7 @@ impl Player {
 
     /// True when playback is running or the user has asked it to run.
     pub fn is_playing(&self) -> bool {
-        self.playing.get()
+        self.playback.borrow().playing
     }
 
     pub fn is_muted(&self) -> bool {
@@ -1046,14 +1151,14 @@ impl Player {
 
     /// Toggle pause; returns true when now playing.
     pub fn toggle_pause(&self) -> bool {
-        if self.playing.get() {
+        if self.playback.borrow().playing {
             let _ = self.playbin.set_state(gst::State::Paused);
-            self.playing.set(false);
+            self.playback.borrow_mut().playing = false;
             crate::applog!("player: paused");
             false
         } else {
             let _ = self.playbin.set_state(gst::State::Playing);
-            self.playing.set(true);
+            self.playback.borrow_mut().playing = true;
             crate::applog!("player: playing");
             true
         }
@@ -1064,7 +1169,7 @@ impl Player {
     /// tracks the user instead of the pipeline's catch-up.
     pub fn progress(&self) -> Option<(f64, f64)> {
         let dur = self.duration()?;
-        let pos = match self.seek.borrow().pending() {
+        let pos = match self.playback.borrow().seek.pending() {
             Some(request) => request.position,
             None => self
                 .playbin
@@ -1076,7 +1181,7 @@ impl Player {
 
     /// Stream duration in seconds, cached once the demuxer reports it.
     fn duration(&self) -> Option<f64> {
-        if let Some(dur) = self.duration.get() {
+        if let Some(dur) = self.playback.borrow().duration {
             return Some(dur);
         }
         let dur = self
@@ -1086,7 +1191,7 @@ impl Player {
         if dur <= 0.0 {
             return None;
         }
-        self.duration.set(Some(dur));
+        self.playback.borrow_mut().duration = Some(dur);
         Some(dur)
     }
 
@@ -1115,19 +1220,16 @@ impl Player {
             position: secs,
             rate: self.playback_rate(),
         };
-        let issue_now = self.seek.borrow_mut().request(request);
+        let issue_now = self.playback.borrow_mut().request_seek(request);
         if issue_now {
-            issue_seek(&self.seek_target, &self.seek, &self.playback_rate, request);
+            issue_seek(&self.seek_target, &self.playback, request);
         }
     }
 
     /// The requested playback rate, including a coalesced change waiting
     /// behind an accurate seek.
     pub fn playback_rate(&self) -> f64 {
-        self.seek
-            .borrow()
-            .pending()
-            .map_or_else(|| self.playback_rate.get(), |request| request.rate)
+        self.playback.borrow().requested_rate()
     }
 
     /// Change playback rate without moving the visible position. This uses
@@ -1159,12 +1261,12 @@ impl Player {
             })
             .ok_or(PlaybackRateError::PositionUnavailable)?;
         let request = SeekRequest { position, rate };
-        let issue_now = self.seek.borrow_mut().request(request);
+        let issue_now = self.playback.borrow_mut().request_seek(request);
         if !issue_now {
             return Ok(rate);
         }
 
-        if issue_seek(&self.seek_target, &self.seek, &self.playback_rate, request) {
+        if issue_seek(&self.seek_target, &self.playback, request) {
             Ok(rate)
         } else {
             Err(PlaybackRateError::SeekRefused)
@@ -1175,7 +1277,7 @@ impl Player {
     pub fn rewind(&self) {
         self.seek_to(0.0);
         let _ = self.playbin.set_state(gst::State::Playing);
-        self.playing.set(true);
+        self.playback.borrow_mut().playing = true;
     }
 
     /// Set the starting volume from config (FR-8.2). The pipeline is
@@ -1225,6 +1327,10 @@ fn configure_uris(playbin: &gst::Element, uri: &str, suburi: Option<&str>) {
 /// removing its old text/video pads; immediately setting the same pair again
 /// then intermittently connects text to playsink before video (FR-10.7).
 fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError> {
+    // GstPipeline flushes its bus while entering Null, so ordinary bus
+    // observations from the outgoing URI cannot cross this completed
+    // boundary. The error callbacks explicitly deferred to GLib idle carry a
+    // FocusedPlayback generation because they have already left the bus.
     playbin.set_state(gst::State::Null)?;
     let (transition, current, pending) = playbin.state(gst::ClockTime::from_seconds(1));
     transition?;
@@ -1239,20 +1345,12 @@ fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError
 /// only that auxiliary URI and asynchronously restore the video. The external
 /// marker is cleared before retrying, so a genuine video failure on the retry
 /// follows the normal fatal path instead of looping (FR-10.7).
-fn recover_without_external(
-    playbin: &gst::Element,
-    current_video: &RefCell<Option<PathBuf>>,
-    streams: &RefCell<StreamState>,
-    resume: &RefCell<Option<ResumeState>>,
-    seek: &RefCell<SeekState>,
-    playback_rate: &Cell<f64>,
-    duration: &Cell<Option<f64>>,
-) -> bool {
-    let had_external = streams.borrow().external.is_some();
+fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPlayback>) -> bool {
+    let had_external = playback.borrow().streams.external.is_some();
     if !had_external {
         return false;
     }
-    let Some(video) = current_video.borrow().clone() else {
+    let Some(video) = playback.borrow().current_video.clone() else {
         return false;
     };
     let Ok(uri) = glib::filename_to_uri(&video, None) else {
@@ -1262,40 +1360,27 @@ fn recover_without_external(
     // synchronously by waiting on the streaming thread that just errored.
     // Replacement already owns an exact resume point; an automatic sidecar
     // failing during initial playback safely falls back to the beginning.
-    let (position, rate, play_after_seek) = resume
-        .borrow()
-        .as_ref()
-        .map_or((0.0, playback_rate.get(), true), |state| {
-            (state.position, state.rate, state.play_after_seek)
-        });
+    let (position, rate, play_after_seek) = {
+        let playback = playback.borrow();
+        playback
+            .resume
+            .as_ref()
+            .map_or((0.0, playback.playback_rate, true), |state| {
+                (state.position, state.rate, state.play_after_seek)
+            })
+    };
 
     crate::applog!("player: subtitle recovery tearing pipeline down");
     if teardown_pipeline(playbin).is_err() {
         crate::applog!("player: subtitle recovery could not reach null");
         return false;
     }
-    *seek.borrow_mut() = SeekState::default();
-    playback_rate.set(1.0);
-    duration.set(None);
-    {
-        let mut state = streams.borrow_mut();
-        state.collection = None;
-        state.selected.clear();
-        state.audio_tracks.clear();
-        state.subtitle_tracks.clear();
-        state.subtitle_choice = SubtitleChoice::Automatic;
-        state.last_visible_subtitle_choice = SubtitleChoice::Automatic;
-        state.external = None;
-    }
-    *resume.borrow_mut() = Some(ResumeState {
-        position,
-        rate,
-        play_after_seek,
-        stage: ResumeStage::Preroll,
-    });
+    playback
+        .borrow_mut()
+        .prepare_subtitle_rebuild(None, position, rate, play_after_seek);
     configure_uris(playbin, &uri, None);
     if playbin.set_state(gst::State::Playing).is_err() {
-        *resume.borrow_mut() = None;
+        playback.borrow_mut().resume = None;
         crate::applog!("player: subtitle recovery could not restart video");
         return false;
     }
@@ -1523,11 +1608,13 @@ fn selected_stream_id(state: &StreamState, kind: gst::StreamType) -> Option<&str
 
 fn apply_stream_choices(
     playbin: &gst::Element,
-    streams: &RefCell<StreamState>,
+    playback: &RefCell<FocusedPlayback>,
     audio_request: Option<&AudioChoice>,
     subtitle_request: Option<&SubtitleChoice>,
 ) -> bool {
-    let selected = stream_selection_ids(&streams.borrow(), audio_request, subtitle_request);
+    let selected = playback
+        .borrow()
+        .requested_streams(audio_request, subtitle_request);
     if selected.is_empty() {
         return false;
     }
@@ -1694,8 +1781,7 @@ fn same_rate(left: f64, right: f64) -> bool {
 /// watch flushes queued scrub/rate requests without holding a `Player`.
 fn issue_seek(
     seek_target: &gst::Element,
-    seek: &RefCell<SeekState>,
-    playback_rate: &Cell<f64>,
+    playback: &RefCell<FocusedPlayback>,
     request: SeekRequest,
 ) -> bool {
     let position = request.position.max(0.0);
@@ -1703,11 +1789,7 @@ fn issue_seek(
         crate::applog!("player: refusing invalid seek target {position}");
         return false;
     };
-    {
-        let mut state = seek.borrow_mut();
-        state.in_flight = Some((request, Instant::now()));
-        state.queued = None;
-    }
+    playback.borrow_mut().begin_seek(request);
     let sent = seek_target
         .seek(
             request.rate,
@@ -1719,10 +1801,10 @@ fn issue_seek(
         )
         .is_ok();
     if sent {
-        playback_rate.set(request.rate);
+        playback.borrow_mut().accept_seek(request);
         crate::applog!("player: seek to {position:.1}s at {:.2}x", request.rate);
     } else {
-        seek.borrow_mut().in_flight = None;
+        playback.borrow_mut().seek_refused();
         crate::applog!(
             "player: seek to {position:.1}s at {:.2}x was refused",
             request.rate
@@ -1743,13 +1825,12 @@ mod tests {
     use gstreamer::prelude::PluginFeatureExtManual;
 
     use super::{
-        AudioChoice, DecoderFallback, INTEL_VIDEO_DECODERS, Instant, ResumeAction, ResumeStage,
-        ResumeState, SEEK_SETTLE, SeekRequest, SeekState, StreamState, SubtitleChoice,
-        SubtitleTrack, advance_resume, cycled_subtitle_choice, gst, h264_exceeds_declared_level,
-        matching_sidecar, missing_subtitle_decoder, missing_video_decoder,
-        prefer_intel_video_decoders, preferred_hardware_rank, refresh_stream_tracks,
-        replace_stream_collection, stream_selection_ids, toggled_subtitle_choice,
-        video_stream_summary,
+        AudioChoice, DecoderFallback, FocusedPlayback, INTEL_VIDEO_DECODERS, Instant, ResumeAction,
+        SEEK_SETTLE, SeekRequest, SeekState, StreamState, SubtitleChoice, SubtitleTrack,
+        cycled_subtitle_choice, gst, h264_exceeds_declared_level, matching_sidecar,
+        missing_subtitle_decoder, missing_video_decoder, prefer_intel_video_decoders,
+        preferred_hardware_rank, refresh_stream_tracks, replace_stream_collection,
+        stream_selection_ids, toggled_subtitle_choice, video_stream_summary,
     };
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
@@ -1789,6 +1870,127 @@ mod tests {
         // pending position.
         assert!(!state.request(request(31.0, 1.5)));
         assert_eq!(state.queued, Some(request(31.0, 1.5)));
+    }
+
+    #[test]
+    fn focused_playback_trace_attaches_prerolls_seeks_and_resumes() {
+        let mut playback = FocusedPlayback::default();
+        playback.start_video(std::path::Path::new("movie.mkv"), None, true);
+        playback.prepare_subtitle_rebuild(Some("movie.en.srt".into()), 42.5, 1.5, true);
+
+        let seek = request(42.5, 1.5);
+        assert_eq!(
+            playback.observe_async_done(),
+            ResumeAction::Seek {
+                position: 42.5,
+                rate: 1.5,
+                resume_playing: true,
+            }
+        );
+        playback.begin_seek(seek);
+        playback.accept_seek(seek);
+        assert_eq!(
+            playback.observe_async_done(),
+            ResumeAction::Finish {
+                resume_playing: true,
+            }
+        );
+        assert!(playback.resume.is_none());
+        assert_eq!(playback.playback_rate, 1.5);
+    }
+
+    #[test]
+    fn focused_playback_trace_marks_playing_only_after_pipeline_setup() {
+        let mut playback = FocusedPlayback::default();
+        playback.start_video(std::path::Path::new("movie.mkv"), None, true);
+        assert!(!playback.playing);
+
+        playback.playback_started();
+        assert!(playback.playing);
+    }
+
+    #[test]
+    fn focused_playback_trace_coalesces_queued_seeks_and_speed_changes() {
+        let mut playback = FocusedPlayback::default();
+        playback.start_video(std::path::Path::new("movie.mkv"), None, true);
+
+        let first = request(12.0, 1.0);
+        assert!(playback.request_seek(first));
+        playback.begin_seek(first);
+        playback.accept_seek(first);
+        assert!(!playback.request_seek(request(12.0, 1.5)));
+        assert!(!playback.request_seek(request(31.0, 1.5)));
+        assert_eq!(playback.requested_rate(), 1.5);
+
+        let queued = playback.finish_seek().unwrap();
+        assert_eq!(queued, request(31.0, 1.5));
+        playback.begin_seek(queued);
+        playback.accept_seek(queued);
+        assert_eq!(playback.finish_seek(), None);
+        assert_eq!(playback.playback_rate, 1.5);
+    }
+
+    #[test]
+    fn focused_playback_trace_keeps_the_accepted_rate_when_a_seek_is_refused() {
+        let mut playback = FocusedPlayback::default();
+        let rate_change = request(12.0, 1.5);
+        playback.begin_seek(rate_change);
+        playback.seek_refused();
+
+        assert_eq!(playback.playback_rate, 1.0);
+        assert_eq!(playback.seek.pending(), None);
+    }
+
+    #[test]
+    fn focused_playback_trace_rejects_stale_errors_for_a_reopened_path() {
+        let mut playback = FocusedPlayback::default();
+        let video = std::path::Path::new("movie.mkv");
+        playback.start_video(video, Some("movie.srt".into()), true);
+        let stale = playback.begin_error().unwrap();
+
+        // Generation identity matters because path and sidecar can be equal
+        // after navigation or an explicit reopen.
+        playback.start_video(video, Some("movie.srt".into()), true);
+        assert!(!playback.error_is_current(&stale));
+        let current = playback.begin_error().unwrap();
+        playback.finish_error(&stale);
+        assert!(playback.begin_error().is_none());
+        playback.finish_error(&current);
+        assert!(playback.begin_error().is_some());
+    }
+
+    #[test]
+    fn focused_playback_trace_revalidates_choices_on_collection_changes() {
+        gst::init().unwrap();
+        let stream = |id, kind| gst::Stream::new(Some(id), None, kind, gst::StreamFlags::SELECT);
+        let mut playback = FocusedPlayback::default();
+        playback.streams.audio_choice = AudioChoice::Track("commentary".into());
+        playback.streams.subtitle_choice = SubtitleChoice::Track("english".into());
+
+        playback.replace_streams(
+            gst::StreamCollection::builder(None)
+                .streams([
+                    stream("video", gst::StreamType::VIDEO),
+                    stream("commentary", gst::StreamType::AUDIO),
+                    stream("english", gst::StreamType::TEXT),
+                ])
+                .build(),
+        );
+        assert_eq!(
+            playback.streams.audio_choice,
+            AudioChoice::Track("commentary".into())
+        );
+
+        playback.replace_streams(
+            gst::StreamCollection::builder(None)
+                .streams([
+                    stream("video-2", gst::StreamType::VIDEO),
+                    stream("main", gst::StreamType::AUDIO),
+                ])
+                .build(),
+        );
+        assert_eq!(playback.streams.audio_choice, AudioChoice::Automatic);
+        assert_eq!(playback.streams.subtitle_choice, SubtitleChoice::Automatic);
     }
 
     #[test]
@@ -2108,32 +2310,6 @@ mod tests {
         );
         refresh_stream_tracks(&mut state);
         assert_eq!(state.subtitle_tracks[0].label, "External — movie.en.srt");
-    }
-
-    #[test]
-    fn sidecar_reload_prerolls_seeks_then_restores_playback() {
-        let mut resume = Some(ResumeState {
-            position: 42.5,
-            rate: 1.5,
-            play_after_seek: true,
-            stage: ResumeStage::Preroll,
-        });
-        assert_eq!(
-            advance_resume(&mut resume),
-            ResumeAction::Seek {
-                position: 42.5,
-                rate: 1.5,
-                resume_playing: true,
-            }
-        );
-        assert_eq!(
-            advance_resume(&mut resume),
-            ResumeAction::Finish {
-                resume_playing: true,
-            }
-        );
-        assert!(resume.is_none());
-        assert_eq!(advance_resume(&mut resume), ResumeAction::None);
     }
 
     #[test]
