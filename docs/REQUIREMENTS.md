@@ -80,7 +80,10 @@ new product decisions rather than incidental implementation.
   mutates an unrelated folder or media generation.
 - **FR-5.3 / FR-5.4 / FR-5.5** Explicit rotate-save supports only editable static images. JPEG remains
   lossless; every save path is atomic and preserves either the complete old or
-  complete new file across interruption.
+  complete new file across interruption. Replacement preserves the source
+  owner, group, Unix permissions, access time and `user.*` extended attributes;
+  modification and change times reflect the explicit save, while security and
+  system attributes follow the filesystem's replacement policy.
 - **FR-5.6** No source media changes automatically. Current source writes are limited to
   explicit Trash, Restore and Rotate Save.
 - **FR-5.6** Copy creates no file. In Viewer it copies a static image, intrinsic-size SVG

@@ -49,7 +49,8 @@ You can also start open-mpv without a path and choose **Open File** or
 - Supports zoom, pan, fit, rotation and fullscreen.
 - Plays video with seeking, volume, speed, audio-track and subtitle controls.
 - Moves files to trash and offers a short Undo action.
-- Saves supported image rotations. JPEG rotation is lossless.
+- Saves supported image rotations atomically. JPEG rotation is lossless, and
+  normal file ownership, permissions and user metadata are preserved.
 - Draws a box or arrow on a still image and copies the result without changing
   the original.
 - Supports optional mpv-style configuration and custom key bindings.

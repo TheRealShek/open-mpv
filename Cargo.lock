@@ -1261,6 +1261,8 @@ dependencies = [
  "gstreamer",
  "gtk4",
  "gufo-common",
+ "rustix",
+ "tempfile",
 ]
 
 [[package]]
