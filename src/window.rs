@@ -2361,8 +2361,9 @@ impl App {
 
     fn save_rotation(self: &Rc<Self>) {
         let rotation = self.view.rotation();
-        let Some(path) = self.current_path() else {
-            return;
+        let (path, mime) = match &*self.media.borrow() {
+            MediaState::Image { path, mime, .. } => (path.clone(), mime.clone()),
+            _ => return,
         };
         if rotation == 0 {
             return;
@@ -2374,7 +2375,7 @@ impl App {
             self,
             async move {
                 let started = std::time::Instant::now();
-                let result = fileops::save_rotation(&path, rotation).await;
+                let result = fileops::save_rotation(&path, &mime, rotation).await;
                 app.saving.set(false);
                 match result {
                     Ok(()) => {

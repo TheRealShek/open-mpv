@@ -86,6 +86,7 @@ pub enum SaveRotationError {
         path: PathBuf,
         source: Box<glycin::ErrorCtx>,
     },
+    LosslessUnavailable(PathBuf),
     SparseWrite {
         path: PathBuf,
         source: glycin::Error,
@@ -106,6 +107,11 @@ impl fmt::Display for SaveRotationError {
             SaveRotationError::Rotation { path, source } => {
                 write!(f, "rotation failed for {}: {source}", path.display())
             }
+            SaveRotationError::LosslessUnavailable(path) => write!(
+                f,
+                "could not rotate {} without re-encoding JPEG pixels",
+                path.display()
+            ),
             SaveRotationError::SparseWrite { path, source } => {
                 write!(f, "could not write {}: {source}", path.display())
             }
@@ -124,6 +130,7 @@ impl std::error::Error for SaveRotationError {
         match self {
             SaveRotationError::Editor { source, .. }
             | SaveRotationError::Rotation { source, .. } => Some(source.as_ref()),
+            SaveRotationError::LosslessUnavailable(_) => None,
             SaveRotationError::SparseWrite { source, .. } => Some(source),
             SaveRotationError::ReadEdited(source)
             | SaveRotationError::AtomicWrite { source, .. } => Some(source),
@@ -295,7 +302,11 @@ fn hex_value(byte: u8) -> Option<u8> {
 /// Persist a clockwise view rotation (in quarter turns) to disk via the
 /// sandboxed editor. JPEG rotations are sparse metadata edits (no pixel
 /// re-encode); every edit is staged and atomically installed (FR-5.4/5.5).
-pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), SaveRotationError> {
+pub async fn save_rotation(
+    path: &Path,
+    mime: &str,
+    cw_quarter_turns: u8,
+) -> Result<(), SaveRotationError> {
     // glycin rotations are counter-clockwise.
     let rotation = match cw_quarter_turns % 4 {
         1 => Rotation::_270,
@@ -313,6 +324,29 @@ pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), Save
                 source: Box::new(source),
             })?;
     let ops = glycin::Operations::new(vec![glycin::Operation::Rotate(rotation)]);
+
+    // `SparseEdit` does not expose Glycin's lossless flag for a complete
+    // fallback. Ask for a complete JPEG edit directly so the contract can be
+    // enforced instead of silently accepting a pixel re-encode.
+    if mime == "image/jpeg" {
+        let edit =
+            editable
+                .apply_complete(&ops)
+                .await
+                .map_err(|source| SaveRotationError::Rotation {
+                    path: path.to_path_buf(),
+                    source: Box::new(source),
+                })?;
+        if !edit.is_lossless() {
+            return Err(SaveRotationError::LosslessUnavailable(path.to_path_buf()));
+        }
+        let data = edit.data();
+        let bytes = spawn_io(move || data.get_full())
+            .await
+            .map_err(SaveRotationError::ReadEdited)?;
+        return atomic_write_async(path, bytes).await;
+    }
+
     let edit = editable
         .apply_sparse(&ops)
         .await
@@ -322,12 +356,13 @@ pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), Save
         })?;
     match edit {
         glycin::SparseEdit::Sparse(_) => {
-            let staged = AtomicReplacement::copy_of(path).map_err(|source| {
-                SaveRotationError::AtomicWrite {
+            let stage_path = path.to_path_buf();
+            let staged = spawn_io(move || AtomicReplacement::copy_of(&stage_path))
+                .await
+                .map_err(|source| SaveRotationError::AtomicWrite {
                     path: path.to_path_buf(),
                     source,
-                }
-            })?;
+                })?;
             let outcome = edit
                 .apply_to(gio::File::for_path(staged.path()))
                 .await
@@ -336,21 +371,38 @@ pub async fn save_rotation(path: &Path, cw_quarter_turns: u8) -> Result<(), Save
                     source,
                 })?;
             debug_assert_eq!(outcome, glycin::EditOutcome::Changed);
-            staged
-                .commit()
-                .map_err(|source| SaveRotationError::AtomicWrite {
+            spawn_io(move || staged.commit()).await.map_err(|source| {
+                SaveRotationError::AtomicWrite {
                     path: path.to_path_buf(),
                     source,
-                })
-        }
-        glycin::SparseEdit::Complete(data) => {
-            let bytes = data.get_full().map_err(SaveRotationError::ReadEdited)?;
-            atomic_write(path, &bytes).map_err(|source| SaveRotationError::AtomicWrite {
-                path: path.to_path_buf(),
-                source,
+                }
             })
         }
+        glycin::SparseEdit::Complete(data) => {
+            let bytes = spawn_io(move || data.get_full())
+                .await
+                .map_err(SaveRotationError::ReadEdited)?;
+            atomic_write_async(path, bytes).await
+        }
     }
+}
+
+async fn atomic_write_async(path: &Path, bytes: Vec<u8>) -> Result<(), SaveRotationError> {
+    let write_path = path.to_path_buf();
+    spawn_io(move || atomic_write(&write_path, &bytes))
+        .await
+        .map_err(|source| SaveRotationError::AtomicWrite {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+async fn spawn_io<T: Send + 'static>(
+    operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    gio::spawn_blocking(operation)
+        .await
+        .map_err(|_| std::io::Error::other("filesystem worker failed"))?
 }
 
 /// Write through an exclusively created same-directory file, then fsync and
@@ -422,15 +474,15 @@ impl AtomicReplacement {
         }
         self.temp.as_file().sync_all()?;
 
-        let dir = self.target.parent().map(Path::to_path_buf);
+        let dir = self
+            .target
+            .parent()
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        let dir = File::open(dir)?;
         self.temp
             .persist(&self.target)
             .map_err(|error| error.error)?;
-        if let Some(dir) = dir
-            && let Ok(dir) = File::open(dir)
-        {
-            let _ = dir.sync_all();
-        }
+        dir.sync_all()?;
         Ok(())
     }
 }
@@ -594,12 +646,33 @@ mod tests {
             eprintln!("skipping: ImageMagick unavailable to generate fixture");
             return;
         }
+        // Add a minimal EXIF orientation entry. Glycin can then rotate the
+        // JPEG losslessly by changing that metadata instead of pixel data.
+        let jpeg = std::fs::read(&file).unwrap();
+        assert_eq!(&jpeg[..2], b"\xff\xd8");
+        let exif = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'I', b'I', 0x2a, 0, 8, 0, 0, 0,
+            1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut with_exif = Vec::with_capacity(jpeg.len() + exif.len());
+        with_exif.extend_from_slice(&jpeg[..2]);
+        with_exif.extend_from_slice(&exif);
+        with_exif.extend_from_slice(&jpeg[2..]);
+        std::fs::write(&file, with_exif).unwrap();
+        let before = std::fs::read(&file).unwrap();
 
-        block_on(save_rotation(&file, 1)).unwrap();
+        block_on(save_rotation(&file, "image/jpeg", 1)).unwrap();
 
-        // Either a sparse metadata edit (orientation flag, pixels kept)
-        // or a full sandboxed rewrite is acceptable — but the displayed
-        // result must be the 90° CW rotation: 20x40 after auto-orient.
+        let after = std::fs::read(&file).unwrap();
+        assert_eq!(
+            jpeg_scan_payload(&after),
+            jpeg_scan_payload(&before),
+            "JPEG compressed pixel data must not be re-encoded"
+        );
+
+        // Successful JPEG saves are guaranteed to use Glycin's sparse
+        // metadata edit. The displayed result must be 90° CW: 20x40 after
+        // auto-orient, without re-encoding the pixel data.
         let out = std::process::Command::new("magick")
             .args([
                 file.to_str().unwrap(),
@@ -616,6 +689,15 @@ mod tests {
             "saved file must display rotated 90 degrees clockwise"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn jpeg_scan_payload(bytes: &[u8]) -> &[u8] {
+        let marker = bytes
+            .windows(2)
+            .position(|window| window == b"\xff\xda")
+            .expect("JPEG must contain a start-of-scan marker");
+        let segment_len = usize::from(u16::from_be_bytes([bytes[marker + 2], bytes[marker + 3]]));
+        &bytes[marker + 2 + segment_len..]
     }
 
     #[test]
