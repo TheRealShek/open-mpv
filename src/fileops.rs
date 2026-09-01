@@ -300,8 +300,9 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 /// Persist a clockwise view rotation (in quarter turns) to disk via the
-/// sandboxed editor. JPEG rotations are sparse metadata edits (no pixel
-/// re-encode); every edit is staged and atomically installed (FR-5.4/5.5).
+/// sandboxed editor. JPEG rotations are accepted only when Glycin guarantees
+/// no pixel re-encode; every edit is staged and atomically installed
+/// (FR-5.4/5.5).
 pub async fn save_rotation(
     path: &Path,
     mime: &str,
@@ -670,9 +671,8 @@ mod tests {
             "JPEG compressed pixel data must not be re-encoded"
         );
 
-        // Successful JPEG saves are guaranteed to use Glycin's sparse
-        // metadata edit. The displayed result must be 90° CW: 20x40 after
-        // auto-orient, without re-encoding the pixel data.
+        // Successful JPEG saves are guaranteed lossless. The displayed result
+        // must be 90° CW: 20x40 after auto-orient, without re-encoding pixels.
         let out = std::process::Command::new("magick")
             .args([
                 file.to_str().unwrap(),
