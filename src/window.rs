@@ -29,213 +29,10 @@ use crate::player::{
 };
 use crate::viewer::ImageView;
 
+mod action;
+use action::{Action, Command, Media, WorkspaceState};
+
 const SEEK_STEP_SECONDS: f64 = 10.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Action {
-    OpenFile,
-    OpenFolder,
-    Right,
-    Left,
-    Up,
-    Down,
-    Next,
-    Previous,
-    First,
-    Last,
-    PlayPause,
-    SeekBack,
-    SeekForward,
-    SpeedDown,
-    SpeedUp,
-    SpeedReset,
-    Mute,
-    SubtitleOpen,
-    SubtitleToggle,
-    SubtitleCycle,
-    VolumeUp,
-    VolumeDown,
-    ZoomIn,
-    ZoomOut,
-    ZoomFit,
-    ZoomActual,
-    ZoomToggle,
-    RotateClockwise,
-    RotateCounterclockwise,
-    Markup,
-    MarkupBox,
-    MarkupArrow,
-    MarkupCopy,
-    MarkupClear,
-    Save,
-    Trash,
-    Undo,
-    Fullscreen,
-    Help,
-    Close,
-    Escape,
-}
-
-impl Action {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Action::OpenFile => "open-file",
-            Action::OpenFolder => "open-folder",
-            Action::Right => "right",
-            Action::Left => "left",
-            Action::Up => "up",
-            Action::Down => "down",
-            Action::Next => "next",
-            Action::Previous => "prev",
-            Action::First => "first",
-            Action::Last => "last",
-            Action::PlayPause => "play-pause",
-            Action::SeekBack => "seek-back",
-            Action::SeekForward => "seek-forward",
-            Action::SpeedDown => "speed-down",
-            Action::SpeedUp => "speed-up",
-            Action::SpeedReset => "speed-reset",
-            Action::Mute => "mute",
-            Action::SubtitleOpen => "subtitle-open",
-            Action::SubtitleToggle => "subtitle-toggle",
-            Action::SubtitleCycle => "subtitle-cycle",
-            Action::VolumeUp => "volume-up",
-            Action::VolumeDown => "volume-down",
-            Action::ZoomIn => "zoom-in",
-            Action::ZoomOut => "zoom-out",
-            Action::ZoomFit => "zoom-fit",
-            Action::ZoomActual => "zoom-actual",
-            Action::ZoomToggle => "zoom-toggle",
-            Action::RotateClockwise => "rotate-cw",
-            Action::RotateCounterclockwise => "rotate-ccw",
-            Action::Markup => "markup",
-            Action::MarkupBox => "markup-box",
-            Action::MarkupArrow => "markup-arrow",
-            Action::MarkupCopy => "markup-copy",
-            Action::MarkupClear => "markup-clear",
-            Action::Save => "save",
-            Action::Trash => "trash",
-            Action::Undo => "undo",
-            Action::Fullscreen => "fullscreen",
-            Action::Help => "help",
-            Action::Close => "close",
-            Action::Escape => "escape",
-        }
-    }
-
-    fn parse(name: &str) -> Option<Self> {
-        ACTIONS
-            .iter()
-            .find_map(|(action, _)| (action.as_str() == name).then_some(*action))
-    }
-}
-
-/// Default key → action map; config `bind=` lines override per key.
-const DEFAULT_BINDS: &[(&str, Action)] = &[
-    ("<Control>o", Action::OpenFile),
-    ("<Control><Shift>o", Action::OpenFolder),
-    // The arrow keys are contextual (see `App::arrow`), which is why they
-    // bind to their own actions rather than straight to next/prev: Page
-    // Down must keep stepping through the folder even when a zoomed
-    // image has the arrows panning.
-    ("Right", Action::Right),
-    ("Left", Action::Left),
-    ("Up", Action::Up),
-    ("Down", Action::Down),
-    // Space pauses video, flips to the next photo otherwise.
-    ("space", Action::PlayPause),
-    ("Page_Down", Action::Next),
-    ("BackSpace", Action::Previous),
-    ("Page_Up", Action::Previous),
-    ("Home", Action::First),
-    ("End", Action::Last),
-    ("plus", Action::ZoomIn),
-    ("equal", Action::ZoomIn),
-    ("KP_Add", Action::ZoomIn),
-    ("minus", Action::ZoomOut),
-    ("KP_Subtract", Action::ZoomOut),
-    ("0", Action::ZoomFit),
-    ("1", Action::ZoomActual),
-    ("z", Action::ZoomToggle),
-    ("r", Action::RotateClockwise),
-    ("<Shift>r", Action::RotateCounterclockwise),
-    ("a", Action::Markup),
-    ("b", Action::MarkupBox),
-    ("<Shift>a", Action::MarkupArrow),
-    ("<Control>c", Action::MarkupCopy),
-    ("c", Action::MarkupClear),
-    ("s", Action::Save),
-    // Video transport (FR-10.4), mpv-flavored.
-    ("j", Action::SeekBack),
-    ("l", Action::SeekForward),
-    ("<Shift>Left", Action::SeekBack),
-    ("<Shift>Right", Action::SeekForward),
-    ("bracketleft", Action::SpeedDown),
-    ("bracketright", Action::SpeedUp),
-    ("backslash", Action::SpeedReset),
-    ("m", Action::Mute),
-    // `v` follows mpv. Its subtitle-cycle `j` is already open-mpv's
-    // backward seek, so Shift+V keeps the two actions adjacent (FR-10.7).
-    ("v", Action::SubtitleToggle),
-    ("<Shift>v", Action::SubtitleCycle),
-    ("Delete", Action::Trash),
-    ("KP_Delete", Action::Trash),
-    ("<Control>z", Action::Undo),
-    ("f", Action::Fullscreen),
-    ("F11", Action::Fullscreen),
-    ("q", Action::Close),
-    ("question", Action::Help),
-    ("Escape", Action::Escape),
-];
-
-/// Every action, paired with the description the cheat sheet shows
-/// (NFR-5.2). One list, so an action cannot be added without being
-/// documented, and config binds are validated against the same names
-/// (FR-8.2). `escape` carries no description: its layered behaviour is
-/// spelled out in the footer instead.
-const ACTIONS: &[(Action, &str)] = &[
-    (Action::OpenFile, "Open a file"),
-    (Action::OpenFolder, "Open a folder"),
-    (Action::Right, "Next image, or pan when zoomed in"),
-    (Action::Left, "Previous image, or pan when zoomed in"),
-    (Action::Up, "Volume up, or pan when zoomed in"),
-    (Action::Down, "Volume down, or pan when zoomed in"),
-    (Action::Next, "Next image"),
-    (Action::Previous, "Previous image"),
-    (Action::First, "First image"),
-    (Action::Last, "Last image"),
-    (Action::PlayPause, "Pause video, or next image"),
-    (Action::SeekBack, "Seek back 10 seconds"),
-    (Action::SeekForward, "Seek forward 10 seconds"),
-    (Action::SpeedDown, "Slower video playback"),
-    (Action::SpeedUp, "Faster video playback"),
-    (Action::SpeedReset, "Reset video speed to 1x"),
-    (Action::Mute, "Mute audio"),
-    (Action::SubtitleOpen, "Add an external subtitle"),
-    (Action::SubtitleToggle, "Show or hide subtitles"),
-    (Action::SubtitleCycle, "Next subtitle track"),
-    (Action::VolumeUp, "Volume up"),
-    (Action::VolumeDown, "Volume down"),
-    (Action::ZoomIn, "Zoom in"),
-    (Action::ZoomOut, "Zoom out"),
-    (Action::ZoomFit, "Fit to window"),
-    (Action::ZoomActual, "Actual size, 100%"),
-    (Action::ZoomToggle, "Toggle fit and 100%"),
-    (Action::RotateClockwise, "Rotate right"),
-    (Action::RotateCounterclockwise, "Rotate left"),
-    (Action::Markup, "Start or cancel Quick Markup"),
-    (Action::MarkupBox, "Quick Markup box tool"),
-    (Action::MarkupArrow, "Quick Markup arrow tool"),
-    (Action::MarkupCopy, "Copy the annotated image"),
-    (Action::MarkupClear, "Clear all annotations"),
-    (Action::Save, "Save rotation to the file"),
-    (Action::Trash, "Move to trash"),
-    (Action::Undo, "Undo delete or last annotation"),
-    (Action::Fullscreen, "Fullscreen"),
-    (Action::Help, "This list"),
-    (Action::Close, "Quit"),
-    (Action::Escape, ""),
-];
 
 /// Seek bar width when the window has room for it: wide enough that a
 /// pixel is a usable unit of time (a ten-minute video scrubs in ~2 s
@@ -417,6 +214,7 @@ pub struct App {
     /// reused; `None` also while videos have never been opened.
     player: RefCell<Option<Rc<Player>>>,
     pending_undo: RefCell<Option<PathBuf>>,
+    saving: Cell<bool>,
     presented: Cell<bool>,
     // Widgets and timers.
     status_area: gtk::Box,
@@ -526,9 +324,9 @@ impl App {
         status.set_justify(gtk::Justification::Center);
         status.add_css_class("status");
         let open_file_btn = gtk::Button::with_label("Open File…");
-        open_file_btn.set_action_name(Some("win.open-file"));
+        open_file_btn.set_action_name(Some(&Action::OpenFile.detailed_name()));
         let open_folder_btn = gtk::Button::with_label("Open Folder…");
-        open_folder_btn.set_action_name(Some("win.open-folder"));
+        open_folder_btn.set_action_name(Some(&Action::OpenFolder.detailed_name()));
         let status_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         status_actions.set_halign(gtk::Align::Center);
         status_actions.add_css_class("status-actions");
@@ -542,11 +340,19 @@ impl App {
         overlay.add_overlay(&status_area);
 
         // Navigation arrows (FR-3.1).
-        let prev_btn = osd_button("go-previous-symbolic", "win.prev", "Previous image");
+        let prev_btn = osd_button(
+            "go-previous-symbolic",
+            &Action::Previous.detailed_name(),
+            "Previous image",
+        );
         prev_btn.set_halign(gtk::Align::Start);
         prev_btn.set_valign(gtk::Align::Center);
         overlay.add_overlay(&prev_btn);
-        let next_btn = osd_button("go-next-symbolic", "win.next", "Next image");
+        let next_btn = osd_button(
+            "go-next-symbolic",
+            &Action::Next.detailed_name(),
+            "Next image",
+        );
         next_btn.set_halign(gtk::Align::End);
         next_btn.set_valign(gtk::Align::Center);
         overlay.add_overlay(&next_btn);
@@ -575,12 +381,16 @@ impl App {
         window_controls.add_css_class("window-controls");
         window_controls.set_halign(gtk::Align::End);
         window_controls.set_valign(gtk::Align::Start);
-        let fullscreen_btn = bar_button("view-fullscreen-symbolic", "win.fullscreen", "Fullscreen");
+        let fullscreen_btn = bar_button(
+            "view-fullscreen-symbolic",
+            &Action::Fullscreen.detailed_name(),
+            "Fullscreen",
+        );
         window_controls.append(&fullscreen_btn);
         // Close button (FR-6.7).
         // Ask for the regular icon: some third-party themes ship a white
         // `-symbolic` source that GTK recolours to transparent.
-        let close_btn = bar_button("window-close", "win.close", "Close");
+        let close_btn = bar_button("window-close", &Action::Close.detailed_name(), "Close");
         window_controls.append(&close_btn);
         overlay.add_overlay(&window_controls);
 
@@ -612,10 +422,14 @@ impl App {
         // pipeline in update_transport.
         let play_btn = bar_button(
             "media-playback-pause-symbolic",
-            "win.play-pause",
+            &Action::PlayPause.detailed_name(),
             "Play / pause",
         );
-        let mute_btn = bar_button("audio-volume-high-symbolic", "win.mute", "Mute");
+        let mute_btn = bar_button(
+            "audio-volume-high-symbolic",
+            &Action::Mute.detailed_name(),
+            "Mute",
+        );
         let speed_menu = playback_speed_menu();
         let speed_label = gtk::Label::new(Some("1×"));
         let speed_btn = gtk::MenuButton::builder()
@@ -645,23 +459,27 @@ impl App {
         let photo_controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let rotate_ccw = bar_button(
             "object-rotate-left-symbolic",
-            "win.rotate-ccw",
+            &Action::RotateCounterclockwise.detailed_name(),
             "Rotate left",
         );
         let rotate_cw = bar_button(
             "object-rotate-right-symbolic",
-            "win.rotate-cw",
+            &Action::RotateClockwise.detailed_name(),
             "Rotate right",
         );
         photo_controls.append(&rotate_ccw);
         photo_controls.append(&rotate_cw);
-        let markup_btn = bar_button("document-edit-symbolic", "win.markup", "Quick Markup");
+        let markup_btn = bar_button(
+            "document-edit-symbolic",
+            &Action::Markup.detailed_name(),
+            "Quick Markup",
+        );
         photo_controls.append(&markup_btn);
         // Save appears only once an editable image has a pending rotation;
         // an inert floppy icon reads as a broken control (FR-5.4).
         let save_btn = bar_button(
             "document-save-symbolic",
-            "win.save",
+            &Action::Save.detailed_name(),
             "Save rotation to file",
         );
         save_btn.set_visible(false);
@@ -673,7 +491,7 @@ impl App {
         normal_controls.append(&separator);
         normal_controls.append(&bar_button(
             "user-trash-symbolic",
-            "win.trash",
+            &Action::Trash.detailed_name(),
             "Move to trash",
         ));
 
@@ -682,12 +500,24 @@ impl App {
         let more_menu = gio::Menu::new();
         let open_menu = open_menu_model();
         more_menu.append_section(None, &open_menu);
-        more_menu.append(Some("Fit to Window"), Some("win.zoom-fit"));
-        more_menu.append(Some("Actual Size"), Some("win.zoom-actual"));
-        more_menu.append(Some("Rotate Left"), Some("win.rotate-ccw"));
-        more_menu.append(Some("Rotate Right"), Some("win.rotate-cw"));
-        more_menu.append(Some("First File"), Some("win.first"));
-        more_menu.append(Some("Last File"), Some("win.last"));
+        more_menu.append(
+            Some("Fit to Window"),
+            Some(&Action::ZoomFit.detailed_name()),
+        );
+        more_menu.append(
+            Some("Actual Size"),
+            Some(&Action::ZoomActual.detailed_name()),
+        );
+        more_menu.append(
+            Some("Rotate Left"),
+            Some(&Action::RotateCounterclockwise.detailed_name()),
+        );
+        more_menu.append(
+            Some("Rotate Right"),
+            Some(&Action::RotateClockwise.detailed_name()),
+        );
+        more_menu.append(Some("First File"), Some(&Action::First.detailed_name()));
+        more_menu.append(Some("Last File"), Some(&Action::Last.detailed_name()));
         // Filled only for decoded static raster images (FR-11.1). A disabled
         // editing item on video or animation would imply future support.
         let markup_context_menu = gio::Menu::new();
@@ -702,7 +532,10 @@ impl App {
         // disagree about available tracks (FR-10.7).
         let subtitle_context_menu = gio::Menu::new();
         more_menu.append_section(None, &subtitle_context_menu);
-        more_menu.append(Some("Keyboard Shortcuts"), Some("win.help"));
+        more_menu.append(
+            Some("Keyboard Shortcuts"),
+            Some(&Action::Help.detailed_name()),
+        );
         let more_btn = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
             .menu_model(&more_menu)
@@ -721,35 +554,35 @@ impl App {
         let markup_decisions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         markup_decisions.set_halign(gtk::Align::Center);
         let markup_box_btn = gtk::ToggleButton::with_label("Box");
-        markup_box_btn.set_action_name(Some("win.markup-box"));
+        markup_box_btn.set_action_name(Some(&Action::MarkupBox.detailed_name()));
         markup_box_btn.set_tooltip_text(Some("Draw a box (B)"));
         markup_box_btn.add_css_class("flat");
         markup_box_btn.set_active(true);
         let markup_arrow_btn = gtk::ToggleButton::with_label("Arrow");
         markup_arrow_btn.set_group(Some(&markup_box_btn));
-        markup_arrow_btn.set_action_name(Some("win.markup-arrow"));
+        markup_arrow_btn.set_action_name(Some(&Action::MarkupArrow.detailed_name()));
         markup_arrow_btn.set_tooltip_text(Some("Draw an arrow (Shift+A)"));
         markup_arrow_btn.add_css_class("flat");
         markup_tools.append(&markup_box_btn);
         markup_tools.append(&markup_arrow_btn);
         markup_tools.append(&bar_button(
             "edit-undo-symbolic",
-            "win.undo",
+            &Action::Undo.detailed_name(),
             "Undo last annotation (Ctrl+Z)",
         ));
         markup_decisions.append(&bar_button(
             "edit-clear-all-symbolic",
-            "win.markup-clear",
+            &Action::MarkupClear.detailed_name(),
             "Clear all annotations; Ctrl+Z restores them (C)",
         ));
         markup_decisions.append(&bar_button(
             "process-stop-symbolic",
-            "win.markup",
+            &Action::Markup.detailed_name(),
             "Cancel Quick Markup (A or Escape)",
         ));
         let copy_markup_btn = bar_button(
             "edit-copy-symbolic",
-            "win.markup-copy",
+            &Action::MarkupCopy.detailed_name(),
             "Copy annotated image (Ctrl+C)",
         );
         copy_markup_btn.remove_css_class("flat");
@@ -780,7 +613,7 @@ impl App {
         // Toast with undo (FR-5.2).
         let toast_label = gtk::Label::new(None);
         let toast_undo = gtk::Button::with_label("Undo");
-        toast_undo.set_action_name(Some("win.undo"));
+        toast_undo.set_action_name(Some(&Action::Undo.detailed_name()));
         let toast_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         toast_box.add_css_class("toast");
         toast_box.append(&toast_label);
@@ -817,17 +650,17 @@ impl App {
         }
 
         let subtitle_action = gio::SimpleAction::new_stateful(
-            "subtitle",
+            Action::SubtitleSelect.name(),
             Some(glib::VariantTy::STRING),
             &"auto".to_variant(),
         );
         let audio_action = gio::SimpleAction::new_stateful(
-            "audio",
+            Action::AudioSelect.name(),
             Some(glib::VariantTy::STRING),
             &"auto".to_variant(),
         );
         let speed_action = gio::SimpleAction::new_stateful(
-            "speed",
+            Action::SpeedSet.name(),
             Some(glib::VariantTy::DOUBLE),
             &1.0_f64.to_variant(),
         );
@@ -842,6 +675,7 @@ impl App {
             editable_mimes: RefCell::new(BTreeSet::new()),
             player: RefCell::new(None),
             pending_undo: RefCell::new(None),
+            saving: Cell::new(false),
             presented: Cell::new(false),
             status_area,
             status,
@@ -900,13 +734,13 @@ impl App {
             indicator_timer: TimerSlot::default(),
             toast_timer: TimerSlot::default(),
             svg_timer: TimerSlot::default(),
-            markup_action: gio::SimpleAction::new(Action::Markup.as_str(), None),
-            markup_box_action: gio::SimpleAction::new(Action::MarkupBox.as_str(), None),
-            markup_arrow_action: gio::SimpleAction::new(Action::MarkupArrow.as_str(), None),
-            markup_copy_action: gio::SimpleAction::new(Action::MarkupCopy.as_str(), None),
-            markup_clear_action: gio::SimpleAction::new(Action::MarkupClear.as_str(), None),
-            save_action: gio::SimpleAction::new(Action::Save.as_str(), None),
-            undo_action: gio::SimpleAction::new(Action::Undo.as_str(), None),
+            markup_action: gio::SimpleAction::new(Action::Markup.name(), None),
+            markup_box_action: gio::SimpleAction::new(Action::MarkupBox.name(), None),
+            markup_arrow_action: gio::SimpleAction::new(Action::MarkupArrow.name(), None),
+            markup_copy_action: gio::SimpleAction::new(Action::MarkupCopy.name(), None),
+            markup_clear_action: gio::SimpleAction::new(Action::MarkupClear.name(), None),
+            save_action: gio::SimpleAction::new(Action::Save.name(), None),
+            undo_action: gio::SimpleAction::new(Action::Undo.name(), None),
             cfg,
         });
 
@@ -1068,10 +902,10 @@ impl App {
             #[strong]
             app,
             move |dir| {
-                app.navigate(if dir > 0 {
-                    Direction::Next
+                app.dispatch_action(if dir > 0 {
+                    Action::Next
                 } else {
-                    Direction::Previous
+                    Action::Previous
                 });
             }
         ));
@@ -1115,9 +949,6 @@ impl App {
     }
 
     fn choose_media_file(self: &Rc<Self>) {
-        if self.markup_blocks_normal_action() {
-            return;
-        }
         let filter = supported_media_filter();
         let filters = gio::ListStore::new::<gtk::FileFilter>();
         filters.append(&filter);
@@ -1154,9 +985,6 @@ impl App {
     }
 
     fn choose_folder(self: &Rc<Self>) {
-        if self.markup_blocks_normal_action() {
-            return;
-        }
         let dialog = gtk::FileDialog::new();
         dialog.set_title("Open Folder");
         dialog.set_accept_label(Some("Open"));
@@ -1923,14 +1751,6 @@ impl App {
         }
     }
 
-    fn markup_blocks_normal_action(self: &Rc<Self>) -> bool {
-        if !self.view.is_marking_up() {
-            return false;
-        }
-        self.flash("Copy or cancel Quick Markup first");
-        true
-    }
-
     fn on_player_event(self: &Rc<Self>, event: player::Event) {
         match event {
             player::Event::EndOfStream => {
@@ -2266,9 +2086,6 @@ impl App {
     }
 
     fn navigate(self: &Rc<Self>, direction: Direction) {
-        if self.markup_blocks_normal_action() {
-            return;
-        }
         let target = {
             let navigation = self.navigation.borrow();
             match direction {
@@ -2303,29 +2120,6 @@ impl App {
         self.info_bar.set_visible(name.is_some());
         self.win
             .set_title(Some(name.as_deref().unwrap_or("open-mpv")));
-    }
-
-    /// The arrow keys are contextual, like Space: a zoomed image has
-    /// somewhere to go, so they pan it (FR-4.3); a fitted one does not,
-    /// so sideways steps through the folder and vertical works the video
-    /// volume. `dx`/`dy` are the direction of travel in screen terms.
-    fn arrow(self: &Rc<Self>, dx: i32, dy: i32) {
-        if self.view.is_pannable() {
-            // Moving the view right means moving the image left.
-            self.view
-                .pan_by(-f64::from(dx) * PAN_STEP, -f64::from(dy) * PAN_STEP);
-        } else if self.view.is_marking_up() {
-            // At fit there is nowhere to pan. Never reinterpret an arrow
-            // as navigation or volume while the image owns transient work.
-        } else if dx != 0 {
-            self.navigate(if dx > 0 {
-                Direction::Next
-            } else {
-                Direction::Previous
-            });
-        } else {
-            self.change_volume(if dy < 0 { 0.1 } else { -0.1 });
-        }
     }
 
     fn update_pos_label(&self) {
@@ -2462,9 +2256,6 @@ impl App {
     // ----- file operations (FR-5) --------------------------------------
 
     fn trash_current(self: &Rc<Self>) {
-        if self.markup_blocks_normal_action() {
-            return;
-        }
         let Some(path) = self.current_path() else {
             return;
         };
@@ -2569,9 +2360,6 @@ impl App {
     }
 
     fn save_rotation(self: &Rc<Self>) {
-        if self.markup_blocks_normal_action() {
-            return;
-        }
         let rotation = self.view.rotation();
         let Some(path) = self.current_path() else {
             return;
@@ -2579,13 +2367,16 @@ impl App {
         if rotation == 0 {
             return;
         }
-        self.save_action.set_enabled(false);
+        self.saving.set(true);
+        self.update_save_enabled();
         glib::spawn_future_local(clone!(
             #[strong(rename_to = app)]
             self,
             async move {
                 let started = std::time::Instant::now();
-                match fileops::save_rotation(&path, rotation).await {
+                let result = fileops::save_rotation(&path, rotation).await;
+                app.saving.set(false);
+                match result {
                     Ok(()) => {
                         crate::applog!(
                             "save-rotation: {} ({}°) in {:.1} ms",
@@ -2603,19 +2394,16 @@ impl App {
                     Err(e) => {
                         eprintln!("open-mpv: error: {e}");
                         app.show_toast(&e.to_string(), false);
-                        app.update_save_enabled();
                     }
                 }
+                app.update_save_enabled();
             }
         ));
     }
 
-    /// Rotate-save is offered only where it is safe and meaningful:
-    /// still raster images in formats the sandboxed editor can rewrite;
-    /// SVG and animations stay view-only (FR-5.4).
-    fn update_save_enabled(&self) {
-        // Unsupported and unchanged media do not offer an inert Save
-        // control. The action remains disabled for its keyboard binding.
+    /// Return the domain-derived availability and explanation for Rotate
+    /// Save. The GIO action mirrors this result; it is never its source.
+    fn save_availability(&self) -> (bool, String) {
         let media = self.media.borrow();
         let reason = match &*media {
             MediaState::Image { decoded, mime, .. }
@@ -2636,19 +2424,31 @@ impl App {
             MediaState::Video(_) => Some("Video cannot be rotated and saved".into()),
             _ => Some("Nothing to save".into()),
         };
-        // `set_enabled` can emit into application code; never hold a
-        // RefCell borrow across that framework boundary.
         drop(media);
-        let enabled = !self.view.is_marking_up()
+        let enabled = !self.saving.get()
+            && !self.view.is_marking_up()
             && save_control_visible(reason.is_none(), self.view.rotation());
-        self.save_action.set_enabled(enabled);
-        self.save_btn.set_visible(enabled);
-        self.save_btn.set_tooltip_text(Some(&match reason {
+        let tooltip = match reason {
             Some(why) => why,
+            None if self.saving.get() => "A rotation is already being saved".into(),
             None if enabled => "Save rotation to file".into(),
             // Editable, but nothing has been rotated yet.
             None => "Rotate the image first".into(),
-        }));
+        };
+        (enabled, tooltip)
+    }
+
+    /// Rotate-save is offered only where it is safe and meaningful:
+    /// still raster images in formats the sandboxed editor can rewrite;
+    /// SVG and animations stay view-only (FR-5.4).
+    fn update_save_enabled(&self) {
+        let (enabled, tooltip) = self.save_availability();
+        // `set_enabled` can emit into application code; never hold a
+        // RefCell borrow across that framework boundary.
+        self.save_action.set_enabled(enabled);
+        self.save_btn.set_visible(enabled);
+        self.save_btn.set_tooltip_text(Some(&tooltip));
+        self.sync_action_enabled();
     }
 
     // ----- overlay chrome, toasts, indicator (FR-6.2) -------------------
@@ -2786,229 +2586,262 @@ impl App {
             .is_some_and(|status| status.can_undo);
         let trash_undo = !self.view.is_marking_up() && self.pending_undo.borrow().is_some();
         self.undo_action.set_enabled(markup_undo || trash_undo);
+        self.sync_action_enabled();
     }
 
     // ----- actions and input -------------------------------------------
 
-    fn setup_actions(self: &Rc<Self>, gtk_app: &gtk::Application) {
-        type Handler = Box<dyn Fn(&Rc<App>)>;
-        let add = |name: Action, f: Handler| {
-            let action = gio::SimpleAction::new(name.as_str(), None);
-            let app = self.clone();
-            action.connect_activate(move |_, _| f(&app));
-            self.win.add_action(&action);
-            action
+    fn workspace_state(&self) -> WorkspaceState {
+        let media = match &*self.media.borrow() {
+            MediaState::Empty => Media::Empty,
+            MediaState::Loading(_) => Media::Loading,
+            MediaState::Image { decoded, .. } => Media::Image {
+                markup_available: matches!(&**decoded, Decoded::Static { .. }),
+            },
+            MediaState::Video(_) => Media::Video,
+            MediaState::Error(_) => Media::Error,
         };
+        let markup = self.view.markup_status();
+        WorkspaceState {
+            media,
+            has_navigation: !self.navigation.borrow().is_empty(),
+            pannable: self.view.is_pannable(),
+            marking: self.view.is_marking_up(),
+            markup_draft: self.view.markup_has_draft(),
+            markup_shapes: markup.is_some_and(|status| status.shape_count > 0),
+            markup_can_copy: markup.is_some_and(|status| status.shape_count > 0)
+                && !self.view.markup_has_draft(),
+            markup_can_undo: markup.is_some_and(|status| status.can_undo),
+            can_save: self.save_availability().0,
+            can_undo_trash: self.pending_undo.borrow().is_some(),
+            help_visible: self.help_label.is_visible(),
+            fullscreen: self.win.is_fullscreen(),
+        }
+    }
 
-        add(Action::OpenFile, Box::new(|a| a.choose_media_file()));
-        add(Action::OpenFolder, Box::new(|a| a.choose_folder()));
-        add(Action::Next, Box::new(|a| a.navigate(Direction::Next)));
-        add(
-            Action::Previous,
-            Box::new(|a| a.navigate(Direction::Previous)),
-        );
-        add(Action::Right, Box::new(|a| a.arrow(1, 0)));
-        add(Action::Left, Box::new(|a| a.arrow(-1, 0)));
-        add(Action::Up, Box::new(|a| a.arrow(0, -1)));
-        add(Action::Down, Box::new(|a| a.arrow(0, 1)));
-        add(
-            Action::First,
-            Box::new(|a| {
-                if a.markup_blocks_normal_action() {
-                    return;
+    fn sync_action_enabled(&self) {
+        let state = self.workspace_state();
+        for action in Action::all() {
+            let Some(registered) = self.win.lookup_action(action.name()) else {
+                continue;
+            };
+            let Ok(simple) = registered.downcast::<gio::SimpleAction>() else {
+                continue;
+            };
+            simple.set_enabled(action.enabled(state));
+        }
+    }
+
+    fn dispatch_action(self: &Rc<Self>, action: Action) {
+        let Some(command) = action.resolve(self.workspace_state()) else {
+            return;
+        };
+        self.execute_command(command);
+    }
+
+    fn dispatch_subtitle(self: &Rc<Self>, choice: SubtitleChoice) {
+        if let Some(command) =
+            Action::SubtitleSelect.resolve_subtitle(self.workspace_state(), choice)
+        {
+            self.execute_command(command);
+        }
+    }
+
+    fn dispatch_audio(self: &Rc<Self>, choice: AudioChoice) {
+        if let Some(command) = Action::AudioSelect.resolve_audio(self.workspace_state(), choice) {
+            self.execute_command(command);
+        }
+    }
+
+    fn dispatch_speed(self: &Rc<Self>, rate: f64) {
+        if let Some(command) = Action::SpeedSet.resolve_speed(self.workspace_state(), rate) {
+            self.execute_command(command);
+        }
+    }
+
+    fn execute_command(self: &Rc<Self>, command: Command) {
+        match command {
+            Command::OpenFile => self.choose_media_file(),
+            Command::OpenFolder => self.choose_folder(),
+            Command::Pan(direction) => {
+                let (dx, dy) = direction.delta();
+                self.view
+                    .pan_by(-f64::from(dx) * PAN_STEP, -f64::from(dy) * PAN_STEP);
+            }
+            Command::Next => self.navigate(Direction::Next),
+            Command::Previous => self.navigate(Direction::Previous),
+            Command::First => self.show_index(0, Arrival::Direct),
+            Command::Last => self.show_index(self.navigation.borrow().len() - 1, Arrival::Direct),
+            Command::TogglePlayback => match self.with_video(Player::toggle_pause) {
+                Some(true) => {
+                    self.set_idle_inhibited(true);
+                    self.flash("Play");
                 }
-                if !a.navigation.borrow().is_empty() {
-                    a.show_index(0, Arrival::Direct);
+                Some(false) => {
+                    self.set_idle_inhibited(false);
+                    self.flash("Paused");
                 }
-            }),
-        );
-        add(
-            Action::Last,
-            Box::new(|a| {
-                if a.markup_blocks_normal_action() {
-                    return;
-                }
-                let len = a.navigation.borrow().len();
-                if len > 0 {
-                    a.show_index(len - 1, Arrival::Direct);
-                }
-            }),
-        );
-        add(Action::ZoomIn, Box::new(|a| a.view.zoom_by(1.25, None)));
-        add(Action::ZoomOut, Box::new(|a| a.view.zoom_by(0.8, None)));
-        add(Action::ZoomFit, Box::new(|a| a.view.zoom_fit()));
-        add(Action::ZoomActual, Box::new(|a| a.view.zoom_to(1.0, None)));
-        add(Action::ZoomToggle, Box::new(|a| a.view.toggle_fit_actual()));
-        add(
-            Action::RotateClockwise,
-            Box::new(|a| {
-                if !a.markup_blocks_normal_action() {
-                    a.view.rotate_view(1);
-                }
-            }),
-        );
-        add(
-            Action::RotateCounterclockwise,
-            Box::new(|a| {
-                if !a.markup_blocks_normal_action() {
-                    a.view.rotate_view(-1);
-                }
-            }),
-        );
-        add(
-            Action::PlayPause,
-            Box::new(|a| {
-                if a.is_video_showing() {
-                    // A paused video must not keep the screen awake.
-                    match a.with_video(Player::toggle_pause) {
-                        Some(true) => {
-                            a.set_idle_inhibited(true);
-                            a.flash("Play");
-                        }
-                        Some(false) => {
-                            a.set_idle_inhibited(false);
-                            a.flash("Paused");
-                        }
-                        None => {}
-                    }
-                } else {
-                    // Space keeps its photo-flipping habit on images.
-                    a.navigate(Direction::Next);
-                }
-            }),
-        );
-        add(
-            Action::SeekBack,
-            Box::new(|a| {
-                a.with_video(|p| p.seek_by(-SEEK_STEP_SECONDS));
-                a.flash_progress();
-            }),
-        );
-        add(
-            Action::SeekForward,
-            Box::new(|a| {
-                a.with_video(|p| p.seek_by(SEEK_STEP_SECONDS));
-                a.flash_progress();
-            }),
-        );
-        add(Action::SpeedDown, Box::new(|a| a.step_playback_rate(-1)));
-        add(Action::SpeedUp, Box::new(|a| a.step_playback_rate(1)));
-        add(Action::SpeedReset, Box::new(|a| a.set_playback_rate(1.0)));
-        add(
-            Action::Mute,
-            Box::new(|a| match a.with_video(Player::toggle_mute) {
-                Some(true) => a.flash("Muted"),
-                Some(false) => a.flash("Sound on"),
                 None => {}
-            }),
-        );
-        add(
-            Action::SubtitleOpen,
-            Box::new(|a| a.choose_external_subtitle()),
-        );
-        add(
-            Action::SubtitleToggle,
-            Box::new(|a| {
-                if let Some(snapshot) = a.with_video(Player::toggle_subtitles)
+            },
+            Command::Seek(direction) => {
+                self.with_video(|player| {
+                    player.seek_by(f64::from(direction.sign()) * SEEK_STEP_SECONDS)
+                });
+                self.flash_progress();
+            }
+            Command::StepSpeed(direction) => {
+                self.step_playback_rate(i32::from(direction.sign()));
+            }
+            Command::ResetSpeed => self.set_playback_rate(1.0),
+            Command::ToggleMute => match self.with_video(Player::toggle_mute) {
+                Some(true) => self.flash("Muted"),
+                Some(false) => self.flash("Sound on"),
+                None => {}
+            },
+            Command::OpenSubtitle => self.choose_external_subtitle(),
+            Command::ToggleSubtitles => {
+                let snapshot = self.with_video(Player::toggle_subtitles);
+                if let Some(snapshot) = snapshot
                     && !snapshot.tracks.is_empty()
                 {
-                    a.update_subtitles(snapshot.clone());
-                    a.flash_subtitle_choice(&snapshot);
+                    self.update_subtitles(snapshot.clone());
+                    self.flash_subtitle_choice(&snapshot);
                 }
-            }),
-        );
-        add(
-            Action::SubtitleCycle,
-            Box::new(|a| {
-                if let Some(snapshot) = a.with_video(Player::cycle_subtitles)
+            }
+            Command::CycleSubtitles => {
+                let snapshot = self.with_video(Player::cycle_subtitles);
+                if let Some(snapshot) = snapshot
                     && !snapshot.tracks.is_empty()
                 {
-                    a.update_subtitles(snapshot.clone());
-                    a.flash_subtitle_choice(&snapshot);
+                    self.update_subtitles(snapshot.clone());
+                    self.flash_subtitle_choice(&snapshot);
                 }
-            }),
-        );
-        add(Action::VolumeUp, Box::new(|a| a.change_volume(0.1)));
-        add(Action::VolumeDown, Box::new(|a| a.change_volume(-0.1)));
-        add(Action::Trash, Box::new(|a| a.trash_current()));
-        add(
-            Action::Fullscreen,
-            Box::new(|a| {
-                if a.win.is_fullscreen() {
-                    a.win.unfullscreen();
+            }
+            Command::SelectSubtitle(choice) => {
+                let Some(changed) = self.with_video(|player| player.choose_subtitle(choice)) else {
+                    return;
+                };
+                if changed && let Some(snapshot) = self.with_video(Player::subtitle_snapshot) {
+                    self.update_subtitles(snapshot.clone());
+                    self.flash_subtitle_choice(&snapshot);
+                }
+            }
+            Command::SelectAudio(choice) => {
+                let Some(changed) = self.with_video(|player| player.choose_audio(choice)) else {
+                    return;
+                };
+                if changed && let Some(snapshot) = self.with_video(Player::audio_snapshot) {
+                    self.update_audio(snapshot.clone());
+                    self.flash_audio_choice(&snapshot);
+                }
+            }
+            Command::SetSpeed(rate) => self.set_playback_rate(rate.get()),
+            Command::ChangeVolume(direction) => {
+                self.change_volume(f64::from(direction.sign()) * 0.1);
+            }
+            Command::ZoomIn => self.view.zoom_by(1.25, None),
+            Command::ZoomOut => self.view.zoom_by(0.8, None),
+            Command::ZoomFit => self.view.zoom_fit(),
+            Command::ZoomActual => self.view.zoom_to(1.0, None),
+            Command::ZoomToggle => self.view.toggle_fit_actual(),
+            Command::Rotate(turn) => self.view.rotate_view(turn.count()),
+            Command::ToggleMarkup => self.toggle_markup(),
+            Command::MarkupBox => self.view.set_markup_tool(MarkupTool::Box),
+            Command::MarkupArrow => self.view.set_markup_tool(MarkupTool::Arrow),
+            Command::CopyMarkup => self.copy_markup(),
+            Command::ClearMarkup => {
+                self.view.clear_markup();
+            }
+            Command::Save => self.save_rotation(),
+            Command::Trash => self.trash_current(),
+            Command::MarkupUndo => {
+                self.view.undo_markup();
+                self.update_undo_enabled();
+            }
+            Command::TrashUndo => self.undo_trash(),
+            Command::ToggleFullscreen => {
+                if self.win.is_fullscreen() {
+                    self.win.unfullscreen();
                 } else {
-                    a.win.fullscreen();
+                    self.win.fullscreen();
                 }
-            }),
-        );
-        add(Action::Close, Box::new(|a| a.win.close()));
-        add(
-            Action::Help,
-            Box::new(|a| a.help_label.set_visible(!a.help_label.is_visible())),
-        );
-        // Escape: help → fullscreen → close (FR-6.7).
-        add(
-            Action::Escape,
-            Box::new(|a| {
-                if a.view.cancel_markup_draft() {
-                    a.update_undo_enabled();
-                } else if a.view.cancel_markup() {
-                    a.update_control_mode();
-                    a.show_chrome();
-                    a.update_cursor();
-                } else if a.help_label.is_visible() {
-                    a.help_label.set_visible(false);
-                } else if a.win.is_fullscreen() {
-                    a.win.unfullscreen();
-                } else {
-                    a.win.close();
-                }
-            }),
-        );
+            }
+            Command::ToggleHelp => self.help_label.set_visible(!self.help_label.is_visible()),
+            Command::CancelMarkupDraft => {
+                self.view.cancel_markup_draft();
+                self.update_undo_enabled();
+            }
+            Command::CancelMarkup => {
+                self.view.cancel_markup();
+                self.update_control_mode();
+                self.show_chrome();
+                self.update_cursor();
+            }
+            Command::HideHelp => self.help_label.set_visible(false),
+            Command::LeaveFullscreen => self.win.unfullscreen(),
+            Command::Close => self.win.close(),
+        }
+    }
+
+    fn setup_actions(self: &Rc<Self>, gtk_app: &gtk::Application) {
+        const MANAGED_ACTIONS: &[Action] = &[
+            Action::Markup,
+            Action::MarkupBox,
+            Action::MarkupArrow,
+            Action::MarkupCopy,
+            Action::MarkupClear,
+            Action::Save,
+            Action::Undo,
+        ];
+        for (name, _) in Action::CONFIGURABLE {
+            if MANAGED_ACTIONS.contains(name) {
+                continue;
+            }
+            let action = gio::SimpleAction::new(name.name(), None);
+            let app = self.clone();
+            let name = *name;
+            action.connect_activate(move |_, _| app.dispatch_action(name));
+            self.win.add_action(&action);
+        }
 
         let app = self.clone();
         self.markup_action
-            .connect_activate(move |_, _| app.toggle_markup());
+            .connect_activate(move |_, _| app.dispatch_action(Action::Markup));
         self.win.add_action(&self.markup_action);
 
         let app = self.clone();
         self.markup_box_action.connect_activate(move |_, _| {
-            app.view.set_markup_tool(MarkupTool::Box);
+            app.dispatch_action(Action::MarkupBox);
         });
         self.win.add_action(&self.markup_box_action);
 
         let app = self.clone();
         self.markup_arrow_action.connect_activate(move |_, _| {
-            app.view.set_markup_tool(MarkupTool::Arrow);
+            app.dispatch_action(Action::MarkupArrow);
         });
         self.win.add_action(&self.markup_arrow_action);
 
         let app = self.clone();
         self.markup_copy_action
-            .connect_activate(move |_, _| app.copy_markup());
+            .connect_activate(move |_, _| app.dispatch_action(Action::MarkupCopy));
         self.win.add_action(&self.markup_copy_action);
 
         let app = self.clone();
         self.markup_clear_action.connect_activate(move |_, _| {
-            app.view.clear_markup();
+            app.dispatch_action(Action::MarkupClear);
         });
         self.win.add_action(&self.markup_clear_action);
 
         let app = self.clone();
         self.save_action.set_enabled(false);
         self.save_action
-            .connect_activate(move |_, _| app.save_rotation());
+            .connect_activate(move |_, _| app.dispatch_action(Action::Save));
         self.win.add_action(&self.save_action);
 
         let app = self.clone();
         self.undo_action.set_enabled(false);
         self.undo_action.connect_activate(move |_, _| {
-            if app.view.is_marking_up() {
-                app.view.undo_markup();
-                app.update_undo_enabled();
-            } else {
-                app.undo_trash();
-            }
+            app.dispatch_action(Action::Undo);
         });
         self.win.add_action(&self.undo_action);
 
@@ -3027,13 +2860,7 @@ impl App {
                     SubtitleChoice::Track(id.to_string())
                 }
             };
-            let Some(changed) = app.with_video(|player| player.choose_subtitle(choice)) else {
-                return;
-            };
-            if changed && let Some(snapshot) = app.with_video(Player::subtitle_snapshot) {
-                app.update_subtitles(snapshot.clone());
-                app.flash_subtitle_choice(&snapshot);
-            }
+            app.dispatch_subtitle(choice);
         });
         self.win.add_action(&self.subtitle_action);
 
@@ -3051,13 +2878,7 @@ impl App {
                     AudioChoice::Track(id.to_string())
                 }
             };
-            let Some(changed) = app.with_video(|player| player.choose_audio(choice)) else {
-                return;
-            };
-            if changed && let Some(snapshot) = app.with_video(Player::audio_snapshot) {
-                app.update_audio(snapshot.clone());
-                app.flash_audio_choice(&snapshot);
-            }
+            app.dispatch_audio(choice);
         });
         self.win.add_action(&self.audio_action);
 
@@ -3066,13 +2887,13 @@ impl App {
             let Some(rate) = parameter.and_then(glib::Variant::get::<f64>) else {
                 return;
             };
-            app.set_playback_rate(rate);
+            app.dispatch_speed(rate);
         });
         self.win.add_action(&self.speed_action);
 
         // Defaults merged with user binds (FR-8.2); a user bind takes
         // the key over from the default action.
-        let mut key_to_action: BTreeMap<String, Action> = DEFAULT_BINDS
+        let mut key_to_action: BTreeMap<String, Action> = Action::DEFAULT_BINDS
             .iter()
             .map(|(key, action)| (key.to_string(), *action))
             .collect();
@@ -3101,18 +2922,18 @@ impl App {
                 .push(key.as_str());
         }
         for (action, keys) in &action_to_keys {
-            gtk_app.set_accels_for_action(&format!("win.{}", action.as_str()), keys);
+            gtk_app.set_accels_for_action(&action.detailed_name(), keys);
         }
         self.update_control_mode();
     }
 
     fn build_help(&self, gtk_app: &gtk::Application) {
         let mut rows: Vec<(String, &str)> = Vec::new();
-        for (action, description) in ACTIONS {
+        for (action, description) in Action::CONFIGURABLE {
             if description.is_empty() {
                 continue;
             }
-            let accels = gtk_app.accels_for_action(&format!("win.{}", action.as_str()));
+            let accels = gtk_app.accels_for_action(&action.detailed_name());
             if accels.is_empty() {
                 continue;
             }
@@ -3259,8 +3080,9 @@ impl App {
             #[strong(rename_to = app)]
             self,
             move |_, n_press, _, _| {
-                if n_press == 2 && !app.view.is_marking_up() {
-                    WidgetExt::activate_action(&app.win, "win.fullscreen", None).ok();
+                if n_press == 2 {
+                    WidgetExt::activate_action(&app.win, &Action::Fullscreen.detailed_name(), None)
+                        .ok();
                 }
             }
         ));
@@ -3454,7 +3276,10 @@ fn playback_speed_menu() -> gio::Menu {
     let menu = gio::Menu::new();
     for rate in PLAYBACK_RATES {
         let item = gio::MenuItem::new(Some(&format_playback_rate(*rate)), None);
-        item.set_action_and_target_value(Some("win.speed"), Some(&rate.to_variant()));
+        item.set_action_and_target_value(
+            Some(&Action::SpeedSet.detailed_name()),
+            Some(&rate.to_variant()),
+        );
         menu.append_item(&item);
     }
     menu
@@ -3468,10 +3293,20 @@ fn append_choice_item(menu: &gio::Menu, action: &str, label: &str, target: &str)
 
 fn rebuild_audio_menu(menu: &gio::Menu, snapshot: &AudioSnapshot) {
     menu.remove_all();
-    append_choice_item(menu, "win.audio", "Automatic", "auto");
+    append_choice_item(
+        menu,
+        &Action::AudioSelect.detailed_name(),
+        "Automatic",
+        "auto",
+    );
     for track in &snapshot.tracks {
         let target = AudioChoice::Track(track.id.clone()).action_target();
-        append_choice_item(menu, "win.audio", &track.label, &target);
+        append_choice_item(
+            menu,
+            &Action::AudioSelect.detailed_name(),
+            &track.label,
+            &target,
+        );
     }
 }
 
@@ -3483,7 +3318,7 @@ fn rebuild_audio_context(context: &gio::Menu, audio: &gio::Menu, video: bool, tr
 }
 
 fn append_subtitle_item(menu: &gio::Menu, label: &str, target: &str) {
-    append_choice_item(menu, "win.subtitle", label, target);
+    append_choice_item(menu, &Action::SubtitleSelect.detailed_name(), label, target);
 }
 
 fn append_subtitle_track(menu: &gio::Menu, track: &SubtitleTrack) {
@@ -3493,7 +3328,10 @@ fn append_subtitle_track(menu: &gio::Menu, track: &SubtitleTrack) {
 
 fn rebuild_subtitle_menu(menu: &gio::Menu, snapshot: &SubtitleSnapshot) {
     menu.remove_all();
-    menu.append(Some("Add External Subtitle…"), Some("win.subtitle-open"));
+    menu.append(
+        Some("Add External Subtitle…"),
+        Some(&Action::SubtitleOpen.detailed_name()),
+    );
     if snapshot.tracks.is_empty() {
         return;
     }
@@ -3516,7 +3354,7 @@ fn rebuild_subtitle_context(context: &gio::Menu, subtitles: &gio::Menu, video: b
 fn rebuild_markup_context(context: &gio::Menu, available: bool) {
     context.remove_all();
     if available {
-        context.append(Some("Quick Markup"), Some("win.markup"));
+        context.append(Some("Quick Markup"), Some(&Action::Markup.detailed_name()));
     }
 }
 
@@ -3617,8 +3455,11 @@ fn dialog_initial_folder_path(current: Option<&Path>) -> Option<PathBuf> {
 
 fn open_menu_model() -> gio::Menu {
     let menu = gio::Menu::new();
-    menu.append(Some("Open File…"), Some("win.open-file"));
-    menu.append(Some("Open Folder…"), Some("win.open-folder"));
+    menu.append(Some("Open File…"), Some(&Action::OpenFile.detailed_name()));
+    menu.append(
+        Some("Open Folder…"),
+        Some(&Action::OpenFolder.detailed_name()),
+    );
     menu
 }
 
@@ -3787,14 +3628,14 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIONS, Action, Arrival, DEFAULT_BINDS, Direction, FsChange, FsPresentation,
-        FsQueryVersions, SEEK_STEP_SECONDS, SKIP_BUDGET, adjacent_playback_rate, apply_fs_change,
-        cache_budget_bytes, chrome_is_held, dialog_initial_folder_path, dialog_was_cancelled,
-        excluded_path_message, file_snapshot_from_info, format_playback_rate, format_time,
-        looks_like_subtitle, open_menu_model, playback_speed_menu, position_text,
-        rebuild_audio_context, rebuild_audio_menu, rebuild_markup_context,
-        rebuild_subtitle_context, rebuild_subtitle_menu, resize_edge_at, save_control_visible,
-        skip_target, supported_media_extensions, svg_render_dimension, window_dimension,
+        Action, Arrival, Direction, FsChange, FsPresentation, FsQueryVersions, SEEK_STEP_SECONDS,
+        SKIP_BUDGET, adjacent_playback_rate, apply_fs_change, cache_budget_bytes, chrome_is_held,
+        dialog_initial_folder_path, dialog_was_cancelled, excluded_path_message,
+        file_snapshot_from_info, format_playback_rate, format_time, looks_like_subtitle,
+        open_menu_model, playback_speed_menu, position_text, rebuild_audio_context,
+        rebuild_audio_menu, rebuild_markup_context, rebuild_subtitle_context,
+        rebuild_subtitle_menu, resize_edge_at, save_control_visible, skip_target,
+        supported_media_extensions, svg_render_dimension, window_dimension,
     };
 
     use crate::config::{Sort, SortOrder};
@@ -4240,11 +4081,11 @@ mod tests {
 
     #[test]
     fn every_action_is_documented_and_reachable_by_key() {
-        for (key, action) in DEFAULT_BINDS {
+        for (key, action) in Action::DEFAULT_BINDS {
             assert!(
-                ACTIONS.iter().any(|(name, _)| name == action),
+                Action::CONFIGURABLE.iter().any(|(name, _)| name == action),
                 "default bind `{key}` names `{}`, which is not a known action",
-                action.as_str()
+                action.name()
             );
         }
         // Reached through the contextual arrow actions rather than a key
@@ -4254,25 +4095,25 @@ mod tests {
         const REACHED_CONTEXTUALLY: &[Action] =
             &[Action::VolumeUp, Action::VolumeDown, Action::SubtitleOpen];
 
-        for (action, description) in ACTIONS {
+        for (action, description) in Action::CONFIGURABLE {
             assert!(
-                DEFAULT_BINDS.iter().any(|(_, name)| name == action)
+                Action::DEFAULT_BINDS.iter().any(|(_, name)| name == action)
                     || REACHED_CONTEXTUALLY.contains(action),
                 "action `{}` has no default binding",
-                action.as_str()
+                action.name()
             );
             assert!(
                 !description.is_empty() || *action == Action::Escape,
                 "action `{}` has no description for the cheat sheet",
-                action.as_str()
+                action.name()
             );
         }
     }
 
     #[test]
     fn open_actions_use_distinct_configurable_shortcuts() {
-        assert!(DEFAULT_BINDS.contains(&("<Control>o", Action::OpenFile)));
-        assert!(DEFAULT_BINDS.contains(&("<Control><Shift>o", Action::OpenFolder)));
+        assert!(Action::DEFAULT_BINDS.contains(&("<Control>o", Action::OpenFile)));
+        assert!(Action::DEFAULT_BINDS.contains(&("<Control><Shift>o", Action::OpenFolder)));
         assert_eq!(Action::parse("open-file"), Some(Action::OpenFile));
         assert_eq!(Action::parse("open-folder"), Some(Action::OpenFolder));
     }
@@ -4286,21 +4127,21 @@ mod tests {
             ("<Control>c", Action::MarkupCopy),
             ("c", Action::MarkupClear),
         ] {
-            assert!(DEFAULT_BINDS.contains(&(key, action)));
-            assert_eq!(Action::parse(action.as_str()), Some(action));
+            assert!(Action::DEFAULT_BINDS.contains(&(key, action)));
+            assert_eq!(Action::parse(action.name()), Some(action));
         }
-        assert!(DEFAULT_BINDS.contains(&("<Control>z", Action::Undo)));
+        assert!(Action::DEFAULT_BINDS.contains(&("<Control>z", Action::Undo)));
     }
 
     #[test]
     fn video_seek_defaults_are_ten_seconds_with_shift_arrow_aliases() {
         assert_eq!(SEEK_STEP_SECONDS, 10.0);
         assert!(
-            DEFAULT_BINDS.contains(&("<Shift>Left", Action::SeekBack)),
+            Action::DEFAULT_BINDS.contains(&("<Shift>Left", Action::SeekBack)),
             "Shift+Left must seek without taking plain Left away from folder navigation"
         );
         assert!(
-            DEFAULT_BINDS.contains(&("<Shift>Right", Action::SeekForward)),
+            Action::DEFAULT_BINDS.contains(&("<Shift>Right", Action::SeekForward)),
             "Shift+Right must seek without taking plain Right away from folder navigation"
         );
     }
@@ -4314,9 +4155,9 @@ mod tests {
         assert_eq!(format_playback_rate(0.75), "0.75×");
         assert_eq!(format_playback_rate(1.0), "1×");
 
-        assert!(DEFAULT_BINDS.contains(&("bracketleft", Action::SpeedDown)));
-        assert!(DEFAULT_BINDS.contains(&("bracketright", Action::SpeedUp)));
-        assert!(DEFAULT_BINDS.contains(&("backslash", Action::SpeedReset)));
+        assert!(Action::DEFAULT_BINDS.contains(&("bracketleft", Action::SpeedDown)));
+        assert!(Action::DEFAULT_BINDS.contains(&("bracketright", Action::SpeedUp)));
+        assert!(Action::DEFAULT_BINDS.contains(&("backslash", Action::SpeedReset)));
 
         let menu = playback_speed_menu();
         assert_eq!(menu.n_items(), crate::player::PLAYBACK_RATES.len() as i32);
@@ -4335,10 +4176,10 @@ mod tests {
 
     #[test]
     fn subtitle_keys_keep_mpv_visibility_without_stealing_seek() {
-        assert!(DEFAULT_BINDS.contains(&("v", Action::SubtitleToggle)));
-        assert!(DEFAULT_BINDS.contains(&("<Shift>v", Action::SubtitleCycle)));
-        assert!(DEFAULT_BINDS.contains(&("j", Action::SeekBack)));
-        assert!(DEFAULT_BINDS.contains(&("l", Action::SeekForward)));
+        assert!(Action::DEFAULT_BINDS.contains(&("v", Action::SubtitleToggle)));
+        assert!(Action::DEFAULT_BINDS.contains(&("<Shift>v", Action::SubtitleCycle)));
+        assert!(Action::DEFAULT_BINDS.contains(&("j", Action::SeekBack)));
+        assert!(Action::DEFAULT_BINDS.contains(&("l", Action::SeekForward)));
     }
 
     #[test]
@@ -4353,8 +4194,8 @@ mod tests {
 
     #[test]
     fn configured_action_names_parse_only_at_the_boundary() {
-        for (action, _) in ACTIONS {
-            assert_eq!(Action::parse(action.as_str()), Some(*action));
+        for (action, _) in Action::CONFIGURABLE {
+            assert_eq!(Action::parse(action.name()), Some(*action));
         }
         assert_eq!(Action::parse("not-an-action"), None);
     }
@@ -4362,8 +4203,8 @@ mod tests {
     #[test]
     fn configuration_guide_lists_every_action() {
         let guide = include_str!("../docs/CONFIGURATION.md");
-        for (action, _) in ACTIONS {
-            let name = action.as_str();
+        for (action, _) in Action::CONFIGURABLE {
+            let name = action.name();
             assert!(
                 guide.contains(&format!("`{name}`")),
                 "configuration guide does not document `{name}`"

@@ -278,8 +278,10 @@ new product decisions rather than incidental implementation.
   one ordering and navigation model.
 - **NFR-6.1 / NFR-6.3** GTK's main loop is the only event loop. Async results carry the identity or
   generation needed to reject stale work.
-- **NFR-6.2** User commands use one typed action vocabulary. Direct manipulation does not
-  duplicate command policy.
+- **NFR-6.2** User commands use one typed action vocabulary. Binding validation, generated
+  help, GTK registration, enabled state and contextual dispatch derive from that vocabulary
+  and an explicit Workspace-state snapshot. Direct manipulation does not duplicate command
+  policy.
 - Dependencies require evidence that the Rust standard library, GTK, GIO,
   Glycin or GStreamer cannot provide the behavior safely.
 - Automated tests cover decisions, important failures, stale results and
