@@ -330,6 +330,9 @@ impl FocusedPlayback {
         self.reset(subtitles_default_on);
         self.current_video = Some(path.to_path_buf());
         self.streams.external = external;
+    }
+
+    fn playback_started(&mut self) {
         self.playing = true;
     }
 
@@ -417,6 +420,21 @@ impl FocusedPlayback {
 
     fn select_streams(&mut self, selected: BTreeSet<String>) {
         self.streams.selected = selected;
+    }
+
+    fn stream_snapshots(&self) -> (AudioSnapshot, SubtitleSnapshot) {
+        (
+            audio_snapshot(&self.streams),
+            subtitle_snapshot(&self.streams),
+        )
+    }
+
+    fn requested_streams(
+        &self,
+        audio_request: Option<&AudioChoice>,
+        subtitle_request: Option<&SubtitleChoice>,
+    ) -> Vec<String> {
+        stream_selection_ids(&self.streams, audio_request, subtitle_request)
     }
 
     fn begin_error(&mut self) -> Option<ErrorContext> {
@@ -862,11 +880,7 @@ impl Player {
                                 apply_stream_choices(&playbin, &playback, None, None);
                             }
                             let (audio, subtitles) = {
-                                let state = playback.borrow();
-                                (
-                                    audio_snapshot(&state.streams),
-                                    subtitle_snapshot(&state.streams),
-                                )
+                                playback.borrow().stream_snapshots()
                             };
                             on_event(Event::AudioChanged(audio));
                             on_event(Event::SubtitlesChanged(subtitles));
@@ -878,11 +892,7 @@ impl Player {
                                 .collect();
                             playback.borrow_mut().select_streams(selected);
                             let (audio, subtitles) = {
-                                let state = playback.borrow();
-                                (
-                                    audio_snapshot(&state.streams),
-                                    subtitle_snapshot(&state.streams),
-                                )
+                                playback.borrow().stream_snapshots()
                             };
                             on_event(Event::AudioChanged(audio));
                             on_event(Event::SubtitlesChanged(subtitles));
@@ -943,6 +953,7 @@ impl Player {
                     source,
                 }
             })?;
+        self.playback.borrow_mut().playback_started();
         Ok(())
     }
 
@@ -1029,9 +1040,12 @@ impl Player {
         // A full teardown matters here. READY can retain the old playsink
         // pads, so the new text pad may reach it before the replacement
         // video pad and fail with "Have text pad but no video pad".
-        teardown_pipeline(&self.playbin).map_err(|source| PlayerError::Playback {
-            path: video.clone(),
-            source,
+        teardown_pipeline(&self.playbin).map_err(|source| {
+            lock_decoder_fallback(&self.decoder_fallback).restore();
+            PlayerError::Playback {
+                path: video.clone(),
+                source,
+            }
         })?;
         crate::applog!("player: subtitle rebuild reached null");
         lock_decoder_fallback(&self.decoder_fallback).restore();
@@ -1313,6 +1327,10 @@ fn configure_uris(playbin: &gst::Element, uri: &str, suburi: Option<&str>) {
 /// removing its old text/video pads; immediately setting the same pair again
 /// then intermittently connects text to playsink before video (FR-10.7).
 fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError> {
+    // GstPipeline flushes its bus while entering Null, so ordinary bus
+    // observations from the outgoing URI cannot cross this completed
+    // boundary. The error callbacks explicitly deferred to GLib idle carry a
+    // FocusedPlayback generation because they have already left the bus.
     playbin.set_state(gst::State::Null)?;
     let (transition, current, pending) = playbin.state(gst::ClockTime::from_seconds(1));
     transition?;
@@ -1594,8 +1612,9 @@ fn apply_stream_choices(
     audio_request: Option<&AudioChoice>,
     subtitle_request: Option<&SubtitleChoice>,
 ) -> bool {
-    let selected =
-        stream_selection_ids(&playback.borrow().streams, audio_request, subtitle_request);
+    let selected = playback
+        .borrow()
+        .requested_streams(audio_request, subtitle_request);
     if selected.is_empty() {
         return false;
     }
@@ -1878,6 +1897,16 @@ mod tests {
         );
         assert!(playback.resume.is_none());
         assert_eq!(playback.playback_rate, 1.5);
+    }
+
+    #[test]
+    fn focused_playback_trace_marks_playing_only_after_pipeline_setup() {
+        let mut playback = FocusedPlayback::default();
+        playback.start_video(std::path::Path::new("movie.mkv"), None, true);
+        assert!(!playback.playing);
+
+        playback.playback_started();
+        assert!(playback.playing);
     }
 
     #[test]
