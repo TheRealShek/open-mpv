@@ -2378,7 +2378,7 @@ impl App {
                 let result = fileops::save_rotation(&path, &mime, rotation).await;
                 app.saving.set(false);
                 match result {
-                    Ok(()) => {
+                    Ok(outcome) => {
                         crate::applog!(
                             "save-rotation: {} ({}°) in {:.1} ms",
                             path.display(),
@@ -2386,7 +2386,17 @@ impl App {
                             started.elapsed().as_secs_f64() * 1000.0
                         );
                         app.cache.invalidate(&path);
-                        app.flash("Saved");
+                        match outcome {
+                            fileops::SaveRotationOutcome::Saved => app.flash("Saved"),
+                            fileops::SaveRotationOutcome::DurabilityUncertain(source) => {
+                                let warning = format!(
+                                    "Saved {}, but could not confirm it reached storage: {source}",
+                                    path.display()
+                                );
+                                eprintln!("open-mpv: warning: {warning}");
+                                app.show_toast(&warning, false);
+                            }
+                        }
                         // Reload: the file now carries the rotation.
                         if let Some(idx) = app.current_index() {
                             app.show_index(idx, Arrival::Direct);

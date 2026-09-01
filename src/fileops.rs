@@ -98,6 +98,12 @@ pub enum SaveRotationError {
     },
 }
 
+#[derive(Debug)]
+pub enum SaveRotationOutcome {
+    Saved,
+    DurabilityUncertain(std::io::Error),
+}
+
 impl fmt::Display for SaveRotationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -307,13 +313,13 @@ pub async fn save_rotation(
     path: &Path,
     mime: &str,
     cw_quarter_turns: u8,
-) -> Result<(), SaveRotationError> {
+) -> Result<SaveRotationOutcome, SaveRotationError> {
     // glycin rotations are counter-clockwise.
     let rotation = match cw_quarter_turns % 4 {
         1 => Rotation::_270,
         2 => Rotation::_180,
         3 => Rotation::_90,
-        _ => return Ok(()),
+        _ => return Ok(SaveRotationOutcome::Saved),
     };
     let file = gio::File::for_path(path);
     let editable =
@@ -388,7 +394,10 @@ pub async fn save_rotation(
     }
 }
 
-async fn atomic_write_async(path: &Path, bytes: Vec<u8>) -> Result<(), SaveRotationError> {
+async fn atomic_write_async(
+    path: &Path,
+    bytes: Vec<u8>,
+) -> Result<SaveRotationOutcome, SaveRotationError> {
     let write_path = path.to_path_buf();
     spawn_io(move || atomic_write(&write_path, &bytes))
         .await
@@ -408,7 +417,7 @@ async fn spawn_io<T: Send + 'static>(
 
 /// Write through an exclusively created same-directory file, then fsync and
 /// rename it over the destination (FR-5.5, NFR-3.1).
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<SaveRotationOutcome> {
     let mut staged = AtomicReplacement::empty(path)?;
     staged.file_mut().write_all(bytes)?;
     staged.commit()
@@ -460,7 +469,7 @@ impl AtomicReplacement {
         self.temp.as_file_mut()
     }
 
-    fn commit(self) -> std::io::Result<()> {
+    fn commit(self) -> std::io::Result<SaveRotationOutcome> {
         let owner = rustix::fs::Uid::from_raw(self.metadata.uid());
         let group = rustix::fs::Gid::from_raw(self.metadata.gid());
         rustix::fs::fchown(self.temp.as_file(), Some(owner), Some(group))?;
@@ -483,8 +492,14 @@ impl AtomicReplacement {
         self.temp
             .persist(&self.target)
             .map_err(|error| error.error)?;
-        dir.sync_all()?;
-        Ok(())
+        Ok(saved_outcome(dir.sync_all()))
+    }
+}
+
+fn saved_outcome(directory_sync: std::io::Result<()>) -> SaveRotationOutcome {
+    match directory_sync {
+        Ok(()) => SaveRotationOutcome::Saved,
+        Err(error) => SaveRotationOutcome::DurabilityUncertain(error),
     }
 }
 
@@ -518,6 +533,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::sync::Mutex;
+    use std::time::SystemTime;
 
     /// gio futures use the thread-default main context; serialize the
     /// async tests and give each its own context.
@@ -751,17 +767,23 @@ mod tests {
         let target = dir.path().join("img.png");
         std::fs::write(&target, b"old").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
-        if rustix::fs::setxattr(
+        let accessed = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        File::open(&target)
+            .unwrap()
+            .set_times(
+                FileTimes::new()
+                    .set_accessed(accessed)
+                    .set_modified(modified),
+            )
+            .unwrap();
+        let xattrs_supported = rustix::fs::setxattr(
             &target,
             "user.open-mpv-test",
             b"kept",
             rustix::fs::XattrFlags::empty(),
         )
-        .is_err()
-        {
-            eprintln!("skipping xattr metadata test: filesystem does not support user xattrs");
-            return;
-        }
+        .is_ok();
         let before = std::fs::metadata(&target).unwrap();
 
         atomic_write(&target, b"new").unwrap();
@@ -770,13 +792,25 @@ mod tests {
         assert_eq!(after.uid(), before.uid());
         assert_eq!(after.gid(), before.gid());
         assert_eq!(after.permissions().mode() & 0o7777, 0o640);
-        let file = File::open(&target).unwrap();
-        let mut empty = [0_u8; 0];
-        let len = rustix::fs::fgetxattr(&file, "user.open-mpv-test", &mut empty).unwrap();
-        let mut value = vec![0; len];
-        let len = rustix::fs::fgetxattr(&file, "user.open-mpv-test", &mut value).unwrap();
-        value.truncate(len);
-        assert_eq!(value, b"kept");
+        assert_eq!(after.accessed().unwrap(), accessed);
+        assert!(after.modified().unwrap() > before.modified().unwrap());
+        assert_ne!(
+            after.ino(),
+            before.ino(),
+            "replacement must install a new inode"
+        );
+
+        if xattrs_supported {
+            let file = File::open(&target).unwrap();
+            let mut empty = [0_u8; 0];
+            let len = rustix::fs::fgetxattr(&file, "user.open-mpv-test", &mut empty).unwrap();
+            let mut value = vec![0; len];
+            let len = rustix::fs::fgetxattr(&file, "user.open-mpv-test", &mut value).unwrap();
+            value.truncate(len);
+            assert_eq!(value, b"kept");
+        } else {
+            eprintln!("xattr assertion skipped: filesystem does not support user xattrs");
+        }
     }
 
     #[test]
@@ -794,5 +828,14 @@ mod tests {
             "temp file must be cleaned up"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn post_commit_sync_error_is_not_reported_as_an_untouched_original() {
+        let error = std::io::Error::from_raw_os_error(5);
+        assert!(matches!(
+            saved_outcome(Err(error)),
+            SaveRotationOutcome::DurabilityUncertain(source) if source.raw_os_error() == Some(5)
+        ));
     }
 }
