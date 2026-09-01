@@ -34,8 +34,12 @@ Read the document that owns the decision before changing it:
 
 - [README.md](README.md) explains the released product to users, including
   installation, controls and troubleshooting.
+- [CONTRIBUTING.md](CONTRIBUTING.md) explains the supported development setup
+  and the checks contributors run before a pull request.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) explains every setting,
   default, value and configurable action.
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) owns detailed diagnostics
+  for media and decoder failures.
 - [CONTEXT.md](CONTEXT.md) defines product language, boundaries and the meaning
   of terms such as Viewer, Explorer and Navigation set.
 - [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) defines exact behavior,
@@ -105,6 +109,28 @@ Keep each rule in the module that owns it:
 `folder` must stay independent of GTK and GIO so Viewer and Explorer can share
 the same model. Commands belong to the typed action layer in `window`; direct
 view manipulation can stay in `viewer`.
+
+## Code structure preferences
+
+Organize code by responsibility and domain ownership. Every important state,
+rule and resource lifecycle should have one clear owning module. Keep module
+interfaces narrow and internals private; callers should request operations
+rather than coordinate or mutate another module's state themselves.
+
+Use modules as the normal organizational boundary. Add a crate only when it
+creates a meaningful boundary for reuse, dependency isolation or an
+independently testable core. Split files around coherent responsibilities, not
+arbitrary size limits, and avoid vague homes such as `utils` or `common`.
+
+Prefer direct, idiomatic Rust. Use ownership, borrowing, visibility, enums,
+pattern matching, `Option` and `Result` to make states, failures and boundaries
+clear. Add traits, helpers, wrappers or generic layers only when they clarify
+ownership, protect an invariant, isolate a dependency or represent a real
+reusable concept.
+
+Keep orchestration separate from owned rules. When behavior changes, inspect
+the owning module, every caller of its interface, the relevant state
+transitions and the tests that define its contract.
 
 ## The easiest ways to break open-mpv
 

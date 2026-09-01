@@ -1,8 +1,8 @@
 # open-mpv
 
 open-mpv is a fast, minimal photo and video viewer for GNOME on Wayland. It
-opens local media without a library, database or network connection. Its
-controls stay out of the way until you need them.
+opens local media without building a media library, using the network or
+filling the window with controls.
 
 > **Current support:** Fedora 44 Workstation, GNOME, Wayland and x86-64. Other
 > Linux distributions and desktop environments are not supported yet.
@@ -11,26 +11,27 @@ controls stay out of the way until you need them.
 
 ## Install on Fedora 44
 
-Install the latest release with DNF. This resolves Fedora dependencies and does
-not change your default applications:
+Install the latest release with DNF:
 
 ```sh
 sudo dnf install https://github.com/TheRealShek/open-mpv/releases/latest/download/open-mpv-fedora44-x86_64.rpm
 ```
 
-GitHub Releases are not a DNF repository. Re-run the same command after a new
-release is announced to update the installed package. To remove it:
+GitHub Releases are not a DNF repository, so run the same command again when a
+new release is available. To remove open-mpv:
 
 ```sh
 sudo dnf remove open-mpv
 ```
 
-To make open-mpv the default for a file type, right-click that type of file in
-Files, choose **Open With**, then select open-mpv.
+Installation does not change your default applications. To make open-mpv the
+default for a file type, right-click that type in Files, choose **Open With**,
+then select open-mpv.
 
-## Open a photo, video or folder
+## Open media
 
-Open media from Files, drag a file into the window, or use the command line:
+Open a photo, video or folder from Files, drag a file into the window, or pass
+a path on the command line:
 
 ```sh
 open-mpv ~/Pictures/photo.jpg
@@ -38,28 +39,25 @@ open-mpv ~/Videos/video.mp4
 open-mpv ~/Pictures
 ```
 
-You can also start open-mpv with no path and choose **Open File** or
+You can also start open-mpv without a path and choose **Open File** or
 **Open Folder**.
 
 ## What it does
 
 - Opens photos, animated images, SVG files and local videos in one window.
-- Lets you move through every supported media file in the current folder.
+- Moves through the supported media files in the current folder.
 - Supports zoom, pan, fit, rotation and fullscreen.
-- Plays local videos with seeking, volume, speed, audio-track and subtitle controls.
+- Plays video with seeking, volume, speed, audio-track and subtitle controls.
 - Moves files to trash and offers a short Undo action.
 - Saves supported image rotations. JPEG rotation is lossless.
-- Lets you draw a box or arrow on a still image and copy the result without
-  changing the original file.
+- Draws a box or arrow on a still image and copies the result without changing
+  the original.
 - Supports optional mpv-style configuration and custom key bindings.
 
-## Privacy and file safety
-
-- open-mpv has no network access, telemetry or persistent background service.
-- glycin decodes images in a separate sandboxed process.
-- The app writes only when you trash, restore or explicitly save a rotation.
-- Quick Markup copies an image to the clipboard. It never changes or creates a
-  media file.
+open-mpv has no media library, telemetry, network access or persistent
+background service. Images are decoded by glycin in a separate sandboxed
+process. The app changes your files only when you explicitly trash, restore or
+save a rotation; Quick Markup writes only to the clipboard.
 
 ## Supported media
 
@@ -67,39 +65,28 @@ Images include JPEG, PNG, WebP, AVIF, HEIF/HEIC, JPEG XL, TIFF, SVG, GIF and
 other formats supported by the installed glycin loaders. Animated GIF, WebP
 and PNG files play automatically.
 
-Videos include MP4, MKV, WebM, MOV and AVI. Playback uses the system GStreamer
-codecs and prefers compatible installed hardware decoding. The Reference
-environment uses Intel QSV; other hardware remains under GStreamer's decoder
-selection. The optional `gstreamer1-plugin-libav` package adds a software
-fallback for more videos. Pitch-preserving playback speed needs
-`gstreamer1-plugins-good`.
+Videos include MP4, MKV, WebM, MOV and AVI. Playback uses the codecs installed
+for GStreamer and prefers compatible hardware decoding. The optional
+`gstreamer1-plugin-libav` package provides a software fallback for more video
+formats.
 
-## Main controls
+## Essential controls
 
 Press `?` inside the app for the complete shortcut guide.
 
 | Key or gesture | Action |
 | --- | --- |
-| `Ctrl+O` | Open a file |
-| `Ctrl+Shift+O` | Open a folder |
-| `Right` / `Page Down` | Next file; pan right when zoomed |
-| `Left` / `Page Up` | Previous file; pan left when zoomed |
+| `Ctrl+O` / `Ctrl+Shift+O` | Open a file / folder |
+| `Right` / `Left` | Next / previous file; pan when zoomed |
 | Scroll / pinch | Zoom at the pointer |
-| Horizontal scroll | Previous or next file |
 | `0` / `1` / `Z` | Fit / actual size / toggle between them |
 | `R` / `Shift+R` | Rotate right / left |
 | `S` | Save the current rotation when supported |
-| `Delete` | Move the current file to trash |
-| `Ctrl+Z` | Undo Quick Markup or the latest offered trash action |
-| `Space` | Pause or resume video; move to the next still image |
+| `Delete` / `Ctrl+Z` | Move to trash / undo markup or the offered trash action |
+| `Space` | Pause or resume video; advance from a still image |
 | `J` / `L` | Seek video back / forward 10 seconds |
-| `[` / `]` / `\` | Slower / faster / normal video speed |
-| `V` / `Shift+V` | Show or hide / cycle subtitles |
 | `A` | Start or cancel Quick Markup |
-| `B` / `Shift+A` | Choose the box / arrow markup tool |
-| `Ctrl+C` | Copy the marked-up image |
 | `F` / `F11` / double-click | Toggle fullscreen |
-| `Q` | Quit |
 | `Escape` | Cancel the current mode, leave fullscreen or quit |
 
 Move the pointer to show controls. Right-click the media or use the three-dot
@@ -108,71 +95,27 @@ button for less common actions.
 ## Configuration
 
 Configuration is optional. See the [configuration guide](docs/CONFIGURATION.md)
-for the supported settings, comment syntax and custom key bindings.
+for settings and custom key bindings.
 
 ## Troubleshooting
 
 If images do not open, check that `glycin-loaders` is installed. Video support
-depends on the installed GStreamer plugins, graphics driver and codecs. On
-Fedora, `gstreamer1-plugins-bad-free` supplies hardware-decoder plugins;
-GStreamer exposes only the decoder factories available for the detected
-hardware. The Reference environment is verified with Intel QSV. Other systems
-may expose VA-API or NVIDIA NVDEC, while `gstreamer1-plugin-libav` supplies the
-software fallback.
+depends on the installed GStreamer plugins, graphics driver and codecs; the
+optional `gstreamer1-plugin-libav` package supplies a software fallback.
 
-Inspect the available H.264 paths with:
-
-```sh
-gst-inspect-1.0 qsvh264dec
-gst-inspect-1.0 vah264dec
-gst-inspect-1.0 nvh264dec
-gst-inspect-1.0 avdec_h264
-```
-
-A missing hardware factory is normal when that backend or its driver is not
-available. A missing `avdec_h264` means the optional software fallback is not
-installed.
-
-open-mpv writes diagnostic messages to stderr. When it was opened from Files,
-view them with:
+open-mpv writes diagnostics to stderr. When it was opened from Files, view
+them with:
 
 ```sh
 journalctl -b _COMM=open-mpv
 ```
 
-For video, the diagnostics identify the encoded stream and selected decoder,
-including whether GStreamer classifies it as hardware or software.
+See the [troubleshooting guide](docs/TROUBLESHOOTING.md) for decoder checks,
+logging options and the information to collect when playback fails.
 
-Add `-f` to follow the log while reproducing a problem. Set `OPEN_MPV_LOG=0`
-to hide routine diagnostics; errors are still reported.
+## Contributing
 
-## Development
-
-Install the build dependencies and clone the repository:
-
-```sh
-sudo dnf install cargo desktop-file-utils gcc git glycin-devel glycin-loaders \
-  gstreamer1-devel gstreamer1-plugin-gtk4 gstreamer1-plugins-base \
-  gstreamer1-plugins-good gtk4-devel rust xdg-utils
-git clone https://github.com/TheRealShek/open-mpv.git
-cd open-mpv
-```
-
-These are the main development commands:
-
-```sh
-cargo run -- <file-or-folder>
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-```
-
-## Project documents
-
-- [Context](CONTEXT.md) defines the product language and boundaries.
-- [Requirements](docs/REQUIREMENTS.md) define the exact product behavior and
-  performance limits.
-- [Distribution](docs/DISTRIBUTION.md) explains packaging and release choices.
+See [CONTRIBUTING.md](CONTRIBUTING.md) to build the project and run its checks.
 
 ## License
 
