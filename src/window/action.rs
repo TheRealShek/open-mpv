@@ -81,18 +81,82 @@ pub(super) struct WorkspaceState {
     pub fullscreen: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Step {
+    Backward,
+    Forward,
+}
+
+impl Step {
+    pub const fn sign(self) -> i8 {
+        match self {
+            Self::Backward => -1,
+            Self::Forward => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PanDirection {
+    Right,
+    Left,
+    Up,
+    Down,
+}
+
+impl PanDirection {
+    pub const fn delta(self) -> (i32, i32) {
+        match self {
+            Self::Right => (1, 0),
+            Self::Left => (-1, 0),
+            Self::Up => (0, -1),
+            Self::Down => (0, 1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QuarterTurn {
+    Clockwise,
+    Counterclockwise,
+}
+
+impl QuarterTurn {
+    pub const fn count(self) -> i8 {
+        match self {
+            Self::Clockwise => 1,
+            Self::Counterclockwise => -1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PlaybackRate(f64);
+
+impl PlaybackRate {
+    fn new(rate: f64) -> Option<Self> {
+        crate::player::PLAYBACK_RATES
+            .contains(&rate)
+            .then_some(Self(rate))
+    }
+
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Command {
     OpenFile,
     OpenFolder,
-    Pan(i32, i32),
+    Pan(PanDirection),
     Next,
     Previous,
     First,
     Last,
     TogglePlayback,
-    Seek(i8),
-    StepSpeed(i8),
+    Seek(Step),
+    StepSpeed(Step),
     ResetSpeed,
     ToggleMute,
     OpenSubtitle,
@@ -100,14 +164,14 @@ pub(super) enum Command {
     CycleSubtitles,
     SelectSubtitle(SubtitleChoice),
     SelectAudio(AudioChoice),
-    SetSpeed(f64),
-    ChangeVolume(i8),
+    SetSpeed(PlaybackRate),
+    ChangeVolume(Step),
     ZoomIn,
     ZoomOut,
     ZoomFit,
     ZoomActual,
     ZoomToggle,
-    Rotate(i8),
+    Rotate(QuarterTurn),
     ToggleMarkup,
     MarkupBox,
     MarkupArrow,
@@ -302,38 +366,38 @@ impl Action {
         Some(match self {
             A::OpenFile if normal => C::OpenFile,
             A::OpenFolder if normal => C::OpenFolder,
-            A::Right if state.pannable => C::Pan(1, 0),
-            A::Left if state.pannable => C::Pan(-1, 0),
-            A::Up if state.pannable => C::Pan(0, -1),
-            A::Down if state.pannable => C::Pan(0, 1),
+            A::Right if state.pannable => C::Pan(PanDirection::Right),
+            A::Left if state.pannable => C::Pan(PanDirection::Left),
+            A::Up if state.pannable => C::Pan(PanDirection::Up),
+            A::Down if state.pannable => C::Pan(PanDirection::Down),
             A::Right if normal && state.has_navigation => C::Next,
             A::Left if normal && state.has_navigation => C::Previous,
-            A::Up if normal && video => C::ChangeVolume(1),
-            A::Down if normal && video => C::ChangeVolume(-1),
+            A::Up if normal && video => C::ChangeVolume(Step::Forward),
+            A::Down if normal && video => C::ChangeVolume(Step::Backward),
             A::Next if normal && state.has_navigation => C::Next,
             A::Previous if normal && state.has_navigation => C::Previous,
             A::First if normal && state.has_navigation => C::First,
             A::Last if normal && state.has_navigation => C::Last,
             A::PlayPause if video => C::TogglePlayback,
             A::PlayPause if normal && state.has_navigation => C::Next,
-            A::SeekBack if video && normal => C::Seek(-1),
-            A::SeekForward if video && normal => C::Seek(1),
-            A::SpeedDown if video && normal => C::StepSpeed(-1),
-            A::SpeedUp if video && normal => C::StepSpeed(1),
+            A::SeekBack if video && normal => C::Seek(Step::Backward),
+            A::SeekForward if video && normal => C::Seek(Step::Forward),
+            A::SpeedDown if video && normal => C::StepSpeed(Step::Backward),
+            A::SpeedUp if video && normal => C::StepSpeed(Step::Forward),
             A::SpeedReset if video && normal => C::ResetSpeed,
             A::Mute if video && normal => C::ToggleMute,
             A::SubtitleOpen if video && normal => C::OpenSubtitle,
             A::SubtitleToggle if video && normal => C::ToggleSubtitles,
             A::SubtitleCycle if video && normal => C::CycleSubtitles,
-            A::VolumeUp if video && normal => C::ChangeVolume(1),
-            A::VolumeDown if video && normal => C::ChangeVolume(-1),
+            A::VolumeUp if video && normal => C::ChangeVolume(Step::Forward),
+            A::VolumeDown if video && normal => C::ChangeVolume(Step::Backward),
             A::ZoomIn if viewing => C::ZoomIn,
             A::ZoomOut if viewing => C::ZoomOut,
             A::ZoomFit if viewing => C::ZoomFit,
             A::ZoomActual if viewing => C::ZoomActual,
             A::ZoomToggle if viewing => C::ZoomToggle,
-            A::RotateClockwise if image => C::Rotate(1),
-            A::RotateCounterclockwise if image => C::Rotate(-1),
+            A::RotateClockwise if image => C::Rotate(QuarterTurn::Clockwise),
+            A::RotateCounterclockwise if image => C::Rotate(QuarterTurn::Counterclockwise),
             A::Markup
                 if matches!(
                     media,
@@ -379,10 +443,10 @@ impl Action {
     }
 
     pub fn resolve_speed(self, state: WorkspaceState, rate: f64) -> Option<Command> {
-        (self == Self::SpeedSet
-            && self.parameterized_available(state) == Some(true)
-            && crate::player::PLAYBACK_RATES.contains(&rate))
-        .then_some(Command::SetSpeed(rate))
+        (self == Self::SpeedSet && self.parameterized_available(state) == Some(true))
+            .then(|| PlaybackRate::new(rate))
+            .flatten()
+            .map(Command::SetSpeed)
     }
 
     pub fn enabled(self, state: WorkspaceState) -> bool {
@@ -428,7 +492,10 @@ mod tests {
         image.has_navigation = true;
         assert_eq!(Action::Right.resolve(image), Some(Command::Next));
         image.pannable = true;
-        assert_eq!(Action::Right.resolve(image), Some(Command::Pan(1, 0)));
+        assert_eq!(
+            Action::Right.resolve(image),
+            Some(Command::Pan(PanDirection::Right))
+        );
         image.marking = true;
         image.pannable = false;
         assert_eq!(Action::Right.resolve(image), None);
@@ -438,7 +505,10 @@ mod tests {
             Action::PlayPause.resolve(video),
             Some(Command::TogglePlayback)
         );
-        assert_eq!(Action::Up.resolve(video), Some(Command::ChangeVolume(1)));
+        assert_eq!(
+            Action::Up.resolve(video),
+            Some(Command::ChangeVolume(Step::Forward))
+        );
     }
 
     #[test]
@@ -481,7 +551,7 @@ mod tests {
         );
         assert_eq!(
             Action::SpeedSet.resolve_speed(video, 1.25),
-            Some(Command::SetSpeed(1.25))
+            Some(Command::SetSpeed(PlaybackRate::new(1.25).unwrap()))
         );
         assert_eq!(
             Action::AudioSelect.resolve_subtitle(video, SubtitleChoice::Off),
@@ -510,7 +580,7 @@ mod tests {
         image.marking = true;
         assert_eq!(
             Action::RotateClockwise.resolve(image),
-            Some(Command::Rotate(1))
+            Some(Command::Rotate(QuarterTurn::Clockwise))
         );
     }
 }

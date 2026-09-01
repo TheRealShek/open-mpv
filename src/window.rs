@@ -2663,9 +2663,11 @@ impl App {
         match command {
             Command::OpenFile => self.choose_media_file(),
             Command::OpenFolder => self.choose_folder(),
-            Command::Pan(dx, dy) => self
-                .view
-                .pan_by(-f64::from(dx) * PAN_STEP, -f64::from(dy) * PAN_STEP),
+            Command::Pan(direction) => {
+                let (dx, dy) = direction.delta();
+                self.view
+                    .pan_by(-f64::from(dx) * PAN_STEP, -f64::from(dy) * PAN_STEP);
+            }
             Command::Next => self.navigate(Direction::Next),
             Command::Previous => self.navigate(Direction::Previous),
             Command::First => self.show_index(0, Arrival::Direct),
@@ -2682,10 +2684,14 @@ impl App {
                 None => {}
             },
             Command::Seek(direction) => {
-                self.with_video(|player| player.seek_by(f64::from(direction) * SEEK_STEP_SECONDS));
+                self.with_video(|player| {
+                    player.seek_by(f64::from(direction.sign()) * SEEK_STEP_SECONDS)
+                });
                 self.flash_progress();
             }
-            Command::StepSpeed(direction) => self.step_playback_rate(direction.into()),
+            Command::StepSpeed(direction) => {
+                self.step_playback_rate(i32::from(direction.sign()));
+            }
             Command::ResetSpeed => self.set_playback_rate(1.0),
             Command::ToggleMute => match self.with_video(Player::toggle_mute) {
                 Some(true) => self.flash("Muted"),
@@ -2729,14 +2735,16 @@ impl App {
                     self.flash_audio_choice(&snapshot);
                 }
             }
-            Command::SetSpeed(rate) => self.set_playback_rate(rate),
-            Command::ChangeVolume(direction) => self.change_volume(f64::from(direction) * 0.1),
+            Command::SetSpeed(rate) => self.set_playback_rate(rate.get()),
+            Command::ChangeVolume(direction) => {
+                self.change_volume(f64::from(direction.sign()) * 0.1);
+            }
             Command::ZoomIn => self.view.zoom_by(1.25, None),
             Command::ZoomOut => self.view.zoom_by(0.8, None),
             Command::ZoomFit => self.view.zoom_fit(),
             Command::ZoomActual => self.view.zoom_to(1.0, None),
             Command::ZoomToggle => self.view.toggle_fit_actual(),
-            Command::Rotate(turns) => self.view.rotate_view(turns),
+            Command::Rotate(turn) => self.view.rotate_view(turn.count()),
             Command::ToggleMarkup => self.toggle_markup(),
             Command::MarkupBox => self.view.set_markup_tool(MarkupTool::Box),
             Command::MarkupArrow => self.view.set_markup_tool(MarkupTool::Arrow),
