@@ -34,8 +34,15 @@ pub struct Folder {
 pub struct Navigation {
     folder: Option<Folder>,
     current: Option<usize>,
+    set_generation: u64,
     generation: u64,
 }
+
+/// Identity of one installed Navigation set. Reopening the same directory
+/// creates a new identity so late monitor and file-operation results cannot
+/// target the replacement session by path alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NavigationSetId(u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
@@ -44,17 +51,28 @@ pub struct Destination {
     pub generation: u64,
 }
 
-/// Filesystem facts gathered by the asynchronous window adapter before a
-/// supported regular file enters the Navigation set.
+/// Filesystem facts gathered by the asynchronous window adapter. The model
+/// accepts only supported regular-file snapshots into the Navigation set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSnapshot {
     path: PathBuf,
     modified: SystemTime,
+    kind: SnapshotKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotKind {
+    Regular,
+    Other,
 }
 
 impl FileSnapshot {
-    pub fn new(path: PathBuf, modified: SystemTime) -> Self {
-        Self { path, modified }
+    pub fn new(path: PathBuf, modified: SystemTime, kind: SnapshotKind) -> Self {
+        Self {
+            path,
+            modified,
+            kind,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -147,6 +165,7 @@ impl Folder {
     fn insert(&mut self, snapshot: FileSnapshot) -> Option<usize> {
         if snapshot.path.parent() != Some(self.directory.as_path())
             || !is_supported(&snapshot.path)
+            || snapshot.kind != SnapshotKind::Regular
             || self.index_of(&snapshot.path).is_some()
         {
             return None;
@@ -179,7 +198,14 @@ impl Navigation {
     pub fn install(&mut self, folder: Folder) {
         self.folder = Some(folder);
         self.current = None;
+        self.set_generation = self.set_generation.wrapping_add(1);
         self.bump_generation();
+    }
+
+    pub fn set_id(&self) -> Option<NavigationSetId> {
+        self.folder
+            .as_ref()
+            .map(|_| NavigationSetId(self.set_generation))
     }
 
     pub fn directory(&self) -> Option<&Path> {
@@ -210,6 +236,10 @@ impl Navigation {
 
     pub fn current_path(&self) -> Option<&Path> {
         self.get(self.current?)
+    }
+
+    pub fn current_destination(&self) -> Option<Destination> {
+        self.destination()
     }
 
     pub fn generation(&self) -> u64 {
@@ -473,7 +503,7 @@ mod tests {
         let modified = std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        FileSnapshot::new(path.to_path_buf(), modified)
+        FileSnapshot::new(path.to_path_buf(), modified, SnapshotKind::Regular)
     }
 
     fn tempdir(name: &str) -> PathBuf {
@@ -607,7 +637,11 @@ mod tests {
         assert_eq!(folder.insert(snapshot(&b)), Some(1)); // sorted position
         assert_eq!(folder.insert(snapshot(&b)), None); // double-insertion guarded
         assert_eq!(
-            folder.insert(FileSnapshot::new(dir.join("x.txt"), SystemTime::UNIX_EPOCH,)),
+            folder.insert(FileSnapshot::new(
+                dir.join("x.txt"),
+                SystemTime::UNIX_EPOCH,
+                SnapshotKind::Regular,
+            )),
             None
         ); // unsupported
         assert_eq!(folder.remove(&b), Some(1));
@@ -630,13 +664,36 @@ mod tests {
     }
 
     #[test]
+    fn insertion_rejects_a_non_regular_snapshot() {
+        let dir = tempdir("insert-non-regular");
+        File::create(dir.join("a.jpg")).unwrap();
+        std::fs::create_dir(dir.join("folder.jpg")).unwrap();
+        let mut folder = Folder::scan(&dir, by_name()).unwrap();
+
+        assert_eq!(
+            folder.insert(FileSnapshot::new(
+                dir.join("folder.jpg"),
+                SystemTime::UNIX_EPOCH,
+                SnapshotKind::Other,
+            )),
+            None
+        );
+        assert_eq!(names(&folder), ["a.jpg"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn insertion_uses_prevalidated_metadata_without_filesystem_io() {
         let dir = tempdir("prevalidated-insert");
         File::create(dir.join("a.jpg")).unwrap();
         let mut navigation = Navigation::default();
         navigation.install(Folder::scan(&dir, by_name()).unwrap());
         let appeared = dir.join("b.jpg");
-        let snapshot = FileSnapshot::new(appeared.clone(), SystemTime::UNIX_EPOCH);
+        let snapshot = FileSnapshot::new(
+            appeared.clone(),
+            SystemTime::UNIX_EPOCH,
+            SnapshotKind::Regular,
+        );
 
         // The adapter owns filesystem validation. Removing the file proves
         // model insertion consumes only the captured value and cannot stat.
@@ -785,6 +842,19 @@ mod tests {
         assert!(!navigation.is_current_generation(second.generation));
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&replacement).unwrap();
+    }
+
+    #[test]
+    fn reinstalling_the_same_directory_creates_a_new_set_identity() {
+        let dir = tempdir("set-identity");
+        File::create(dir.join("a.jpg")).unwrap();
+        let mut navigation = Navigation::default();
+        navigation.install(Folder::scan(&dir, by_name()).unwrap());
+        let first = navigation.set_id().unwrap();
+
+        navigation.install(Folder::scan(&dir, by_name()).unwrap());
+        assert_ne!(navigation.set_id(), Some(first));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
