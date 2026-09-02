@@ -1,7 +1,7 @@
 //! Main window assembly: frameless surface with fade-in overlay
 //! controls (FR-6), the single action layer every input goes through
-//! (NFR-6.2), folder monitoring (FR-3.5), and the trash/undo/save
-//! flows (FR-5).
+//! (NFR-6.2), folder monitoring (FR-3.5), and generation-scoped
+//! trash/undo/save coordination (FR-5).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -21,7 +21,10 @@ use gtk::prelude::*;
 use crate::annotation::{MAX_SHAPES, Status as MarkupStatus, Tool as MarkupTool};
 use crate::config::{self, Config, FitMode, SubtitleMode};
 use crate::fileops;
-use crate::folder::{Destination, FileSnapshot, Folder, Navigation, RemovalOutcome, RenameOutcome};
+use crate::folder::{
+    Destination, FileSnapshot, Folder, Navigation, NavigationSetId, RemovalOutcome, RenameOutcome,
+    SnapshotKind,
+};
 use crate::loader::{self, Decoded};
 use crate::player::{
     self, AudioChoice, AudioSnapshot, PLAYBACK_RATES, Player, SubtitleChoice, SubtitleSnapshot,
@@ -30,7 +33,9 @@ use crate::player::{
 use crate::viewer::ImageView;
 
 mod action;
+mod operation;
 use action::{Action, Command, Media, WorkspaceState};
+use operation::{Coordinator as OperationCoordinator, UndoDisposition, UndoEffect, UndoId};
 
 const SEEK_STEP_SECONDS: f64 = 10.0;
 
@@ -213,8 +218,7 @@ pub struct App {
     /// Created on the first video (lazy GStreamer init, NFR-1.1) and
     /// reused; `None` also while videos have never been opened.
     player: RefCell<Option<Rc<Player>>>,
-    pending_undo: RefCell<Option<PathBuf>>,
-    saving: Cell<bool>,
+    operations: RefCell<OperationCoordinator>,
     presented: Cell<bool>,
     // Widgets and timers.
     status_area: gtk::Box,
@@ -285,11 +289,13 @@ pub struct App {
     toast_revealer: gtk::Revealer,
     toast_label: gtk::Label,
     toast_undo: gtk::Button,
+    toast_undo_id: Cell<Option<UndoId>>,
     help_label: gtk::Label,
     chrome: Vec<gtk::Widget>,
     chrome_timer: TimerSlot,
     indicator_timer: TimerSlot,
     toast_timer: TimerSlot,
+    undo_timer: TimerSlot,
     svg_timer: TimerSlot,
     markup_action: gio::SimpleAction,
     markup_box_action: gio::SimpleAction,
@@ -674,8 +680,7 @@ impl App {
             cache: loader::Cache::new(3, cache_budget_bytes(cfg.cache_budget_mb)),
             editable_mimes: RefCell::new(BTreeSet::new()),
             player: RefCell::new(None),
-            pending_undo: RefCell::new(None),
-            saving: Cell::new(false),
+            operations: RefCell::new(OperationCoordinator::default()),
             presented: Cell::new(false),
             status_area,
             status,
@@ -722,6 +727,7 @@ impl App {
             toast_revealer,
             toast_label,
             toast_undo,
+            toast_undo_id: Cell::new(None),
             help_label,
             chrome: vec![
                 prev_btn.upcast(),
@@ -733,6 +739,7 @@ impl App {
             chrome_timer: TimerSlot::default(),
             indicator_timer: TimerSlot::default(),
             toast_timer: TimerSlot::default(),
+            undo_timer: TimerSlot::default(),
             svg_timer: TimerSlot::default(),
             markup_action: gio::SimpleAction::new(Action::Markup.name(), None),
             markup_box_action: gio::SimpleAction::new(Action::MarkupBox.name(), None),
@@ -971,13 +978,12 @@ impl App {
                 move |result| match result {
                     Ok(file) => match file.path() {
                         Some(path) if config::is_supported(&path) => app.open_path(&path),
-                        Some(_) =>
-                            app.show_toast("Only supported media files can be opened", false),
-                        None => app.show_toast("Only local media files can be opened", false),
+                        Some(_) => app.show_toast("Only supported media files can be opened"),
+                        None => app.show_toast("Only local media files can be opened"),
                     },
                     Err(error) if dialog_was_cancelled(&error) => {}
                     Err(error) => {
-                        app.show_toast(&format!("Cannot open file chooser: {error}"), false)
+                        app.show_toast(&format!("Cannot open file chooser: {error}"))
                     }
                 }
             ),
@@ -1001,11 +1007,11 @@ impl App {
                 move |result| match result {
                     Ok(folder) => match folder.path() {
                         Some(path) => app.open_path(&path),
-                        None => app.show_toast("Only local folders can be opened", false),
+                        None => app.show_toast("Only local folders can be opened"),
                     },
                     Err(error) if dialog_was_cancelled(&error) => {}
                     Err(error) => {
-                        app.show_toast(&format!("Cannot open folder chooser: {error}"), false)
+                        app.show_toast(&format!("Cannot open folder chooser: {error}"))
                     }
                 }
             ),
@@ -1036,12 +1042,15 @@ impl App {
     fn install_folder(self: &Rc<Self>, folder: Folder) {
         let len = folder.len();
         self.fs_queries.borrow_mut().cancel_all();
-        let directory = {
+        let (directory, set) = {
             let mut navigation = self.navigation.borrow_mut();
             navigation.install(folder);
-            navigation.directory().map(Path::to_path_buf)
+            (
+                navigation.directory().map(Path::to_path_buf),
+                navigation.set_id(),
+            )
         };
-        let Some(directory) = directory else {
+        let (Some(directory), Some(set)) = (directory, set) else {
             return;
         };
         crate::applog!("folder: {} with {} media files", directory.display(), len);
@@ -1052,7 +1061,7 @@ impl App {
             m.connect_changed(clone!(
                 #[strong(rename_to = app)]
                 self,
-                move |_, file, other, event| app.on_fs_event(file, other, event)
+                move |_, file, other, event| app.on_fs_event(set, file, other, event)
             ));
         }
         // Dropping the previous monitor cancels it.
@@ -1284,9 +1293,10 @@ impl App {
         self.chrome_timer.cancel();
         self.indicator_timer.cancel();
         self.toast_timer.cancel();
+        self.undo_timer.cancel();
         self.svg_timer.cancel();
         self.stop_transport_tick();
-        self.pending_undo.borrow_mut().take();
+        self.operations.borrow_mut().clear();
         self.set_idle_inhibited(false);
 
         // Taking the player also drops its bus-watch guard after stop reaches
@@ -1303,11 +1313,11 @@ impl App {
 
     fn attach_subtitle(self: &Rc<Self>, path: &Path) {
         if !self.is_video_showing() {
-            self.show_toast("Open a video before adding subtitles", false);
+            self.show_toast("Open a video before adding subtitles");
             return;
         }
         let Some(player) = self.player.borrow().clone() else {
-            self.show_toast("Video player is unavailable", false);
+            self.show_toast("Video player is unavailable");
             return;
         };
         match player.attach_subtitle(path) {
@@ -1316,7 +1326,7 @@ impl App {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 self.flash(&format!("Subtitles: {name}"));
             }
-            Err(error) => self.show_toast(&error.to_string(), false),
+            Err(error) => self.show_toast(&error.to_string()),
         }
     }
 
@@ -1324,7 +1334,7 @@ impl App {
         let video = match &*self.media.borrow() {
             MediaState::Video(path) => path.clone(),
             _ => {
-                self.show_toast("Open a video before adding subtitles", false);
+                self.show_toast("Open a video before adding subtitles");
                 return;
             }
         };
@@ -1356,20 +1366,16 @@ impl App {
                             if !app.is_video_showing()
                                 || app.current_path().as_deref() != Some(video.as_path())
                             {
-                                app.show_toast(
-                                    "The video changed; choose its subtitle again",
-                                    false,
-                                );
+                                app.show_toast("The video changed; choose its subtitle again");
                                 return;
                             }
                             app.attach_subtitle(&path);
                         }
-                        Some(_) =>
-                            app.show_toast("Only SRT and WebVTT subtitles are supported", false,),
-                        None => app.show_toast("Only local subtitle files are supported", false),
+                        Some(_) => app.show_toast("Only SRT and WebVTT subtitles are supported"),
+                        None => app.show_toast("Only local subtitle files are supported"),
                     },
                     Err(error) if dialog_was_cancelled(&error) => {}
-                    Err(error) => app.show_toast(&format!("Cannot open subtitle: {error}"), false),
+                    Err(error) => app.show_toast(&format!("Cannot open subtitle: {error}")),
                 }
             ),
         );
@@ -1377,17 +1383,17 @@ impl App {
 
     fn handle_dropped_files(self: &Rc<Self>, files: Vec<gio::File>) -> bool {
         if files.len() != 1 {
-            self.show_toast("Drop one file at a time", false);
+            self.show_toast("Drop one file at a time");
             return true;
         }
         let Some(path) = files[0].path() else {
-            self.show_toast("Only local files can be dropped", false);
+            self.show_toast("Only local files can be dropped");
             return true;
         };
         if config::is_subtitle(&path) {
             self.attach_subtitle(&path);
         } else if looks_like_subtitle(&path) {
-            self.show_toast("Only SRT and WebVTT subtitles are supported", false);
+            self.show_toast("Only SRT and WebVTT subtitles are supported");
         } else {
             self.open_path(&path);
         }
@@ -1709,7 +1715,7 @@ impl App {
             return;
         }
         if !self.markup_available() || !self.view.start_markup() {
-            self.show_toast("Quick Markup is available for static images only", false);
+            self.show_toast("Quick Markup is available for static images only");
             return;
         }
         // A previous trash toast describes another workflow. Keep its
@@ -1726,7 +1732,7 @@ impl App {
         self.update_control_mode();
         self.show_chrome();
         if status.shape_count == MAX_SHAPES {
-            self.show_toast("Quick Markup limit reached; undo or clear a shape", false);
+            self.show_toast("Quick Markup limit reached; undo or clear a shape");
         }
     }
 
@@ -1745,9 +1751,9 @@ impl App {
                     height,
                     started.elapsed().as_secs_f64() * 1000.0
                 );
-                self.show_toast("Annotated image copied", false);
+                self.show_toast("Annotated image copied");
             }
-            Err(error) => self.show_toast(&error.to_string(), false),
+            Err(error) => self.show_toast(&error.to_string()),
         }
     }
 
@@ -1779,7 +1785,7 @@ impl App {
             }
             player::Event::SubtitleError(description) => {
                 if self.is_video_showing() {
-                    self.show_toast(&description, false);
+                    self.show_toast(&description);
                 }
             }
             player::Event::AudioChanged(snapshot) => {
@@ -1797,7 +1803,7 @@ impl App {
                     if let Some(rate) = self.with_video(Player::playback_rate) {
                         self.update_playback_rate(rate);
                     }
-                    self.show_toast(&error.to_string(), false);
+                    self.show_toast(&error.to_string());
                 }
             }
         }
@@ -2081,10 +2087,6 @@ impl App {
         navigation_path.or_else(|| self.media.borrow().path().map(Path::to_path_buf))
     }
 
-    fn current_index(&self) -> Option<usize> {
-        self.navigation.borrow().current_index()
-    }
-
     fn navigate(self: &Rc<Self>, direction: Direction) {
         let target = {
             let navigation = self.navigation.borrow();
@@ -2137,19 +2139,23 @@ impl App {
 
     fn on_fs_event(
         self: &Rc<Self>,
+        set: NavigationSetId,
         file: &gio::File,
         other: Option<&gio::File>,
         event: gio::FileMonitorEvent,
     ) {
+        if self.navigation.borrow().set_id() != Some(set) || self.shutting_down.get() {
+            return;
+        }
         use gio::FileMonitorEvent as E;
         match event {
             E::Created | E::MovedIn => {
                 let Some(path) = file.path().filter(|path| config::is_supported(path)) else {
                     return;
                 };
-                self.query_fs_snapshot(file.clone(), vec![path], move |app, snapshot| {
+                self.query_fs_snapshot(set, file.clone(), vec![path], move |app, snapshot| {
                     if let Some(snapshot) = snapshot {
-                        app.apply_fs_change(FsChange::Insert(snapshot), event);
+                        app.apply_fs_change(set, FsChange::Insert(snapshot), event);
                     }
                 });
             }
@@ -2160,7 +2166,7 @@ impl App {
                 self.fs_queries
                     .borrow_mut()
                     .supersede(std::slice::from_ref(&path));
-                self.apply_fs_change(FsChange::Remove(path), event);
+                self.apply_fs_change(set, FsChange::Remove(path), event);
             }
             E::Renamed => {
                 let Some((old, new_file, new)) = file.path().and_then(|old| {
@@ -2172,12 +2178,13 @@ impl App {
                 };
                 let paths = vec![old.clone(), new.clone()];
                 if config::is_supported(&new) {
-                    self.query_fs_snapshot(new_file, paths, move |app, snapshot| {
-                        app.apply_fs_change(FsChange::Rename { old, new, snapshot }, event);
+                    self.query_fs_snapshot(set, new_file, paths, move |app, snapshot| {
+                        app.apply_fs_change(set, FsChange::Rename { old, new, snapshot }, event);
                     });
                 } else {
                     self.fs_queries.borrow_mut().supersede(&paths);
                     self.apply_fs_change(
+                        set,
                         FsChange::Rename {
                             old,
                             new,
@@ -2193,13 +2200,11 @@ impl App {
 
     fn query_fs_snapshot(
         self: &Rc<Self>,
+        set: NavigationSetId,
         file: gio::File,
         paths: Vec<PathBuf>,
         apply: impl FnOnce(&Rc<Self>, Option<FileSnapshot>) + 'static,
     ) {
-        let Some(directory) = self.navigation.borrow().directory().map(Path::to_path_buf) else {
-            return;
-        };
         let Some(snapshot_path) = file.path() else {
             return;
         };
@@ -2217,8 +2222,8 @@ impl App {
                         .ok()
                         .and_then(|info| file_snapshot_from_info(snapshot_path, &info));
                     let current = app.fs_queries.borrow_mut().finish(&paths, version);
-                    let same_directory = app.navigation.borrow().directory() == Some(&directory);
-                    if current && same_directory && !app.shutting_down.get() {
+                    let same_set = app.navigation.borrow().set_id() == Some(set);
+                    if current && same_set && !app.shutting_down.get() {
                         apply(&app, snapshot);
                     }
                 }
@@ -2226,13 +2231,26 @@ impl App {
         );
     }
 
-    fn apply_fs_change(self: &Rc<Self>, change: FsChange, event: gio::FileMonitorEvent) {
-        let path = match &change {
-            FsChange::Insert(snapshot) => snapshot.path(),
-            FsChange::Remove(path) | FsChange::Rename { old: path, .. } => path,
-        }
-        .to_path_buf();
-        let presentation = apply_fs_change(&mut self.navigation.borrow_mut(), change);
+    fn apply_fs_change(
+        self: &Rc<Self>,
+        set: NavigationSetId,
+        change: FsChange,
+        event: gio::FileMonitorEvent,
+    ) {
+        let (path, removal) = match &change {
+            FsChange::Insert(snapshot) => (snapshot.path(), false),
+            FsChange::Remove(path) => (path.as_path(), true),
+            FsChange::Rename { old, .. } => (old.as_path(), false),
+        };
+        let path = path.to_path_buf();
+        let (before_generation, presentation) = {
+            let mut navigation = self.navigation.borrow_mut();
+            let before = navigation.generation();
+            let Some(presentation) = apply_fs_change_for_set(&mut navigation, set, change) else {
+                return;
+            };
+            (before, presentation)
+        };
         let current_changed = !matches!(presentation, FsPresentation::Unchanged);
         crate::applog!(
             "fs event: {event:?} {}{}",
@@ -2251,12 +2269,30 @@ impl App {
             FsPresentation::Unchanged => {}
         }
         self.update_pos_label();
+        if removal {
+            let after_generation = self.navigation.borrow().generation();
+            self.operations.borrow_mut().observe_removal(
+                set,
+                &path,
+                before_generation,
+                after_generation,
+                current_changed,
+            );
+        }
     }
 
     // ----- file operations (FR-5) --------------------------------------
 
     fn trash_current(self: &Rc<Self>) {
         let Some(path) = self.current_path() else {
+            return;
+        };
+        let Some(token) = self
+            .operations
+            .borrow_mut()
+            .start_trash(&self.navigation.borrow(), &path)
+        else {
+            self.show_toast("Another file operation is still in progress");
             return;
         };
         // Release the file before it moves to trash.
@@ -2276,25 +2312,57 @@ impl App {
                             started.elapsed().as_secs_f64() * 1000.0
                         );
                         app.cache.invalidate(&path);
-                        app.fs_queries
-                            .borrow_mut()
-                            .supersede(std::slice::from_ref(&path));
-                        let outcome = app.navigation.borrow_mut().remove(&path);
-                        *app.pending_undo.borrow_mut() = Some(path);
-                        match outcome {
-                            RemovalOutcome::CurrentRemoved(Some(destination)) => {
-                                app.show_destination(destination, Arrival::Direct)
+                        if !app.shutting_down.get()
+                            && app
+                                .operations
+                                .borrow()
+                                .trash_applies(&token, &app.navigation.borrow())
+                        {
+                            app.fs_queries
+                                .borrow_mut()
+                                .supersede(std::slice::from_ref(&path));
+                            let (before_generation, outcome) = {
+                                let mut navigation = app.navigation.borrow_mut();
+                                let before = navigation.generation();
+                                (before, navigation.remove(&path))
+                            };
+                            let removed_current =
+                                matches!(outcome, RemovalOutcome::CurrentRemoved(_));
+                            match outcome {
+                                RemovalOutcome::CurrentRemoved(Some(destination)) => {
+                                    app.show_destination(destination, Arrival::Direct)
+                                }
+                                RemovalOutcome::CurrentRemoved(None) => {
+                                    app.empty_state("No media left in this folder")
+                                }
+                                RemovalOutcome::NotFound | RemovalOutcome::CurrentPreserved => {}
                             }
-                            RemovalOutcome::CurrentRemoved(None) => {
-                                app.empty_state("No media left in this folder")
-                            }
-                            RemovalOutcome::NotFound | RemovalOutcome::CurrentPreserved => {}
+                            app.update_pos_label();
+                            let after_generation = app.navigation.borrow().generation();
+                            app.operations.borrow_mut().observe_removal(
+                                token.set(),
+                                token.path(),
+                                before_generation,
+                                after_generation,
+                                removed_current,
+                            );
                         }
-                        app.show_toast("Moved to trash", true);
+                        let disposition = app.operations.borrow_mut().finish_trash(token);
+                        match disposition {
+                            UndoDisposition::Offered(id) if !app.shutting_down.get() => {
+                                app.show_undo_toast("Moved to trash", id);
+                            }
+                            UndoDisposition::Offered(_)
+                            | UndoDisposition::NewerOfferPreserved
+                            | UndoDisposition::OperationSuperseded => {}
+                        }
                     }
                     Err(e) => {
+                        app.operations.borrow_mut().cancel_trash(&token);
                         eprintln!("open-mpv: error: {e}");
-                        app.show_toast(&e.to_string(), false);
+                        if !app.shutting_down.get() {
+                            app.show_toast(&e.to_string());
+                        }
                     }
                 }
             }
@@ -2302,10 +2370,13 @@ impl App {
     }
 
     fn undo_trash(self: &Rc<Self>) {
-        let Some(path) = self.pending_undo.borrow_mut().take() else {
+        let Some(token) = self.operations.borrow_mut().begin_undo() else {
             return;
         };
+        let path = token.path().to_path_buf();
+        self.undo_timer.cancel();
         self.hide_toast();
+        self.update_undo_enabled();
         glib::spawn_future_local(clone!(
             #[strong(rename_to = app)]
             self,
@@ -2325,7 +2396,11 @@ impl App {
                         ));
                     }
                     let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                    Ok(FileSnapshot::new(restore_path, modified))
+                    Ok(FileSnapshot::new(
+                        restore_path,
+                        modified,
+                        SnapshotKind::Regular,
+                    ))
                 })
                 .await
                 {
@@ -2338,21 +2413,32 @@ impl App {
                 match result {
                     Ok(snapshot) => {
                         crate::applog!("restore: {}", path.display());
-                        let idx = {
+                        if app.shutting_down.get() {
+                            app.operations.borrow_mut().cancel_undo(&token);
+                            return;
+                        }
+                        let effect = {
                             let mut navigation = app.navigation.borrow_mut();
-                            // insert() returns None if the monitor already
-                            // re-added it (gotcha: dedup).
-                            navigation
-                                .insert(snapshot)
-                                .or_else(|| navigation.index_of(&path))
+                            app.operations.borrow_mut().finish_undo(
+                                &token,
+                                snapshot,
+                                &mut navigation,
+                            )
                         };
-                        if let Some(idx) = idx {
-                            app.show_index(idx, Arrival::Direct);
+                        match effect {
+                            UndoEffect::Reconciled(Some(destination)) => {
+                                app.show_destination(destination, Arrival::Direct)
+                            }
+                            UndoEffect::Reconciled(None) => app.update_pos_label(),
+                            UndoEffect::Detached => {}
                         }
                     }
                     Err(e) => {
+                        app.operations.borrow_mut().cancel_undo(&token);
                         eprintln!("open-mpv: error: {e}");
-                        app.show_toast(&e.to_string(), false);
+                        if !app.shutting_down.get() {
+                            app.show_toast(&e.to_string());
+                        }
                     }
                 }
             }
@@ -2368,7 +2454,13 @@ impl App {
         if rotation == 0 {
             return;
         }
-        self.saving.set(true);
+        let Some(token) = self
+            .operations
+            .borrow_mut()
+            .start_save(&self.navigation.borrow(), &path)
+        else {
+            return;
+        };
         self.update_save_enabled();
         glib::spawn_future_local(clone!(
             #[strong(rename_to = app)]
@@ -2376,9 +2468,12 @@ impl App {
             async move {
                 let started = std::time::Instant::now();
                 let result = fileops::save_rotation(&path, &mime, rotation).await;
-                app.saving.set(false);
                 match result {
                     Ok(outcome) => {
+                        let reload = app
+                            .operations
+                            .borrow_mut()
+                            .finish_save(&token, &app.navigation.borrow());
                         crate::applog!(
                             "save-rotation: {} ({}°) in {:.1} ms",
                             path.display(),
@@ -2386,28 +2481,37 @@ impl App {
                             started.elapsed().as_secs_f64() * 1000.0
                         );
                         app.cache.invalidate(&path);
-                        match outcome {
-                            fileops::SaveRotationOutcome::Saved => app.flash("Saved"),
-                            fileops::SaveRotationOutcome::DurabilityUncertain(source) => {
-                                let warning = format!(
-                                    "Saved {}, but could not confirm it reached storage: {source}",
-                                    path.display()
-                                );
-                                eprintln!("open-mpv: warning: {warning}");
-                                app.show_toast(&warning, false);
+                        if !app.shutting_down.get() {
+                            match outcome {
+                                fileops::SaveRotationOutcome::Saved => app.flash("Saved"),
+                                fileops::SaveRotationOutcome::DurabilityUncertain(source) => {
+                                    let warning = format!(
+                                        "Saved {}, but could not confirm it reached storage: {source}",
+                                        path.display()
+                                    );
+                                    eprintln!("open-mpv: warning: {warning}");
+                                    app.show_toast(&warning);
+                                }
                             }
-                        }
-                        // Reload: the file now carries the rotation.
-                        if let Some(idx) = app.current_index() {
-                            app.show_index(idx, Arrival::Direct);
+                            // Reload only the destination that initiated the
+                            // save. Navigation or folder replacement makes a
+                            // successful filesystem result UI-inapplicable.
+                            if let Some(destination) = reload {
+                                app.show_destination(destination, Arrival::Direct);
+                            }
                         }
                     }
                     Err(e) => {
+                        app.operations.borrow_mut().cancel_save(&token);
                         eprintln!("open-mpv: error: {e}");
-                        app.show_toast(&e.to_string(), false);
+                        if !app.shutting_down.get() {
+                            app.show_toast(&e.to_string());
+                        }
                     }
                 }
-                app.update_save_enabled();
+                if !app.shutting_down.get() {
+                    app.update_save_enabled();
+                }
             }
         ));
     }
@@ -2436,12 +2540,13 @@ impl App {
             _ => Some("Nothing to save".into()),
         };
         drop(media);
-        let enabled = !self.saving.get()
+        let saving = self.operations.borrow().is_saving();
+        let enabled = !saving
             && !self.view.is_marking_up()
             && save_control_visible(reason.is_none(), self.view.rotation());
         let tooltip = match reason {
             Some(why) => why,
-            None if self.saving.get() => "A rotation is already being saved".into(),
+            None if saving => "A rotation is already being saved".into(),
             None if enabled => "Save rotation to file".into(),
             // Editable, but nothing has been rotated yet.
             None => "Rotate the image first".into(),
@@ -2536,7 +2641,7 @@ impl App {
                 self.update_playback_rate(rate);
                 self.flash(&format_playback_rate(rate));
             }
-            Some(Err(error)) => self.show_toast(&error.to_string(), false),
+            Some(Err(error)) => self.show_toast(&error.to_string()),
             None => {}
         }
     }
@@ -2565,9 +2670,10 @@ impl App {
         );
     }
 
-    fn show_toast(self: &Rc<Self>, text: &str, with_undo: bool) {
+    fn show_toast(self: &Rc<Self>, text: &str) {
         self.toast_label.set_text(text);
-        self.toast_undo.set_visible(with_undo);
+        self.toast_undo.set_visible(false);
+        self.toast_undo_id.set(None);
         self.update_undo_enabled();
         self.toast_revealer.set_reveal_child(true);
         reset_timer(
@@ -2577,9 +2683,42 @@ impl App {
                 #[strong(rename_to = app)]
                 self,
                 move || {
-                    // The undo window lapses; the file stays in trash.
-                    *app.pending_undo.borrow_mut() = None;
                     app.hide_toast();
+                }
+            ),
+        );
+    }
+
+    fn show_undo_toast(self: &Rc<Self>, text: &str, id: UndoId) {
+        self.toast_label.set_text(text);
+        self.toast_undo.set_visible(true);
+        self.toast_undo_id.set(Some(id));
+        self.update_undo_enabled();
+        self.toast_revealer.set_reveal_child(true);
+        reset_timer(
+            &self.toast_timer,
+            TOAST_TIMEOUT,
+            clone!(
+                #[strong(rename_to = app)]
+                self,
+                move || app.hide_toast()
+            ),
+        );
+        reset_timer(
+            &self.undo_timer,
+            TOAST_TIMEOUT,
+            clone!(
+                #[strong(rename_to = app)]
+                self,
+                move || {
+                    let expired = app.operations.borrow_mut().expire_undo(id);
+                    if expired {
+                        if app.toast_undo_id.get() == Some(id) {
+                            app.hide_toast();
+                        } else {
+                            app.update_undo_enabled();
+                        }
+                    }
                 }
             ),
         );
@@ -2587,6 +2726,7 @@ impl App {
 
     fn hide_toast(&self) {
         self.toast_revealer.set_reveal_child(false);
+        self.toast_undo_id.set(None);
         self.update_undo_enabled();
     }
 
@@ -2595,7 +2735,7 @@ impl App {
             .view
             .markup_status()
             .is_some_and(|status| status.can_undo);
-        let trash_undo = !self.view.is_marking_up() && self.pending_undo.borrow().is_some();
+        let trash_undo = !self.view.is_marking_up() && self.operations.borrow().has_undo();
         self.undo_action.set_enabled(markup_undo || trash_undo);
         self.sync_action_enabled();
     }
@@ -2624,7 +2764,7 @@ impl App {
                 && !self.view.markup_has_draft(),
             markup_can_undo: markup.is_some_and(|status| status.can_undo),
             can_save: self.save_availability().0,
-            can_undo_trash: self.pending_undo.borrow().is_some(),
+            can_undo_trash: self.operations.borrow().has_undo(),
             help_visible: self.help_label.is_visible(),
             fullscreen: self.win.is_fullscreen(),
         }
@@ -3475,16 +3615,18 @@ fn open_menu_model() -> gio::Menu {
 }
 
 fn file_snapshot_from_info(path: PathBuf, info: &gio::FileInfo) -> Option<FileSnapshot> {
-    if info.file_type() != gio::FileType::Regular {
-        return None;
-    }
+    let kind = if info.file_type() == gio::FileType::Regular {
+        SnapshotKind::Regular
+    } else {
+        SnapshotKind::Other
+    };
     let timestamp = Duration::from_secs(info.attribute_uint64("time::modified")).saturating_add(
         Duration::from_nanos(u64::from(info.attribute_uint32("time::modified-nsec"))),
     );
     let modified = SystemTime::UNIX_EPOCH
         .checked_add(timestamp)
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    Some(FileSnapshot::new(path, modified))
+    Some(FileSnapshot::new(path, modified, kind))
 }
 
 /// Apply one already-prepared filesystem mutation to the plain-Rust owner and
@@ -3510,6 +3652,14 @@ fn apply_fs_change(navigation: &mut Navigation, change: FsChange) -> FsPresentat
             RenameOutcome::Preserved => FsPresentation::Unchanged,
         },
     }
+}
+
+fn apply_fs_change_for_set(
+    navigation: &mut Navigation,
+    set: NavigationSetId,
+    change: FsChange,
+) -> Option<FsPresentation> {
+    (navigation.set_id() == Some(set)).then(|| apply_fs_change(navigation, change))
 }
 
 /// Where a decode failure at `idx` sends us: onward in the direction of
@@ -3640,17 +3790,19 @@ fn reset_timer(slot: &TimerSlot, after: Duration, f: impl FnOnce() + 'static) {
 mod tests {
     use super::{
         Action, Arrival, Direction, FsChange, FsPresentation, FsQueryVersions, SEEK_STEP_SECONDS,
-        SKIP_BUDGET, adjacent_playback_rate, apply_fs_change, cache_budget_bytes, chrome_is_held,
-        dialog_initial_folder_path, dialog_was_cancelled, excluded_path_message,
-        file_snapshot_from_info, format_playback_rate, format_time, looks_like_subtitle,
-        open_menu_model, playback_speed_menu, position_text, rebuild_audio_context,
-        rebuild_audio_menu, rebuild_markup_context, rebuild_subtitle_context,
-        rebuild_subtitle_menu, resize_edge_at, save_control_visible, skip_target,
-        supported_media_extensions, svg_render_dimension, window_dimension,
+        SKIP_BUDGET, adjacent_playback_rate, apply_fs_change, apply_fs_change_for_set,
+        cache_budget_bytes, chrome_is_held, dialog_initial_folder_path, dialog_was_cancelled,
+        excluded_path_message, file_snapshot_from_info, format_playback_rate, format_time,
+        looks_like_subtitle, open_menu_model, playback_speed_menu, position_text,
+        rebuild_audio_context, rebuild_audio_menu, rebuild_markup_context,
+        rebuild_subtitle_context, rebuild_subtitle_menu, resize_edge_at, save_control_visible,
+        skip_target, supported_media_extensions, svg_render_dimension, window_dimension,
     };
 
+    use super::operation::{Coordinator as OperationCoordinator, UndoDisposition, UndoEffect};
+
     use crate::config::{Sort, SortOrder};
-    use crate::folder::{FileSnapshot, Folder, Navigation};
+    use crate::folder::{FileSnapshot, Folder, Navigation, RemovalOutcome, SnapshotKind};
     use crate::loader;
     use crate::player::{
         AudioChoice, AudioSnapshot, AudioTrack, SubtitleChoice, SubtitleSnapshot, SubtitleTrack,
@@ -3660,6 +3812,13 @@ mod tests {
     use gtk4::glib::value::ToValue;
     use gtk4::prelude::{FileExt, MenuModelExt};
     use std::path::PathBuf;
+
+    fn by_name() -> Sort {
+        Sort {
+            order: SortOrder::Name,
+            reverse: false,
+        }
+    }
 
     /// A three-image folder on disk, which is what `Folder` reads.
     fn folder_of(name: &str, files: &[&str]) -> (std::path::PathBuf, Folder) {
@@ -3765,6 +3924,327 @@ mod tests {
     }
 
     #[test]
+    fn undo_completion_after_navigation_keeps_the_current_media() {
+        let (dir, mut navigation) =
+            navigation_of("undo-after-navigation", &["a.jpg", "b.jpg", "c.jpg"]);
+        let trashed = dir.join("a.jpg");
+        navigation.select(0).unwrap();
+        let set = navigation.set_id().unwrap();
+        let mut operations = OperationCoordinator::default();
+        let trash = operations.start_trash(&navigation, &trashed).unwrap();
+
+        let before = navigation.generation();
+        let RemovalOutcome::CurrentRemoved(Some(after_trash)) = navigation.remove(&trashed) else {
+            panic!("trash must move to the nearest remaining item");
+        };
+        assert_eq!(after_trash.path, dir.join("b.jpg"));
+        operations.observe_removal(set, &trashed, before, navigation.generation(), true);
+        assert!(matches!(
+            operations.finish_trash(trash),
+            UndoDisposition::Offered(_)
+        ));
+        let undo = operations.begin_undo().unwrap();
+
+        navigation.select(1).unwrap();
+        let chosen_by_user = dir.join("c.jpg");
+        assert_eq!(navigation.current_path(), Some(chosen_by_user.as_path()));
+
+        std::fs::File::create(&trashed).unwrap();
+        let restored = FileSnapshot::new(
+            trashed.clone(),
+            std::time::SystemTime::UNIX_EPOCH,
+            SnapshotKind::Regular,
+        );
+        assert_eq!(
+            operations.finish_undo(&undo, restored, &mut navigation),
+            UndoEffect::Reconciled(None)
+        );
+
+        assert_eq!(
+            navigation.current_path(),
+            Some(chosen_by_user.as_path()),
+            "a late Undo result must not replace media selected after Trash"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn trash_completion_after_navigation_updates_only_the_origin_set() {
+        let (dir, mut navigation) =
+            navigation_of("trash-after-navigation", &["a.jpg", "b.jpg", "c.jpg"]);
+        let trashed = dir.join("a.jpg");
+        navigation.select(0).unwrap();
+        let mut operations = OperationCoordinator::default();
+        let trash = operations.start_trash(&navigation, &trashed).unwrap();
+
+        navigation.select(2).unwrap();
+        let chosen_by_user = dir.join("c.jpg");
+        assert!(operations.trash_applies(&trash, &navigation));
+        assert_eq!(
+            navigation.remove(&trashed),
+            RemovalOutcome::CurrentPreserved
+        );
+        assert_eq!(navigation.current_path(), Some(chosen_by_user.as_path()));
+
+        let (replacement_dir, replacement) = folder_of("trash-replacement", &["x.jpg"]);
+        navigation.install(replacement);
+        navigation.select(0).unwrap();
+        assert!(!operations.trash_applies(&trash, &navigation));
+        assert_eq!(
+            navigation.current_path(),
+            Some(replacement_dir.join("x.jpg").as_path())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&replacement_dir).unwrap();
+    }
+
+    #[test]
+    fn trash_and_undo_reconcile_monitor_and_result_in_either_order() {
+        for monitor_first in [false, true] {
+            let name = if monitor_first {
+                "monitor-first"
+            } else {
+                "result-first"
+            };
+            let (dir, mut navigation) = navigation_of(name, &["a.jpg", "b.jpg"]);
+            let trashed = dir.join("a.jpg");
+            navigation.select(0).unwrap();
+            let set = navigation.set_id().unwrap();
+            let mut operations = OperationCoordinator::default();
+            let trash = operations.start_trash(&navigation, &trashed).unwrap();
+
+            let apply_removal = |operations: &mut OperationCoordinator,
+                                 navigation: &mut Navigation| {
+                let before = navigation.generation();
+                let outcome = navigation.remove(&trashed);
+                let removed_current = matches!(outcome, RemovalOutcome::CurrentRemoved(_));
+                operations.observe_removal(
+                    set,
+                    &trashed,
+                    before,
+                    navigation.generation(),
+                    removed_current,
+                );
+            };
+
+            if monitor_first {
+                apply_removal(&mut operations, &mut navigation);
+            }
+            // The operation result also reconciles removal. The second
+            // arrival becomes a harmless NotFound.
+            apply_removal(&mut operations, &mut navigation);
+            let UndoDisposition::Offered(_) = operations.finish_trash(trash) else {
+                panic!("successful Trash must offer Undo");
+            };
+            if !monitor_first {
+                apply_removal(&mut operations, &mut navigation);
+            }
+            assert_eq!(navigation.len(), 1);
+            assert_eq!(navigation.current_path(), Some(dir.join("b.jpg").as_path()));
+
+            let undo = operations.begin_undo().unwrap();
+            std::fs::File::create(&trashed).unwrap();
+            let snapshot = FileSnapshot::new(
+                trashed.clone(),
+                std::time::SystemTime::UNIX_EPOCH,
+                SnapshotKind::Regular,
+            );
+            if monitor_first {
+                assert_eq!(navigation.insert(snapshot.clone()), Some(0));
+            }
+            let UndoEffect::Reconciled(Some(destination)) =
+                operations.finish_undo(&undo, snapshot, &mut navigation)
+            else {
+                panic!("unchanged post-trash context must present the restored item");
+            };
+            assert_eq!(destination.path, trashed);
+            assert_eq!(navigation.len(), 2, "monitor and Undo must deduplicate");
+            assert_eq!(navigation.current_path(), Some(destination.path.as_path()));
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn undo_after_folder_replacement_does_not_change_the_new_session() {
+        let (dir, mut navigation) = navigation_of("undo-reopen", &["a.jpg", "b.jpg"]);
+        let trashed = dir.join("a.jpg");
+        navigation.select(0).unwrap();
+        let set = navigation.set_id().unwrap();
+        let mut operations = OperationCoordinator::default();
+        let trash = operations.start_trash(&navigation, &trashed).unwrap();
+        let before = navigation.generation();
+        navigation.remove(&trashed);
+        operations.observe_removal(set, &trashed, before, navigation.generation(), true);
+        assert!(matches!(
+            operations.finish_trash(trash),
+            UndoDisposition::Offered(_)
+        ));
+        let undo = operations.begin_undo().unwrap();
+
+        std::fs::File::create(&trashed).unwrap();
+        let snapshot = FileSnapshot::new(
+            trashed.clone(),
+            std::time::SystemTime::UNIX_EPOCH,
+            SnapshotKind::Regular,
+        );
+        let (replacement_dir, replacement) = folder_of("undo-other-folder", &["x.jpg"]);
+        navigation.install(replacement);
+        navigation.select(0).unwrap();
+        assert_eq!(
+            operations.finish_undo(&undo, snapshot.clone(), &mut navigation),
+            UndoEffect::Detached
+        );
+        assert_eq!(
+            navigation.current_path(),
+            Some(replacement_dir.join("x.jpg").as_path())
+        );
+
+        // Reopening the original directory is also a replacement session,
+        // even though its owning path is equal to the operation's origin.
+        navigation.install(Folder::scan(&dir, by_name()).unwrap());
+        navigation.select(1).unwrap();
+        let chosen_by_user = dir.join("b.jpg");
+        assert_eq!(
+            operations.finish_undo(&undo, snapshot, &mut navigation),
+            UndoEffect::Detached
+        );
+        assert_eq!(navigation.current_path(), Some(chosen_by_user.as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&replacement_dir).unwrap();
+    }
+
+    #[test]
+    fn rotate_save_completion_requires_the_origin_media_generation() {
+        let (dir, mut navigation) = navigation_of("save-scope", &["a.jpg", "b.jpg"]);
+        navigation.select(0).unwrap();
+        let saved = dir.join("a.jpg");
+        let mut operations = OperationCoordinator::default();
+        let current_save = operations.start_save(&navigation, &saved).unwrap();
+        assert_eq!(
+            operations
+                .finish_save(&current_save, &navigation)
+                .map(|destination| destination.path),
+            Some(saved.clone())
+        );
+
+        let save = operations.start_save(&navigation, &saved).unwrap();
+        navigation.select(1).unwrap();
+        let generation = navigation.generation();
+        assert_eq!(operations.finish_save(&save, &navigation), None);
+        assert_eq!(navigation.generation(), generation);
+        assert_eq!(navigation.current_path(), Some(dir.join("b.jpg").as_path()));
+
+        let second = dir.join("b.jpg");
+        let save = operations.start_save(&navigation, &second).unwrap();
+        navigation.install(Folder::scan(&dir, by_name()).unwrap());
+        navigation.select(1).unwrap();
+        assert_eq!(operations.finish_save(&save, &navigation), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stale_monitor_event_cannot_mutate_a_reopened_folder() {
+        let (dir, mut navigation) = navigation_of("stale-monitor-set", &["a.jpg", "b.jpg"]);
+        navigation.select(0).unwrap();
+        let old_set = navigation.set_id().unwrap();
+
+        navigation.install(Folder::scan(&dir, by_name()).unwrap());
+        navigation.select(0).unwrap();
+        assert_eq!(
+            apply_fs_change_for_set(
+                &mut navigation,
+                old_set,
+                FsChange::Remove(dir.join("a.jpg")),
+            ),
+            None
+        );
+        assert_eq!(navigation.len(), 2);
+        assert_eq!(navigation.current_path(), Some(dir.join("a.jpg").as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn expiring_an_old_undo_cannot_clear_a_newer_offer() {
+        let (dir, mut navigation) = navigation_of("undo-identity", &["a.jpg"]);
+        let path = dir.join("a.jpg");
+        navigation.select(0).unwrap();
+        let mut operations = OperationCoordinator::default();
+
+        let first = operations.start_trash(&navigation, &path).unwrap();
+        let UndoDisposition::Offered(first_id) = operations.finish_trash(first) else {
+            panic!("first Trash must offer Undo");
+        };
+        let second = operations.start_trash(&navigation, &path).unwrap();
+        assert!(matches!(
+            operations.finish_trash(second),
+            UndoDisposition::Offered(_)
+        ));
+
+        assert!(!operations.expire_undo(first_id));
+        assert!(operations.has_undo());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn persistent_writes_to_the_same_path_do_not_overlap() {
+        let (dir, mut navigation) = navigation_of("operation-overlap", &["a.jpg"]);
+        let path = dir.join("a.jpg");
+        navigation.select(0).unwrap();
+        let mut operations = OperationCoordinator::default();
+
+        let save = operations.start_save(&navigation, &path).unwrap();
+        assert!(operations.start_trash(&navigation, &path).is_none());
+        operations.cancel_save(&save);
+
+        let trash = operations.start_trash(&navigation, &path).unwrap();
+        assert!(operations.start_save(&navigation, &path).is_none());
+        operations.cancel_trash(&trash);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn trash_jobs_are_bounded_until_the_pending_operation_settles() {
+        let (dir, mut navigation) = navigation_of("bounded-trash", &["a.jpg", "b.jpg"]);
+        let first_path = dir.join("a.jpg");
+        let second_path = dir.join("b.jpg");
+        let mut operations = OperationCoordinator::default();
+
+        navigation.select(0).unwrap();
+        let first = operations.start_trash(&navigation, &first_path).unwrap();
+        navigation.select(1).unwrap();
+        assert!(operations.start_trash(&navigation, &second_path).is_none());
+
+        operations.cancel_trash(&first);
+        assert!(operations.start_trash(&navigation, &second_path).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn restore_jobs_block_new_persistent_operations_until_they_settle() {
+        let (dir, mut navigation) = navigation_of("bounded-restore", &["a.jpg", "b.jpg"]);
+        let first_path = dir.join("a.jpg");
+        let second_path = dir.join("b.jpg");
+        let mut operations = OperationCoordinator::default();
+
+        navigation.select(0).unwrap();
+        let trash = operations.start_trash(&navigation, &first_path).unwrap();
+        assert!(matches!(
+            operations.finish_trash(trash),
+            UndoDisposition::Offered(_)
+        ));
+        let undo = operations.begin_undo().unwrap();
+        assert!(operations.begin_undo().is_none());
+
+        navigation.select(1).unwrap();
+        assert!(operations.start_trash(&navigation, &second_path).is_none());
+        assert!(operations.start_save(&navigation, &second_path).is_none());
+
+        operations.cancel_undo(&undo);
+        assert!(operations.start_trash(&navigation, &second_path).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn stale_filesystem_queries_are_rejected_and_released() {
         let path = PathBuf::from("a.jpg");
         let other = PathBuf::from("b.jpg");
@@ -3804,13 +4284,18 @@ mod tests {
             Some(FileSnapshot::new(
                 path,
                 std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(42, 123),
+                SnapshotKind::Regular,
             ))
         );
 
         info.set_file_type(gtk4::gio::FileType::Directory);
         assert_eq!(
             file_snapshot_from_info(PathBuf::from("dir.jpg"), &info),
-            None
+            Some(FileSnapshot::new(
+                PathBuf::from("dir.jpg"),
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(42, 123),
+                SnapshotKind::Other,
+            ))
         );
     }
 

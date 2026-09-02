@@ -103,7 +103,7 @@ Keep each rule in the module that owns it:
 | `viewer` | fit, zoom, pan, view rotation and source/view transforms for any paintable |
 | `player` | GStreamer setup, playback, seeking and stream selection |
 | `fileops` | trash, restore and rotate-save operations |
-| `window` | UI composition, folder-monitor adapters, displayed media state, overlays and typed actions |
+| `window` | UI composition, folder-monitor adapters, displayed media state, source-operation coordination, overlays and typed actions |
 | `log` | timed diagnostic messages outside rendering paths |
 
 `folder` must stay independent of GTK and GIO so Viewer and Explorer can share
