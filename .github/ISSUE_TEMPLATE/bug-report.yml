@@ -1,0 +1,83 @@
+name: Bug report
+description: Tell us about something that does not work as expected.
+title: ""
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve open-mpv.
+
+        For problems opening or playing media, read the [troubleshooting guide](https://github.com/TheRealShek/open-mpv/blob/main/docs/TROUBLESHOOTING.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Tell us what you did and what went wrong.
+      placeholder: I opened a video, but the window stayed blank.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: Tell us what you expected open-mpv to do.
+      placeholder: The video should have started playing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can we reproduce it?
+      description: Give us the shortest steps that show the problem.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Media details
+      description: Say whether this was an image or video and include its file format. Do not share private media.
+      placeholder: MP4 video using H.264
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: System details
+      description: Include what you know. Hardware details matter mainly for display or video problems.
+      placeholder: |
+        open-mpv version:
+        Installed from: release RPM, source, or another method
+        Fedora version:
+        GNOME version:
+        Session: Wayland or another session
+        Hardware details, if relevant:
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant diagnostics
+      description: Paste only the messages related to the problem. Remove private paths or other sensitive information first.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Add screenshots, safe sample files, or other details that may help.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched for an existing issue about this problem.
+          required: true
