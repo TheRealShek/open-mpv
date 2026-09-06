@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for helping improve open-mpv.
 
-        Search the existing issues first. For problems opening or playing media, also read the [troubleshooting guide](https://github.com/TheRealShek/open-mpv/blob/main/docs/TROUBLESHOOTING.md).
+        For problems opening or playing media, read the [troubleshooting guide](https://github.com/TheRealShek/open-mpv/blob/main/docs/TROUBLESHOOTING.md).
 
   - type: textarea
     id: what-happened

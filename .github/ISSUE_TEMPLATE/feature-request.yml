@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for sharing your idea.
 
-        Search the existing issues first. For large changes, read the [product direction](https://github.com/TheRealShek/open-mpv/blob/main/CONTEXT.md) so you know what open-mpv is trying to become.
+        For large changes, read the [product direction](https://github.com/TheRealShek/open-mpv/blob/main/CONTEXT.md) so you know what open-mpv is trying to become.
 
   - type: textarea
     id: problem

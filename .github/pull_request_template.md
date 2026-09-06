@@ -15,7 +15,7 @@ Omit the issue number when there is no related issue.
 <!-- List each automated or manual check and its result. If none ran, write "Not run" and explain why. -->
 
 **Issue:**
-<!-- Use "Fixes #123" only when this PR fully resolves the issue and targets main. Use "Related to #123" for partial or related work. Write "None" when there is no issue. -->
+<!-- Use "Fixes #123" only when this PR fully resolves the issue and targets main. Use "Related to #123" for partial or related work. Remove this section when there is no issue. -->
 
 **Note:**
-<!-- Add only design choices, tradeoffs, risks, or other details the reviewer needs. Write "None" when there is nothing to add. -->
+<!-- Add only design choices, tradeoffs, risks, or other details the reviewer needs. Remove this section when there is nothing to add. -->
