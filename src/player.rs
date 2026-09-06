@@ -9,9 +9,10 @@
 //! NFR-2.1). The pipeline is reused across videos; `stop` drops it to
 //! `Null`, freeing decoder state while an image is shown.
 //!
-//! Private child modules own decoder policy, focused playback state, and
-//! stream choices. `Player` remains the window-facing adapter and keeps
-//! pipeline effects, lazy initialization and paintable ownership here.
+//! Private child modules own decoder policy, the focused playback model, and
+//! window-facing track values. `FocusedPlayback` owns the complete active
+//! session, including stream selection and sidecar recovery, while `Player`
+//! remains the window-facing and GStreamer-effects adapter.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -38,8 +39,8 @@ pub use playback::PlaybackRateError;
 use playback::{FocusedPlayback, ResumeAction, SeekRequest, issue_seek, same_rate};
 #[allow(unused_imports)]
 pub use tracks::AudioTrack;
+use tracks::matching_sidecar;
 pub use tracks::{AudioChoice, AudioSnapshot, SubtitleChoice, SubtitleSnapshot, SubtitleTrack};
-use tracks::{StreamState, matching_sidecar};
 
 const VOLUME_MAX: f64 = 1.5;
 pub const PLAYBACK_RATES: &[f64] = &[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
@@ -119,7 +120,6 @@ pub struct Player {
     seek_target: gst::Element,
     paintable: gdk::Paintable,
     playback: Rc<RefCell<FocusedPlayback>>,
-    streams: Rc<RefCell<StreamState>>,
     pitch_preserving: bool,
     subtitles_default_on: Cell<bool>,
     decoder_fallback: Arc<Mutex<DecoderFallback>>,
@@ -159,7 +159,6 @@ impl Player {
         };
 
         let playback = Rc::new(RefCell::new(FocusedPlayback::default()));
-        let streams = Rc::new(RefCell::new(StreamState::default()));
         let decoder_fallback = Arc::new(Mutex::new(DecoderFallback::default()));
         playbin.connect_closure(
             "element-setup",
@@ -233,7 +232,6 @@ impl Player {
                 let playbin = playbin.clone();
                 let seek_target = sink.clone();
                 let playback = playback.clone();
-                let streams = streams.clone();
                 let decoder_fallback = decoder_fallback.clone();
                 let on_event = on_event.clone();
                 move |_bus, msg| {
@@ -247,10 +245,7 @@ impl Player {
                                 e.debug()
                             );
                             lock_decoder_fallback(&decoder_fallback).restore();
-                            let external = streams.borrow().external().map(Path::to_path_buf);
-                            let Some(error_context) =
-                                playback.borrow_mut().begin_error(external)
-                            else {
+                            let Some(error_context) = playback.borrow_mut().begin_error() else {
                                 crate::applog!(
                                     "player: ignoring error queued behind pending recovery"
                                 );
@@ -259,24 +254,20 @@ impl Player {
                             let error = e.error();
                             let playbin = playbin.clone();
                             let playback = playback.clone();
-                            let streams = streams.clone();
                             let on_event = on_event.clone();
                             // Returning from the bus watch before changing
                             // state is mandatory: tearing a failed pipeline
                             // down from inside its Error callback can wait on
                             // the streaming thread that posted this message.
                             glib::idle_add_local_once(move || {
-                                let still_current = playback.borrow().error_is_current(
-                                    &error_context,
-                                    streams.borrow().external(),
-                                );
+                                let still_current =
+                                    playback.borrow().error_is_current(&error_context);
                                 if !still_current {
                                     crate::applog!("player: stale pipeline error superseded");
                                     playback.borrow_mut().finish_error(&error_context);
                                     return;
                                 }
-                                let recovered =
-                                    recover_without_external(&playbin, &playback, &streams);
+                                let recovered = recover_without_external(&playbin, &playback);
                                 playback.borrow_mut().finish_error(&error_context);
                                 if recovered {
                                     on_event(Event::SubtitleError(error.to_string()));
@@ -289,17 +280,11 @@ impl Player {
                             let structure = e.structure();
                             if let Some(description) = structure.and_then(missing_video_decoder) {
                                 crate::applog!("player: missing video decoder: {description}");
-                                let context = playback.borrow().context(
-                                    streams.borrow().external().map(Path::to_path_buf),
-                                );
+                                let context = playback.borrow().context();
                                 let playback = playback.clone();
-                                let streams = streams.clone();
                                 let on_event = on_event.clone();
                                 glib::idle_add_local_once(move || {
-                                    if playback
-                                        .borrow()
-                                        .error_is_current(&context, streams.borrow().external())
-                                    {
+                                    if playback.borrow().error_is_current(&context) {
                                         on_event(Event::MissingVideoDecoder(description));
                                     }
                                 });
@@ -366,15 +351,11 @@ impl Player {
                             // The seek landed: real positions are truthful
                             // again, and the newest scrub position that piled
                             // up behind it can go out now.
-                            let next = {
-                                playback.borrow_mut().finish_seek()
-                            };
+                            let next = { playback.borrow_mut().finish_seek() };
                             if let Some(request) = next {
                                 let rate_change =
                                     !same_rate(request.rate(), playback.borrow().accepted_rate());
-                                if !issue_seek(&seek_target, &playback, request)
-                                    && rate_change
-                                {
+                                if !issue_seek(&seek_target, &playback, request) && rate_change {
                                     on_event(Event::PlaybackRateError(
                                         PlaybackRateError::SeekRefused,
                                     ));
@@ -383,25 +364,26 @@ impl Player {
                         }
                         gst::MessageView::StreamCollection(message) => {
                             let collection = message.stream_collection();
-                            let should_apply = streams.borrow_mut().replace_collection(collection);
-                            let (audio_count, subtitle_count) = streams.borrow().track_counts();
+                            let update =
+                                playback.borrow_mut().observe_stream_collection(collection);
                             crate::applog!(
-                                "player: discovered {audio_count} audio and {subtitle_count} subtitle track(s)"
+                                "player: discovered {} audio and {} subtitle track(s)",
+                                update.audio_count,
+                                update.subtitle_count
                             );
-                            if should_apply {
-                                apply_stream_choices(&playbin, &streams, None, None);
+                            if let Some(selection) = update.selection {
+                                send_stream_selection(&playbin, &selection);
                             }
-                            let (audio, subtitles) = streams.borrow().snapshots();
-                            on_event(Event::AudioChanged(audio));
-                            on_event(Event::SubtitlesChanged(subtitles));
+                            on_event(Event::AudioChanged(update.audio));
+                            on_event(Event::SubtitlesChanged(update.subtitles));
                         }
                         gst::MessageView::StreamsSelected(message) => {
                             let selected = message
                                 .streams()
                                 .filter_map(|stream| stream.stream_id().map(|id| id.to_string()))
                                 .collect();
-                            streams.borrow_mut().select(selected);
-                            let (audio, subtitles) = streams.borrow().snapshots();
+                            let (audio, subtitles) =
+                                playback.borrow_mut().observe_streams_selected(selected);
                             on_event(Event::AudioChanged(audio));
                             on_event(Event::SubtitlesChanged(subtitles));
                         }
@@ -420,7 +402,6 @@ impl Player {
             seek_target: sink,
             paintable,
             playback,
-            streams,
             pitch_preserving,
             subtitles_default_on: Cell::new(true),
             decoder_fallback,
@@ -433,7 +414,7 @@ impl Player {
     }
 
     pub fn has_external_subtitle(&self) -> bool {
-        self.streams.borrow().external().is_some()
+        self.playback.borrow().has_external_subtitle()
     }
 
     pub fn path_has_sidecar(path: &Path) -> bool {
@@ -451,11 +432,9 @@ impl Player {
         let suburi = subtitle.as_deref().map(file_uri).transpose()?;
         let _ = teardown_pipeline(&self.playbin);
         lock_decoder_fallback(&self.decoder_fallback).restore();
-        self.playback.borrow_mut().start_video(path);
-        let mut streams = self.streams.borrow_mut();
-        *streams = StreamState::new(self.subtitles_default_on.get());
-        streams.set_external(subtitle);
-        drop(streams);
+        self.playback
+            .borrow_mut()
+            .start_video(path, subtitle, self.subtitles_default_on.get());
         configure_uris(&self.playbin, &uri, suburi.as_deref());
         self.playbin
             .set_state(gst::State::Playing)
@@ -484,8 +463,9 @@ impl Player {
     /// video never reports the previous one's duration or seek target.
     fn forget_stream(&self) {
         lock_decoder_fallback(&self.decoder_fallback).restore();
-        self.playback.borrow_mut().reset();
-        *self.streams.borrow_mut() = StreamState::new(self.subtitles_default_on.get());
+        self.playback
+            .borrow_mut()
+            .reset(self.subtitles_default_on.get());
     }
 
     /// Set the initial subtitle policy applied independently to every
@@ -493,7 +473,7 @@ impl Player {
     pub fn set_subtitles_default(&self, enabled: bool) {
         self.subtitles_default_on.set(enabled);
         if self.playback.borrow().current_video().is_none() {
-            self.streams.borrow_mut().set_default_subtitles(enabled);
+            self.playback.borrow_mut().set_default_subtitles(enabled);
         }
     }
 
@@ -515,14 +495,14 @@ impl Player {
                 path: path.to_path_buf(),
                 source: io::Error::new(io::ErrorKind::InvalidInput, "no video is playing"),
             })?;
-        let already_attached = self.streams.borrow().external() == Some(path);
+        let already_attached = self.playback.borrow().external_subtitle() == Some(path);
         if already_attached {
             crate::applog!(
                 "player: subtitle {} already attached; selecting existing track",
                 path.display()
             );
             if !self.choose_subtitle(SubtitleChoice::Automatic) {
-                self.streams.borrow_mut().reset_subtitle_choice();
+                self.playback.borrow_mut().reset_subtitle_choice();
             }
             return Ok(());
         }
@@ -555,17 +535,17 @@ impl Player {
         })?;
         crate::applog!("player: subtitle rebuild reached null");
         lock_decoder_fallback(&self.decoder_fallback).restore();
-        self.playback
-            .borrow_mut()
-            .prepare_subtitle_rebuild(position, rate, play_after_seek);
-        self.streams
-            .borrow_mut()
-            .reset_for_subtitle_rebuild(Some(path.to_path_buf()));
+        self.playback.borrow_mut().prepare_subtitle_rebuild(
+            position,
+            rate,
+            play_after_seek,
+            Some(path.to_path_buf()),
+        );
         configure_uris(&self.playbin, &uri, Some(&suburi));
         crate::applog!("player: attached subtitle {}", path.display());
         if let Err(source) = self.playbin.set_state(gst::State::Playing) {
             self.playback.borrow_mut().cancel_resume();
-            let _ = recover_without_external(&self.playbin, &self.playback, &self.streams);
+            let _ = recover_without_external(&self.playbin, &self.playback);
             return Err(PlayerError::Playback {
                 path: video,
                 source,
@@ -575,51 +555,49 @@ impl Player {
     }
 
     pub fn subtitle_snapshot(&self) -> SubtitleSnapshot {
-        self.streams.borrow().subtitle_snapshot()
+        self.playback.borrow().subtitle_snapshot()
     }
 
     pub fn audio_snapshot(&self) -> AudioSnapshot {
-        self.streams.borrow().audio_snapshot()
+        self.playback.borrow().audio_snapshot()
     }
 
     pub fn choose_audio(&self, choice: AudioChoice) -> bool {
-        if !self.streams.borrow().audio_choice_available(&choice) {
+        let Some(selection) = self.playback.borrow().requested_audio_choice(&choice) else {
             return false;
-        }
-        let sent = apply_stream_choices(&self.playbin, &self.streams, Some(&choice), None);
+        };
+        let sent = send_stream_selection(&self.playbin, &selection);
         if sent {
             crate::applog!("player: audio selection {}", choice.action_target());
-            self.streams.borrow_mut().set_audio_choice(choice);
+            self.playback.borrow_mut().set_audio_choice(choice);
         }
         sent
     }
 
     pub fn choose_subtitle(&self, choice: SubtitleChoice) -> bool {
-        if !self.streams.borrow().subtitle_choice_available(&choice) {
+        let Some(selection) = self.playback.borrow().requested_subtitle_choice(&choice) else {
             return false;
-        }
-        let sent = apply_stream_choices(&self.playbin, &self.streams, None, Some(&choice));
+        };
+        let sent = send_stream_selection(&self.playbin, &selection);
         if sent {
             crate::applog!("player: subtitle selection {}", choice.action_target());
-            self.streams.borrow_mut().set_subtitle_choice(choice);
+            self.playback.borrow_mut().set_subtitle_choice(choice);
         }
         sent
     }
 
     pub fn toggle_subtitles(&self) -> SubtitleSnapshot {
-        if !self.streams.borrow().has_subtitles() {
+        let Some(choice) = self.playback.borrow().subtitle_toggle_choice() else {
             return self.subtitle_snapshot();
-        }
-        let choice = self.streams.borrow().toggled_subtitle_choice();
+        };
         self.choose_subtitle(choice);
         self.subtitle_snapshot()
     }
 
     pub fn cycle_subtitles(&self) -> SubtitleSnapshot {
-        if !self.streams.borrow().has_subtitles() {
+        let Some(choice) = self.playback.borrow().subtitle_cycle_choice() else {
             return self.subtitle_snapshot();
-        }
-        let choice = self.streams.borrow().cycled_subtitle_choice();
+        };
         self.choose_subtitle(choice);
         self.subtitle_snapshot()
     }
@@ -803,15 +781,7 @@ fn configure_uris(playbin: &gst::Element, uri: &str, suburi: Option<&str>) {
     playbin.set_property("suburi", suburi);
 }
 
-fn apply_stream_choices(
-    playbin: &gst::Element,
-    streams: &RefCell<StreamState>,
-    audio_request: Option<&AudioChoice>,
-    subtitle_request: Option<&SubtitleChoice>,
-) -> bool {
-    let selected = streams
-        .borrow()
-        .selection_ids(audio_request, subtitle_request);
+fn send_stream_selection(playbin: &gst::Element, selected: &[String]) -> bool {
     if selected.is_empty() {
         return false;
     }
@@ -842,12 +812,8 @@ fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError
 /// only that auxiliary URI and asynchronously restore the video. The external
 /// marker is cleared before retrying, so a genuine video failure on the retry
 /// follows the normal fatal path instead of looping (FR-10.7).
-fn recover_without_external(
-    playbin: &gst::Element,
-    playback: &RefCell<FocusedPlayback>,
-    streams: &RefCell<StreamState>,
-) -> bool {
-    if streams.borrow().external().is_none() {
+fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPlayback>) -> bool {
+    if !playback.borrow().has_external_subtitle() {
         return false;
     }
     let Some(video) = playback.borrow().current_video().map(Path::to_path_buf) else {
@@ -869,8 +835,7 @@ fn recover_without_external(
     }
     playback
         .borrow_mut()
-        .prepare_subtitle_rebuild(position, rate, play_after_seek);
-    streams.borrow_mut().reset_for_subtitle_rebuild(None);
+        .prepare_subtitle_rebuild(position, rate, play_after_seek, None);
     configure_uris(playbin, &uri, None);
     if playbin.set_state(gst::State::Playing).is_err() {
         playback.borrow_mut().cancel_resume();
