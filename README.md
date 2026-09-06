@@ -7,7 +7,13 @@ filling the window with controls.
 > **Current support:** Fedora 44 Workstation, GNOME, Wayland and x86-64. Other
 > Linux distributions and desktop environments are not supported yet.
 
-![open-mpv showing a photo with its controls visible](docs/assets/open-mpv.webp)
+<p align="center">
+  <img
+    src="docs/assets/open-mpv.webp"
+    alt="open-mpv showing a photo with its controls visible"
+    width="760"
+  >
+</p>
 
 ## Install on Fedora 44
 
