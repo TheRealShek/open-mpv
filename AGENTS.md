@@ -229,6 +229,8 @@ or the user asks.
 
 ## Git and releases
 
+Use the templates in `.github` when writing issues and pull requests.
+
 Do not commit, push, open a pull request, merge or publish a release unless the
 user asks. Never overwrite unrelated work in a dirty worktree. `main` is
 protected; requested GitHub work uses a focused branch and the required CI.

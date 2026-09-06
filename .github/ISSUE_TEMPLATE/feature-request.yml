@@ -1,0 +1,47 @@
+name: Feature request
+description: Suggest a useful change to open-mpv.
+title: ""
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your idea.
+
+        Search the existing issues first. For large changes, read the [product direction](https://github.com/TheRealShek/open-mpv/blob/main/CONTEXT.md) so you know what open-mpv is trying to become.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Explain what is difficult today and why it matters.
+      placeholder: I often need to ... but currently ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: change
+    attributes:
+      label: What should open-mpv do?
+      description: Describe the result you want. A simple example is welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Is there another way to solve it?
+      description: Tell us about any workaround or other approach you considered.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Add examples, screenshots, or other details that may help.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched for an existing issue about this idea.
+          required: true
