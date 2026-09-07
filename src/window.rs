@@ -1,6 +1,7 @@
 //! Workspace/UI orchestration: displayed-media state, source operations,
 //! overlays, and the single typed action layer every input goes through.
-//! Private child modules own widget assembly and folder-monitor adaptation.
+//! Private child modules own widget assembly, folder-monitor adaptation,
+//! and the image-animation playback gate.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +30,7 @@ use crate::player::{
 use crate::viewer::ImageView;
 
 mod action;
+mod animation;
 mod assembly;
 mod monitor;
 mod operation;
@@ -106,10 +108,6 @@ impl MediaState {
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_TIMEOUT: Duration = Duration::from_millis(1200);
 const SVG_DEBOUNCE: Duration = Duration::from_millis(200);
-/// How often a paused animation re-checks whether its window came back.
-/// Long enough to cost nothing, short enough that restoring a window
-/// does not visibly stall the picture.
-const SUSPENDED_POLL: Duration = Duration::from_millis(500);
 
 pub struct App {
     pub win: gtk::ApplicationWindow,
@@ -119,6 +117,8 @@ pub struct App {
     monitor: RefCell<Option<gio::FileMonitor>>,
     fs_queries: RefCell<FsQueryVersions>,
     media: RefCell<MediaState>,
+    animation: RefCell<Option<Rc<animation::Playback>>>,
+    animation_btn: gtk::Button,
     cache: loader::Cache,
     editable_mimes: RefCell<BTreeSet<String>>,
     /// Created on the first video (lazy GStreamer init, NFR-1.1) and
@@ -374,6 +374,7 @@ impl App {
     }
 
     fn show_destination(self: &Rc<Self>, destination: Destination, arrival: Arrival) {
+        self.stop_animation();
         if self.view.cancel_markup() {
             self.update_cursor();
         }
@@ -577,6 +578,7 @@ impl App {
         // sources, then prevent monitors and timers from scheduling more UI
         // work while the close request proceeds.
         self.navigation.borrow_mut().supersede();
+        self.stop_animation();
         self.monitor.borrow_mut().take();
         self.fs_queries.borrow_mut().cancel_all();
         self.chrome_timer.cancel();
@@ -961,6 +963,22 @@ impl App {
 
         self.normal_controls.set_visible(!marking);
         self.photo_controls.set_visible(photo && !marking);
+        let animation = self.animation.borrow();
+        self.animation_btn
+            .set_visible(animation.is_some() && !marking);
+        if let Some(playback) = animation.as_ref() {
+            self.animation_btn.set_icon_name(if playback.paused() {
+                "media-playback-start-symbolic"
+            } else {
+                "media-playback-pause-symbolic"
+            });
+            self.animation_btn
+                .set_tooltip_text(Some(if playback.paused() {
+                    "Resume animation"
+                } else {
+                    "Pause animation"
+                }));
+        }
         self.transport.set_visible(video && !marking);
         self.subtitle_btn.set_visible(video && !marking);
         self.markup_btn.set_visible(markup_available);
@@ -1121,6 +1139,11 @@ impl App {
             decoded: decoded.clone(),
             mime,
         };
+        if matches!(&*decoded, Decoded::Animated { .. }) {
+            let playback = Rc::new(animation::Playback::default());
+            playback.suspend(self.win.is_suspended());
+            *self.animation.borrow_mut() = Some(playback);
+        }
         self.update_control_mode();
         let texture = decoded.first_texture();
         let size = match &*decoded {
@@ -1140,21 +1163,18 @@ impl App {
         self.maybe_first_present(size);
     }
 
-    /// Play an animated image.
-    ///
-    /// Every frame costs an IPC round trip to the sandboxed loader plus a
-    /// texture upload — around 3 % of a core even for a small GIF — and a
-    /// bare timer goes on paying that whether or not the result can be
-    /// seen. `is_suspended` is GTK's answer to exactly that question:
-    /// minimised, fully obscured, or on another workspace. Idling there
-    /// costs one wake-up every `SUSPENDED_POLL` instead.
-    ///
-    /// The frame clock would also stall while hidden, but driving from it
-    /// means ticking at the display's refresh rate rather than the GIF's:
-    /// measured on this machine that traded 1.1 % while hidden for an
-    /// extra 0.6 % every time an animation *is* on screen, which is the
-    /// case that actually happens.
+    fn stop_animation(&self) {
+        if let Some(playback) = self.animation.borrow_mut().take() {
+            playback.stop();
+        }
+    }
+
+    /// Gate both decode and presentation: pausing during an in-flight decode
+    /// retains that result until resume, without advancing the displayed frame.
     fn spawn_animation(self: &Rc<Self>, decoded: Rc<Decoded>, generation: u64) {
+        let Some(playback) = self.animation.borrow().clone() else {
+            return;
+        };
         glib::spawn_future_local(clone!(
             #[strong(rename_to = app)]
             self,
@@ -1163,26 +1183,32 @@ impl App {
                     return;
                 };
                 loop {
-                    // Hold the current frame rather than animate to a
-                    // surface nobody is looking at.
-                    while app.win.is_suspended() {
-                        glib::timeout_future(SUSPENDED_POLL).await;
-                        if !app.navigation.borrow().is_current_generation(generation) {
+                    if !playback.ready().await
+                        || !app.navigation.borrow().is_current_generation(generation)
+                    {
+                        return;
+                    }
+                    let result = image.next_frame().await;
+                    if !app.navigation.borrow().is_current_generation(generation) {
+                        return;
+                    }
+                    let frame = match result {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            if let Some(path) = app.current_path() {
+                                app.show_error(&path, &error.to_string());
+                            }
                             return;
                         }
-                    }
-                    let Ok(frame) = image.next_frame().await else {
-                        break;
                     };
-                    if !app.navigation.borrow().is_current_generation(generation) {
-                        break;
+                    if !playback.ready().await
+                        || !app.navigation.borrow().is_current_generation(generation)
+                    {
+                        return;
                     }
                     app.view.update_texture(frame.texture());
                     let delay = frame.delay().unwrap_or(Duration::from_millis(100));
                     glib::timeout_future(delay).await;
-                    if !app.navigation.borrow().is_current_generation(generation) {
-                        break;
-                    }
                 }
             }
         ));
@@ -1282,6 +1308,7 @@ impl App {
     fn clear_media(&self) {
         self.pending_media_size.set(None);
         self.navigation.borrow_mut().supersede();
+        self.stop_animation();
         self.stop_video();
         self.view.clear();
         *self.media.borrow_mut() = MediaState::Empty;
@@ -1911,6 +1938,9 @@ impl App {
         let media = match &*self.media.borrow() {
             MediaState::Empty => Media::Empty,
             MediaState::Loading(_) => Media::Loading,
+            MediaState::Image { decoded, .. } if matches!(&**decoded, Decoded::Animated { .. }) => {
+                Media::AnimatedImage
+            }
             MediaState::Image { decoded, .. } => Media::Image {
                 markup_available: matches!(&**decoded, Decoded::Static { .. }),
             },
@@ -1988,6 +2018,13 @@ impl App {
             Command::Previous => self.navigate(Direction::Previous),
             Command::First => self.show_index(0, Arrival::Direct),
             Command::Last => self.show_index(self.navigation.borrow().len() - 1, Arrival::Direct),
+            Command::ToggleAnimation => {
+                if let Some(playback) = self.animation.borrow().as_ref() {
+                    playback.toggle();
+                    self.flash(if playback.paused() { "Paused" } else { "Play" });
+                }
+                self.update_control_mode();
+            }
             Command::TogglePlayback => match self.with_video(Player::toggle_pause) {
                 Some(true) => {
                     self.set_idle_inhibited(true);
