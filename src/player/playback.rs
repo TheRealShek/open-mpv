@@ -34,7 +34,7 @@ impl fmt::Display for PlaybackRateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PlaybackRateError::PitchFilterUnavailable => {
-                f.write_str("playback speed requires the GStreamer scaletempo plugin")
+                f.write_str("Changing playback speed requires an additional audio component. Check the video packages listed in Troubleshooting.")
             }
             PlaybackRateError::PositionUnavailable => {
                 f.write_str("playback speed is not ready yet")

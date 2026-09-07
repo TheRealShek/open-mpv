@@ -82,7 +82,7 @@ current folder.
 
 | Setting | Default | Use it when | Values and effect |
 | --- | --- | --- | --- |
-| `overlay-timeout` | `2.0` | Controls disappear too quickly or stay visible too long. | Seconds after the last pointer activity. Use `0.2` or more; smaller non-negative values are treated as `0.2`. |
+| `overlay-timeout` | `2.0` | Controls disappear too quickly or stay visible too long. | Finite seconds from `0` to `4294967.295` after the last pointer activity (the GLib timer limit). Values below `0.2` are treated as `0.2`; invalid values warn and retain the previous value or default. |
 | `hide-cursor` | `yes` | You want the pointer to remain visible after the controls fade. | `yes` hides it with the controls; `no` leaves it visible. Moving the pointer shows the controls again. |
 
 ### Video defaults

@@ -45,3 +45,39 @@ For video, the diagnostics include the encoded stream and selected decoder,
 including whether GStreamer classifies it as hardware or software. When
 reporting a playback problem, include the relevant log lines, the media format
 and the installed decoder reported by `gst-inspect-1.0`.
+
+## Configuration and folder changes
+
+A missing optional configuration file uses defaults. If the file cannot be read
+(including invalid UTF-8), stderr reports its path and the actual cause, then
+uses defaults. Invalid settings warn and retain the previous value or default;
+see [Configuration](CONFIGURATION.md) for the supported timeout range.
+
+Folder-monitor creation and changed-file query failures include the operation,
+path and cause in stderr. Cancellation and files disappearing during a query
+are expected and stay quiet. If monitoring cannot start, reopen the folder to
+refresh its contents after external changes.
+
+## Unexpected crashes
+
+For a reproducible panic, build the affected source revision with debug symbols:
+
+```sh
+cargo build --profile diagnostic --locked
+RUST_BACKTRACE=1 ./target/diagnostic/open-mpv /path/to/media
+```
+
+Close any running open-mpv first so the single-instance request reaches this
+build. The diagnostic profile keeps release optimization but retains Rust debug
+information and symbols. A panic backtrace should include application function
+names and source lines. Use `RUST_BACKTRACE=full` for the unabridged stack. Keep
+the exact binary, source revision and log together; paths in logs may be private.
+
+Ordinary returned errors do not unwind the stack. `RUST_BACKTRACE` does not add
+backtraces to them: their typed causes and operation context are reported in
+stderr. Expected configuration, decoder and file failures do not capture stacks.
+Native crashes are different again; inspect a retained diagnostic build with
+`coredumpctl debug` when the system captured a core. Native library frames may
+also need the matching Fedora debuginfo packages.
+
+See [Distribution](DISTRIBUTION.md#diagnostic-builds) for the symbol policy.

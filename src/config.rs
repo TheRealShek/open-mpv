@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
@@ -52,7 +53,7 @@ pub struct Config {
     pub subtitles: SubtitleMode,
     pub fit: FitMode,
     /// Seconds of mouse inactivity before overlay controls fade out.
-    pub overlay_timeout: f64,
+    pub overlay_timeout: Duration,
     /// Hide the pointer along with the overlay controls, the way mpv
     /// does. Any pointer movement brings both back.
     pub hide_cursor: bool,
@@ -78,7 +79,7 @@ impl Default for Config {
             volume: 1.0,
             subtitles: SubtitleMode::Auto,
             fit: FitMode::Fit,
-            overlay_timeout: 2.0,
+            overlay_timeout: Duration::from_secs(2),
             hide_cursor: true,
             cache_budget_mb: 256,
             binds: BTreeMap::new(),
@@ -90,7 +91,11 @@ impl Config {
     /// Load from the default path, falling back to defaults if absent.
     pub fn load() -> Config {
         let path = gtk4::glib::user_config_dir().join("open-mpv/open-mpv.conf");
-        match std::fs::read_to_string(&path) {
+        Self::load_path(&path)
+    }
+
+    fn load_path(path: &Path) -> Config {
+        match std::fs::read_to_string(path) {
             Ok(text) => {
                 let cfg = Config::parse(&text, &path.display().to_string());
                 crate::applog!(
@@ -100,8 +105,15 @@ impl Config {
                 );
                 cfg
             }
-            Err(_) => {
-                crate::applog!("config: {} absent, using defaults", path.display());
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    crate::applog!("config: {} absent, using defaults", path.display());
+                } else {
+                    eprintln!(
+                        "open-mpv: cannot read config {}: {error}; using defaults",
+                        path.display()
+                    );
+                }
                 Config::default()
             }
         }
@@ -156,9 +168,14 @@ impl Config {
                     "actual" => cfg.fit = FitMode::Actual,
                     _ => warn(origin, lineno, raw, "fit must be fit|actual"),
                 },
-                "overlay-timeout" => match value.parse::<f64>() {
-                    Ok(t) if t >= 0.0 => cfg.overlay_timeout = t,
-                    _ => warn(origin, lineno, raw, "overlay-timeout must be seconds"),
+                "overlay-timeout" => match value.parse::<f64>().ok().and_then(overlay_duration) {
+                    Some(duration) => cfg.overlay_timeout = duration,
+                    _ => warn(
+                        origin,
+                        lineno,
+                        raw,
+                        "overlay-timeout must be finite seconds from 0 to 4294967.295",
+                    ),
                 },
                 "hide-cursor" => match parse_bool(value) {
                     Some(b) => cfg.hide_cursor = b,
@@ -249,9 +266,57 @@ fn has_extension(path: &Path, extensions: &[&str]) -> bool {
         })
 }
 
+/// GLib's timeout interval is an unsigned 32-bit count of milliseconds.
+fn overlay_duration(seconds: f64) -> Option<Duration> {
+    let duration = Duration::try_from_secs_f64(seconds).ok()?;
+    (duration <= Duration::from_millis(u64::from(u32::MAX)))
+        .then_some(duration.max(Duration::from_millis(200)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_timeout_rejects_values_outside_the_timer_range() {
+        for value in ["inf", "-inf", "1e100", "NaN", "-1", "4294967.296"] {
+            let cfg = Config::parse(&format!("overlay-timeout={value}"), "test");
+            assert_eq!(cfg.overlay_timeout, Duration::from_secs(2), "{value}");
+        }
+        for (value, expected) in [
+            ("0", 200),
+            ("0.1", 200),
+            ("0.2", 200),
+            ("1.5", 1500),
+            ("4294967.295", u64::from(u32::MAX)),
+        ] {
+            let cfg = Config::parse(&format!("overlay-timeout={value}"), "test");
+            assert_eq!(
+                cfg.overlay_timeout,
+                Duration::from_millis(expected),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_and_non_utf8_config_keep_safe_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("open-mpv.conf");
+        assert_eq!(
+            Config::load_path(&path).overlay_timeout,
+            Duration::from_secs(2)
+        );
+        std::fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            Config::load_path(&path).overlay_timeout,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            Config::load_path(dir.path()).overlay_timeout,
+            Duration::from_secs(2)
+        );
+    }
 
     #[test]
     fn defaults_on_empty() {
@@ -261,7 +326,7 @@ mod tests {
         assert!(!c.sort.reverse);
         assert!(!c.wrap);
         assert_eq!(c.fit, FitMode::Fit);
-        assert_eq!(c.overlay_timeout, 2.0);
+        assert_eq!(c.overlay_timeout, Duration::from_secs(2));
         assert_eq!(c.cache_budget_mb, 256);
         assert_eq!(c.subtitles, SubtitleMode::Auto);
         assert!(c.binds.is_empty());
@@ -276,7 +341,7 @@ mod tests {
         assert_eq!(c.sort.order, SortOrder::Date);
         assert!(c.wrap);
         assert_eq!(c.fit, FitMode::Actual);
-        assert_eq!(c.overlay_timeout, 1.5);
+        assert_eq!(c.overlay_timeout, Duration::from_millis(1500));
         assert!(c.sort.reverse);
         assert!(!c.hide_cursor);
         assert!(!c.loop_video);
@@ -304,7 +369,7 @@ mod tests {
         assert_eq!(c.subtitles, SubtitleMode::Off);
         assert!(!c.sort.reverse);
         assert!(!c.wrap);
-        assert_eq!(c.overlay_timeout, 2.0);
+        assert_eq!(c.overlay_timeout, Duration::from_secs(2));
         assert!(c.hide_cursor);
         assert!(!c.start_fullscreen);
         assert!(c.loop_video);

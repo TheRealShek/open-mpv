@@ -195,11 +195,20 @@ impl App {
                 #[strong(rename_to = app)]
                 self,
                 move |result| {
-                    let snapshot = result
-                        .ok()
-                        .and_then(|info| file_snapshot_from_info(snapshot_path, &info));
                     let current = app.fs_queries.borrow_mut().finish(&paths, version);
                     let same_set = app.navigation.borrow().set_id() == Some(set);
+                    let snapshot = match snapshot_from_query(snapshot_path.clone(), result) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            if !error.matches(gio::IOErrorEnum::Cancelled) {
+                                eprintln!(
+                                    "open-mpv: cannot query changed file {}: {error}",
+                                    snapshot_path.display()
+                                );
+                            }
+                            return;
+                        }
+                    };
                     if current && same_set && !app.shutting_down.get() {
                         apply(&app, snapshot);
                     }
@@ -307,6 +316,19 @@ fn apply_fs_change_for_set(
     (navigation.set_id() == Some(set)).then(|| apply_fs_change(navigation, change))
 }
 
+/// Disappearance is an ordinary monitor race. Other failures must not be
+/// applied as if metadata proved the file absent.
+fn snapshot_from_query(
+    path: PathBuf,
+    result: Result<gio::FileInfo, glib::Error>,
+) -> Result<Option<FileSnapshot>, glib::Error> {
+    match result {
+        Ok(info) => Ok(file_snapshot_from_info(path, &info)),
+        Err(error) if error.matches(gio::IOErrorEnum::NotFound) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +360,30 @@ mod tests {
         let mut navigation = Navigation::default();
         navigation.install(folder);
         (dir, navigation)
+    }
+
+    #[test]
+    fn failed_metadata_queries_are_not_applied_as_absent_files() {
+        let path = PathBuf::from("/tmp/media.png");
+        assert!(
+            snapshot_from_query(
+                path.clone(),
+                Err(glib::Error::new(gio::IOErrorEnum::NotFound, "gone"))
+            )
+            .unwrap()
+            .is_none()
+        );
+        for kind in [
+            gio::IOErrorEnum::Cancelled,
+            gio::IOErrorEnum::PermissionDenied,
+            gio::IOErrorEnum::Failed,
+        ] {
+            let error =
+                snapshot_from_query(path.clone(), Err(glib::Error::new(kind, "original cause")))
+                    .unwrap_err();
+            assert!(error.matches(kind));
+            assert_eq!(error.message(), "original cause");
+        }
     }
 
     #[test]

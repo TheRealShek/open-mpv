@@ -116,7 +116,7 @@ will not play, you may need additional codecs. The optional
 `gstreamer1-plugin-libav` package adds software decoding for more video formats.
 
 The [troubleshooting guide](docs/TROUBLESHOOTING.md) explains how to check
-video support and find useful error messages. If you opened the app from
+video support, understand configuration failures, and capture crash backtraces. If you opened the app from
 Files, you can read its logs with:
 
 ```sh

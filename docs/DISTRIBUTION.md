@@ -169,3 +169,19 @@ undermine the product; otherwise keep Fedora as the honest supported target.
 - [Flatpak repositories and updates](https://docs.flatpak.org/en/latest/repositories.html)
 - [Flathub submission requirements](https://docs.flathub.org/docs/for-app-authors/requirements)
 - [GLib application ID rules](https://docs.gtk.org/gio/type_func.Application.id_is_valid.html)
+
+## Diagnostic builds
+
+Normal release binaries and RPMs remain stripped; the RPM does not currently
+publish a debuginfo package. A backtrace from a stripped release may lack useful
+application frames and source locations. Do not substitute symbols from a
+separate build when analyzing an existing core.
+
+For reproduction, use the source revision matching the affected release and
+build the local `diagnostic` Cargo profile. It inherits release optimization,
+retains full debug information, and disables stripping. Keep that exact binary
+and source revision with any captured core or panic trace. Run it directly;
+do not pass it through the installer or RPM stripping step. This is a local
+diagnostic workflow, not a new distributed artifact or supported package.
+[The troubleshooting guide](TROUBLESHOOTING.md#unexpected-crashes) owns the
+commands and distinguishes panic backtraces from ordinary returned errors.
