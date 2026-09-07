@@ -47,7 +47,13 @@ glib::wrapper! {
     pub struct TestPipeline(ObjectSubclass<imp::TestPipeline>) @extends gst::Element, gst::Object;
 }
 
-fn with_player(test: impl FnOnce(Player, TestPipeline)) {
+impl TestPipeline {
+    pub(crate) fn refuse_transition(&self, transition: Option<gst::StateChange>) {
+        *self.imp().refuse.lock().unwrap() = transition;
+    }
+}
+
+pub(crate) fn with_player(test: impl FnOnce(Player, TestPipeline)) {
     gst::init().unwrap();
     let context = glib::MainContext::new();
     let _guard = context.acquire().unwrap();

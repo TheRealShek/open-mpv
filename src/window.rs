@@ -645,8 +645,23 @@ impl App {
                 self.flash(&format!("Subtitles: {name}"));
             }
             Err(error) => {
-                eprintln!("open-mpv: operation failed: {error}");
-                self.show_toast(&error::message(&error, "Could not add the subtitles."));
+                eprintln!("open-mpv: attaching subtitle {}: {error}", path.display());
+                if !player.has_video() {
+                    if let Some(video) = self.current_path() {
+                        self.show_error(
+                            &video,
+                            "Playback stopped while adding subtitles. Try opening the video again.",
+                        );
+                    }
+                } else {
+                    // Recovery may have removed the failed sidecar and reset
+                    // stream choices even though attaching it returned an error.
+                    self.update_subtitles(player.subtitle_snapshot());
+                    self.update_audio(player.audio_snapshot());
+                    self.update_playback_rate(player.playback_rate());
+                    self.set_idle_inhibited(player.is_playing());
+                    self.show_toast(&error::message(&error, "Could not add the subtitles."));
+                }
             }
         }
     }
@@ -2607,6 +2622,43 @@ mod tests {
         let mut navigation = Navigation::default();
         navigation.install(folder);
         (dir, navigation)
+    }
+
+    #[test]
+    #[ignore = "requires a GNOME/Wayland session; run with --ignored --exact"]
+    fn subtitle_failure_clears_video_controls_and_idle_inhibition() {
+        use super::*;
+        gtk::init().expect("GNOME/Wayland test requires GTK");
+        let gtk_app = gtk::Application::builder()
+            .application_id("io.github.TheRealShek.OpenMpv.FailureTest")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        gtk_app.register(gio::Cancellable::NONE).unwrap();
+        for transition in [
+            gstreamer::StateChange::ReadyToNull,
+            gstreamer::StateChange::PausedToPlaying,
+        ] {
+            crate::player::tests::with_player(|player, pipeline| {
+                let app = App::new(&gtk_app, Config::default());
+                let video = PathBuf::from("/tmp/open-mpv-failure-test.mp4");
+                player.play(&video).unwrap();
+                *app.media.borrow_mut() = MediaState::Video(video);
+                *app.player.borrow_mut() = Some(Rc::new(player));
+                app.set_idle_inhibited(true);
+                app.update_control_mode();
+                let subtitle = tempfile::Builder::new().suffix(".srt").tempfile().unwrap();
+                pipeline.refuse_transition(Some(transition));
+                app.attach_subtitle(subtitle.path());
+                assert!(matches!(&*app.media.borrow(), MediaState::Error(_)));
+                assert!(app.inhibit_cookie.get().is_none());
+                assert!(!app.is_video_showing());
+                assert!(!app.seek_bar.is_visible());
+                pipeline.refuse_transition(None);
+                gstreamer::prelude::ElementExt::set_state(&pipeline, gstreamer::State::Null)
+                    .unwrap();
+                app.win.close();
+            });
+        }
     }
 
     #[test]

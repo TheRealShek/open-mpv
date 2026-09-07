@@ -246,7 +246,16 @@ impl Player {
                 let on_event = on_event.clone();
                 move |_bus, msg| {
                     match msg.view() {
-                        gst::MessageView::Eos(_) => on_event(Event::EndOfStream),
+                        gst::MessageView::Eos(_) => {
+                            let context = playback.borrow().context();
+                            let playback = playback.clone();
+                            let on_event = on_event.clone();
+                            glib::idle_add_local_once(move || {
+                                if playback.borrow().error_is_current(&context) {
+                                    on_event(Event::EndOfStream);
+                                }
+                            });
+                        }
                         gst::MessageView::Error(e) => {
                             crate::applog!(
                                 "player: error from {:?}: {} ({:?})",
@@ -359,6 +368,11 @@ impl Player {
 
     pub fn paintable(&self) -> gdk::Paintable {
         self.paintable.clone()
+    }
+
+    /// Whether a media session survived setup or subtitle recovery.
+    pub fn has_video(&self) -> bool {
+        self.playback.borrow().current_video().is_some()
     }
 
     pub fn has_external_subtitle(&self) -> bool {
@@ -915,4 +929,4 @@ impl Drop for Player {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
