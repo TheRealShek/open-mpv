@@ -127,7 +127,9 @@ fn frame_bytes(decoded: &Decoded) -> usize {
 /// Tiny LRU keyed by path: current image plus pre-decoded neighbors.
 /// Bounded twice — by entry count and by estimated decoded bytes
 /// (NFR-2.1) — so a folder of 100 MP photos cannot triple its RAM the
-/// way it would with a count-only cap.
+/// way it would with a count-only cap. Pin changes and insertions enforce both
+/// limits without evicting the foreground entry. Speculative entries, including
+/// the newest, must fit the extra-memory budget; zero retains no neighbors.
 pub struct Cache {
     cap: usize,
     budget_bytes: usize,
@@ -148,9 +150,10 @@ struct Entry {
 }
 
 impl Cache {
+    /// Reserve at least one entry for the foreground image.
     pub fn new(cap: usize, budget_bytes: usize) -> Cache {
         Cache {
-            cap,
+            cap: cap.max(1),
             budget_bytes,
             entries: RefCell::new(VecDeque::new()),
             pinned: RefCell::new(None),
@@ -160,6 +163,7 @@ impl Cache {
     /// Mark `path` as the image on screen (see `pinned`).
     pub fn pin(&self, path: &Path) {
         *self.pinned.borrow_mut() = Some(path.to_path_buf());
+        self.evict(&mut self.entries.borrow_mut());
     }
 
     pub fn get(&self, path: &Path) -> Option<(Rc<Decoded>, String)> {
@@ -175,7 +179,14 @@ impl Cache {
         self.entries.borrow().iter().any(|e| e.path == path)
     }
 
-    pub fn put(&self, path: PathBuf, decoded: Rc<Decoded>, mime: String) {
+    /// Insert a foreground result only after the caller validates its generation.
+    pub fn put_foreground(&self, path: PathBuf, decoded: Rc<Decoded>, mime: String) {
+        self.pin(&path);
+        self.put_neighbor(path, decoded, mime);
+    }
+
+    /// Speculative results receive no exemption from the neighbor budget.
+    pub fn put_neighbor(&self, path: PathBuf, decoded: Rc<Decoded>, mime: String) {
         let bytes = frame_bytes(&decoded);
         let mut entries = self.entries.borrow_mut();
         if let Some(pos) = entries.iter().position(|e| e.path == path) {
@@ -187,25 +198,30 @@ impl Cache {
             mime,
             bytes,
         });
-        entries.truncate(self.cap);
-        // The newest entry always stays, even alone over budget: it is
-        // the image being (or about to be) shown.
+        self.evict(&mut entries);
+    }
+
+    fn evict(&self, entries: &mut VecDeque<Entry>) {
         let pinned = self.pinned.borrow();
         let is_pinned = |e: &Entry| Some(e.path.as_path()) == pinned.as_deref();
-        let mut total: usize = entries
-            .iter()
-            .filter(|e| !is_pinned(e))
-            .map(|e| e.bytes)
-            .sum();
-        while total > self.budget_bytes && entries.len() > 1 {
+        loop {
+            // Recompute after each eviction: subtracting from a saturated total
+            // could undercount the remaining entries. Overflow is over-budget.
+            let total = entries
+                .iter()
+                .filter(|e| !is_pinned(e))
+                .try_fold(0usize, |total, e| total.checked_add(e.bytes));
+            let has_neighbors = entries.iter().any(|e| !is_pinned(e));
+            if entries.len() <= self.cap
+                && total.is_some_and(|total| total <= self.budget_bytes)
+                && (self.budget_bytes != 0 || !has_neighbors)
+            {
+                break;
+            }
             let Some(pos) = entries.iter().rposition(|e| !is_pinned(e)) else {
                 break;
             };
-            if pos == 0 {
-                break;
-            }
             let evicted = entries.remove(pos).unwrap();
-            total -= evicted.bytes;
             crate::applog!(
                 "cache: evicted {} ({:.1} MB, budget {:.0} MB)",
                 evicted.path.display(),
@@ -240,7 +256,7 @@ mod tests {
     }
 
     fn put(cache: &Cache, name: &str, w: i32, h: i32) {
-        cache.put(PathBuf::from(name), decoded(w, h), "image/png".into());
+        cache.put_neighbor(PathBuf::from(name), decoded(w, h), "image/png".into());
     }
 
     #[test]
@@ -256,11 +272,11 @@ mod tests {
     }
 
     #[test]
-    fn newest_entry_survives_even_over_budget() {
+    fn foreground_survives_even_over_budget() {
         let cache = Cache::new(3, 10_000);
-        put(&cache, "big", 200, 200); // 160 000 B, alone over budget
+        cache.put_foreground("big".into(), decoded(200, 200), "image/png".into()); // 160 000 B, alone over budget
         assert!(cache.contains(Path::new("big")));
-        put(&cache, "big2", 200, 200);
+        cache.put_foreground("big2".into(), decoded(200, 200), "image/png".into());
         assert!(cache.contains(Path::new("big2")));
         assert!(
             !cache.contains(Path::new("big")),
@@ -279,6 +295,66 @@ mod tests {
         assert!(cache.contains(Path::new("shown")));
         assert!(cache.contains(Path::new("n2")));
         assert!(!cache.contains(Path::new("n1")), "older neighbor evicted");
+    }
+
+    #[test]
+    fn pinned_entry_survives_count_pressure() {
+        let cache = Cache::new(3, usize::MAX);
+        put(&cache, "shown", 10, 10);
+        cache.pin(Path::new("shown"));
+        for name in ["a", "b", "c"] {
+            put(&cache, name, 10, 10);
+        }
+        assert!(cache.contains(Path::new("shown")));
+        assert!(!cache.contains(Path::new("a")));
+        assert_eq!(cache.entries.borrow().len(), 3);
+    }
+
+    #[test]
+    fn oversized_neighbor_is_not_retained() {
+        let cache = Cache::new(3, 10_000);
+        put(&cache, "neighbor", 100, 100);
+        assert!(!cache.contains(Path::new("neighbor")));
+    }
+
+    #[test]
+    fn zero_budget_retains_no_neighbors() {
+        let cache = Cache::new(3, 0);
+        cache.pin(Path::new("shown"));
+        put(&cache, "shown", 100, 100);
+        put(&cache, "neighbor", 10, 10);
+        assert!(cache.contains(Path::new("shown")));
+        assert!(!cache.contains(Path::new("neighbor")));
+    }
+
+    #[test]
+    fn changing_pin_rechecks_neighbor_budget() {
+        let cache = Cache::new(3, 0);
+        cache.put_foreground("old".into(), decoded(100, 100), "image/png".into());
+        cache.pin(Path::new("new"));
+        assert!(!cache.contains(Path::new("old")));
+    }
+
+    #[test]
+    fn overflowing_charges_do_not_underestimate_remaining_bytes() {
+        let cache = Cache::new(3, usize::MAX);
+        for name in ["a", "b"] {
+            put(&cache, name, 10, 10);
+            cache.entries.borrow_mut().front_mut().unwrap().bytes = usize::MAX;
+        }
+        put(&cache, "c", 10, 10);
+        assert!(!cache.contains(Path::new("a")));
+        assert!(!cache.contains(Path::new("b")));
+        assert!(cache.contains(Path::new("c")));
+    }
+
+    #[test]
+    fn foreground_survives_zero_count_and_byte_budgets() {
+        let cache = Cache::new(0, 0);
+        cache.put_foreground("shown".into(), decoded(100, 100), "image/png".into());
+        put(&cache, "neighbor", 10, 10);
+        assert!(cache.contains(Path::new("shown")));
+        assert_eq!(cache.entries.borrow().len(), 1);
     }
 
     #[test]

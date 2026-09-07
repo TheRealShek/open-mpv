@@ -404,14 +404,16 @@ impl App {
                 async move {
                     match loader::decode(&path).await {
                         Ok((decoded, mime)) => {
-                            app.cache.put(path.clone(), decoded.clone(), mime.clone());
                             if app.navigation.borrow().is_current_generation(generation) {
+                                app.cache.put_foreground(
+                                    path.clone(),
+                                    decoded.clone(),
+                                    mime.clone(),
+                                );
                                 app.apply_decoded(path.clone(), decoded, mime, generation);
                             } else {
-                                crate::applog!(
-                                    "show: {} superseded, kept in cache",
-                                    path.display()
-                                );
+                                app.cache.put_neighbor(path.clone(), decoded, mime);
+                                crate::applog!("show: {} superseded", path.display());
                             }
                         }
                         Err(e) => {
@@ -1266,7 +1268,7 @@ impl App {
                 async move {
                     if let Ok((decoded, mime)) = loader::decode(&path).await {
                         crate::applog!("preload: {}", path.display());
-                        app.cache.put(path, decoded, mime);
+                        app.cache.put_neighbor(path, decoded, mime);
                     }
                 }
             ));
