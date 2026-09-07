@@ -61,12 +61,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.type)
-          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)
+          release_ref="repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}"
+          if ! tag_type=$(gh api "$release_ref" --jq .object.type); then
+            echo "::error::Release tag ${RELEASE_TAG} was not found in ${GH_REPO}. Push a signed annotated tag first, or rerun this workflow with an existing release tag."
+            echo "Recent tags in ${GH_REPO}:"
+            gh api "repos/${GH_REPO}/tags?per_page=10" --jq '.[].name' || true
+            exit 1
+          fi
+          tag_sha=$(gh api "$release_ref" --jq .object.sha)
           test "$tag_type" = tag
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .verification.verified)" = true
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.type)" = commit
-          commit_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.sha)
+          test "$(gh api "repos/${GH_REPO}/git/tags/${tag_sha}" --jq .verification.verified)" = true
+          test "$(gh api "repos/${GH_REPO}/git/tags/${tag_sha}" --jq .object.type)" = commit
+          commit_sha=$(gh api "repos/${GH_REPO}/git/tags/${tag_sha}" --jq .object.sha)
           echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
           echo "commit_sha=${commit_sha}" >> "$GITHUB_OUTPUT"
 
@@ -147,7 +153,7 @@ jobs:
           EXPECTED_TAG_SHA: ${{ steps.release_tag.outputs.tag_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)" = "$EXPECTED_TAG_SHA"
+          test "$(gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)" = "$EXPECTED_TAG_SHA"
           gh release create "$RELEASE_TAG" \
             dist/open-mpv-fedora44-x86_64.rpm \
             dist/SHA256SUMS \
