@@ -1,11 +1,11 @@
 # open-mpv
 
-open-mpv is a fast, minimal photo and video viewer for GNOME on Wayland. It
-opens local media without building a media library, using the network or
-filling the window with controls.
+open-mpv is a fast, simple photo and video viewer for GNOME. Open a file and
+browse the photos and videos in its folder, all in one window. Move the
+pointer when you need the controls; they stay out of the way while you view.
 
-> **Current support:** Fedora 44 Workstation, GNOME, Wayland and x86-64. Other
-> Linux distributions and desktop environments are not supported yet.
+Your files stay where they are. There is nothing to import, no media library
+to manage, and no tracking or network access.
 
 <p align="center">
   <img
@@ -15,29 +15,55 @@ filling the window with controls.
   >
 </p>
 
-## Install on Fedora 44
+## What you can do
 
-Install the latest release with DNF:
+- View photos, animated images, SVGs and videos.
+- Zoom in, move around an image, rotate the view or go fullscreen.
+- Pause videos, seek, change speed and volume, and choose audio or subtitles.
+- Move unwanted files to trash and use Undo to bring them back shortly after.
+- Save a rotation in supported image formats. JPEG rotations keep the original
+  image quality.
+- Use **Quick Markup** to draw boxes and arrows on a still image, then copy the
+  result to the clipboard.
+
+Viewing and Quick Markup leave the original file unchanged. Files change only
+when you choose to save a rotation, move them to trash or restore them.
+
+## Install
+
+Currently supported on **Fedora 44 Workstation, GNOME, Wayland and x86-64**.
+Other distributions and desktops are not supported yet.
+
+Install the latest release:
 
 ```sh
 sudo dnf install https://github.com/TheRealShek/open-mpv/releases/latest/download/open-mpv-fedora44-x86_64.rpm
 ```
 
-GitHub Releases are not a DNF repository, so run the same command again when a
-new release is available. To remove open-mpv:
+To update, run the same command when a new release is available. Updates are
+manual: the usual `dnf upgrade` command will not find new GitHub releases.
+
+To uninstall:
 
 ```sh
 sudo dnf remove open-mpv
 ```
 
-Installation does not change your default applications. To make open-mpv the
-default for a file type, right-click that type in Files, choose **Open With**,
-then select open-mpv.
+Installing open-mpv leaves your default apps unchanged. To use it as the
+default for a file type, right-click a file in Files, choose **Open With**,
+then select open-mpv as the default.
 
-## Open media
+## Open a photo or video
 
-Open a photo, video or folder from Files, drag a file into the window, or pass
-a path on the command line:
+Start open-mpv and choose **Open File** or **Open Folder**. You can also open a
+file with open-mpv from Files, or drag one into the window.
+
+Opening a file lets you browse the other supported photos and videos in the
+same folder. Opening a folder starts with its first supported file.
+The window starts at a size that fits your display and keeps that size as
+you browse.
+
+If you prefer the terminal:
 
 ```sh
 open-mpv ~/Pictures/photo.jpg
@@ -45,89 +71,63 @@ open-mpv ~/Videos/video.mp4
 open-mpv ~/Pictures
 ```
 
-You can also start open-mpv without a path and choose **Open File** or
-**Open Folder**.
+## Controls
 
-## What it does
+Move the pointer to show the controls. Right-click the photo or video, or
+click the three-dot button, for more options. Press `?` for all shortcuts.
+When zoomed in, dragging stops at the image edges; drag back to move again.
 
-- Opens photos, animated images, SVG files and local videos in one window.
-- Moves through the supported media files in the current folder.
-- Supports zoom, pan, fit, rotation and fullscreen. Dragging stops at image
-  edges and responds immediately when you reverse direction.
-- Sizes the first media to the window's available display area, then keeps
-  the window size as you navigate. See [window sizing](docs/REQUIREMENTS.md#fr-6--window-and-interaction).
-- Plays video with seeking, volume, speed, audio-track and subtitle controls.
-- Moves files to trash and offers a short Undo action.
-- Saves supported image rotations atomically. JPEG rotation is lossless, and
-  normal file ownership, permissions and user metadata are preserved.
-- Draws a box or arrow on a still image and copies the result without changing
-  the original.
-- Supports optional mpv-style configuration and custom key bindings.
-
-open-mpv has no media library, telemetry, network access or persistent
-background service. Images are decoded by glycin in a separate sandboxed
-process. The app changes your files only when you explicitly trash, restore or
-save a rotation; Quick Markup writes only to the clipboard.
-
-## Supported media
-
-Images include JPEG, PNG, WebP, AVIF, HEIF/HEIC, JPEG XL, TIFF, SVG, GIF and
-other formats supported by the installed glycin loaders. Animated GIF, WebP
-and PNG files play automatically and loop. Press Space or use the animation
-play/pause button to hold the current frame and resume from it.
-
-Videos include MP4, MKV, WebM, MOV and AVI. Playback uses the codecs installed
-for GStreamer and prefers compatible hardware decoding. The optional
-`gstreamer1-plugin-libav` package provides a software fallback for more video
-formats.
-
-## Essential controls
-
-Press `?` inside the app for the complete shortcut guide.
-
-| Key or gesture | Action |
+| Key or gesture | What it does |
 | --- | --- |
 | `Ctrl+O` / `Ctrl+Shift+O` | Open a file / folder |
-| `Right` / `Left` | Next / previous file; pan when zoomed |
-| Scroll / pinch | Zoom at the pointer |
-| `0` / `1` / `Z` | Fit / actual size / toggle between them |
+| `Right` / `Left` | Next / previous file; move around the image when zoomed in |
+| Scroll / pinch | Zoom in or out |
+| `0` / `1` / `Z` | Fit to the window / actual size / switch between them |
 | `R` / `Shift+R` | Rotate right / left |
-| `S` | Save the current rotation when supported |
-| `Delete` / `Ctrl+Z` | Move to trash / undo markup or the offered trash action |
-| `Space` | Pause or resume video or animation; advance from a still image |
-| `J` / `L` | Seek video back / forward 10 seconds |
+| `S` | Save the rotation, if the format supports it |
+| `Delete` | Move the file to trash |
+| `Ctrl+Z` | Undo a markup change or restore the file while Undo is available |
+| `Space` | Pause or resume a video or animation; next file from a still image |
+| `J` / `L` | Go back / forward 10 seconds in a video |
 | `A` | Start or cancel Quick Markup |
-| `F` / `F11` / double-click | Toggle fullscreen |
+| `F` / `F11` / double-click | Enter or leave fullscreen |
 | `Escape` | Cancel the current mode, leave fullscreen or quit |
 
-Move the pointer to show controls. Right-click the media or use the three-dot
-button for less common actions.
+## File formats
 
-## Configuration
+**Images:** JPEG, PNG, WebP, AVIF, HEIF/HEIC, JPEG XL, TIFF, SVG, GIF and more,
+depending on the installed image loaders. Animated GIF, WebP and PNG files
+play automatically and loop. Press `Space` or the play/pause button to pause
+an animation and resume from the same frame.
 
-Configuration is optional. See the [configuration guide](docs/CONFIGURATION.md)
-for settings and custom key bindings.
+**Videos:** MP4, MKV, WebM, MOV and AVI. Playback depends on the codecs installed
+on your system. open-mpv uses hardware decoding when compatible hardware and
+drivers are available.
 
-## Troubleshooting
+## Make it yours
 
-If images do not open, check that `glycin-loaders` is installed. Video support
-depends on the installed GStreamer plugins, graphics driver and codecs; the
-optional `gstreamer1-plugin-libav` package supplies a software fallback.
+You do not need a configuration file to get started. To change defaults or
+keyboard shortcuts, follow the [configuration guide](docs/CONFIGURATION.md).
 
-open-mpv writes diagnostics to stderr. When it was opened from Files, view
-them with:
+## Having trouble?
+
+If images do not open, check that `glycin-loaders` is installed. If a video
+will not play, you may need additional codecs. The optional
+`gstreamer1-plugin-libav` package adds software decoding for more video formats.
+
+The [troubleshooting guide](docs/TROUBLESHOOTING.md) explains how to check
+video support and find useful error messages. If you opened the app from
+Files, you can read its logs with:
 
 ```sh
 journalctl -b _COMM=open-mpv
 ```
 
-See the [troubleshooting guide](docs/TROUBLESHOOTING.md) for decoder checks,
-logging options and the information to collect when playback fails.
-
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to build the project and run its checks.
+Want to build from source or help with development? See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-open-mpv is available under the [MIT License](LICENSE).
+[MIT](LICENSE).
