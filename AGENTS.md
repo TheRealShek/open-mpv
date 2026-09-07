@@ -20,8 +20,7 @@ Keep these ideas in mind when making decisions:
   crowded by advanced controls.
 - The application owns one Workspace. Multiple windows, a media library and
   other large expansions need a product decision first.
-- Fedora GNOME/Wayland is the Reference environment. Do not claim support for
-  another platform, package or hardware path without the same level of testing.
+- Fedora GNOME/Wayland is the Reference environment.
 
 The current priority is to make the Viewer solid before adding the Explorer.
 Image Edit mode comes later and needs its own plan. Video editing, frame
@@ -86,9 +85,6 @@ Changes to source files take a separate, explicit path:
 user action -> typed window action -> fileops -> update folder state
 ```
 
-Media work can finish after the user has moved to another file. Before using a
-result, check that it still belongs to the active media.
-
 ## Module ownership
 
 Keep each rule in the module that owns it:
@@ -128,9 +124,29 @@ clear. Add traits, helpers, wrappers or generic layers only when they clarify
 ownership, protect an invariant, isolate a dependency or represent a real
 reusable concept.
 
+Before adding a dependency or helper, look for an existing implementation.
+Prefer Rust's standard library and the existing GTK, GIO, Glycin and GStreamer
+stack. Add a dependency when the improvement in correctness or maintainability
+justifies its cost.
+
 Keep orchestration separate from owned rules. When behavior changes, inspect
 the owning module, every caller of its interface, the relevant state
 transitions and the tests that define its contract.
+
+### Error handling
+
+Use `Result` for failures, `Option` for expected absence and `?` when the
+caller should handle the error. Keep the cause and useful context. Use
+`unwrap`, `expect` and assertions only when code guarantees success or in
+tests. Prefer `expect` when the guarantee needs explaining.
+
+Do not silently discard important errors or report success after failure.
+Keep the application usable when an operation fails. Check indexing and
+conversions that can panic on external input.
+
+Tell the user what failed, why and what they can do, when known. Use plain
+language. Keep Rust internals and backtraces in diagnostics, with enough
+context to investigate the problem.
 
 ## The easiest ways to break open-mpv
 
@@ -156,8 +172,7 @@ freedesktop thumbnails for Explorer, and source-file changes owned by
 `fileops`. Quick Markup remains clipboard-only. Any other saved state needs a
 product decision.
 
-All file replacement must be safe and atomic. Trash, restore, unreadable files
-and failed saves are normal failure paths, not reasons to panic.
+All file replacement must be safe and atomic.
 
 ### Create a second behavior path
 
@@ -171,25 +186,21 @@ the view are the exception.
 Use GTK, GIO, Glycin and GStreamer rather than adding X11 behavior, custom IPC
 or another media stack. Hardware and packaging behavior must keep a safe
 fallback and respect an explicit system disable. Test on the real environment
-before claiming that a backend or platform is supported.
+before claiming support for another platform, package or hardware path, using
+the same level of verification as the Reference environment.
 
 ## Think across state changes
 
 Think about how every mode starts and ends. Important transitions include
 image to video, video to image, one media item to another, Viewer to Explorer,
 normal viewing to Quick Markup, playback to error or close, and Trash to Undo.
-Release resources, cancel late work and restore shared state on every relevant
-exit path.
+Release resources and restore shared state on every relevant exit path.
 
 When changing file operations, include folder-monitor behavior and Undo. When
 changing rendering or markup, include rotation, zoom, pan and fractional
 scale. When changing playback, include navigation, pipeline cleanup, missing
 codecs and software fallback. Tests should cover the decision and its important
 failure cases rather than merely copy the implementation.
-
-Before adding a dependency or helper, look for a tool or implementation that
-already exists. Add a dependency only when Rust, GTK, GIO, Glycin or GStreamer
-cannot provide a clear and safe solution.
 
 ## Verification
 
