@@ -73,7 +73,8 @@ save a rotation; Quick Markup writes only to the clipboard.
 
 Images include JPEG, PNG, WebP, AVIF, HEIF/HEIC, JPEG XL, TIFF, SVG, GIF and
 other formats supported by the installed glycin loaders. Animated GIF, WebP
-and PNG files play automatically.
+and PNG files play automatically and loop. Press Space or use the animation
+play/pause button to hold the current frame and resume from it.
 
 Videos include MP4, MKV, WebM, MOV and AVI. Playback uses the codecs installed
 for GStreamer and prefers compatible hardware decoding. The optional
@@ -93,7 +94,7 @@ Press `?` inside the app for the complete shortcut guide.
 | `R` / `Shift+R` | Rotate right / left |
 | `S` | Save the current rotation when supported |
 | `Delete` / `Ctrl+Z` | Move to trash / undo markup or the offered trash action |
-| `Space` | Pause or resume video; advance from a still image |
+| `Space` | Pause or resume video or animation; advance from a still image |
 | `J` / `L` | Seek video back / forward 10 seconds |
 | `A` | Start or cancel Quick Markup |
 | `F` / `F11` / double-click | Toggle fullscreen |

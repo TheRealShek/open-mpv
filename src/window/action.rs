@@ -61,6 +61,7 @@ pub(super) enum Media {
     Empty,
     Loading,
     Image { markup_available: bool },
+    AnimatedImage,
     Video,
     Error,
 }
@@ -155,6 +156,7 @@ pub(super) enum Command {
     First,
     Last,
     TogglePlayback,
+    ToggleAnimation,
     Seek(Step),
     StepSpeed(Step),
     ResetSpeed,
@@ -202,7 +204,10 @@ impl Action {
         (Self::Previous, "Previous image"),
         (Self::First, "First image"),
         (Self::Last, "Last image"),
-        (Self::PlayPause, "Pause video, or next image"),
+        (
+            Self::PlayPause,
+            "Play / pause video or animation; next still image",
+        ),
         (Self::SeekBack, "Seek back 10 seconds"),
         (Self::SeekForward, "Seek forward 10 seconds"),
         (Self::SpeedDown, "Slower video playback"),
@@ -359,9 +364,12 @@ impl Action {
         use Action as A;
         use Command as C;
         let media = state.media;
-        let viewing = matches!(media, Media::Image { .. } | Media::Video);
+        let viewing = matches!(
+            media,
+            Media::Image { .. } | Media::AnimatedImage | Media::Video
+        );
         let video = media == Media::Video;
-        let image = matches!(media, Media::Image { .. });
+        let image = matches!(media, Media::Image { .. } | Media::AnimatedImage);
         let normal = !state.marking;
         Some(match self {
             A::OpenFile if normal => C::OpenFile,
@@ -378,6 +386,7 @@ impl Action {
             A::Previous if normal && state.has_navigation => C::Previous,
             A::First if normal && state.has_navigation => C::First,
             A::Last if normal && state.has_navigation => C::Last,
+            A::PlayPause if media == Media::AnimatedImage => C::ToggleAnimation,
             A::PlayPause if video => C::TogglePlayback,
             A::PlayPause if normal && state.has_navigation => C::Next,
             A::SeekBack if video && normal => C::Seek(Step::Backward),
@@ -482,6 +491,30 @@ mod tests {
             help_visible: false,
             fullscreen: false,
         }
+    }
+
+    #[test]
+    fn play_pause_selects_animation_video_or_still_navigation() {
+        let animation = state(Media::AnimatedImage);
+        assert_eq!(
+            Action::PlayPause.resolve(animation),
+            Some(Command::ToggleAnimation)
+        );
+        assert_eq!(Action::SeekForward.resolve(animation), None);
+        assert_eq!(Action::Markup.resolve(animation), None);
+        assert_eq!(
+            Action::RotateClockwise.resolve(animation),
+            Some(Command::Rotate(QuarterTurn::Clockwise))
+        );
+        let mut still = state(Media::Image {
+            markup_available: true,
+        });
+        still.has_navigation = true;
+        assert_eq!(Action::PlayPause.resolve(still), Some(Command::Next));
+        assert_eq!(
+            Action::PlayPause.resolve(state(Media::Video)),
+            Some(Command::TogglePlayback)
+        );
     }
 
     #[test]

@@ -71,7 +71,10 @@ new product decisions rather than incidental implementation.
   overshoot accumulates. Reversing a drag at any edge moves immediately,
   including after zoom, rotation or fractional scaling.
 - **FR-2.2** Animated images play automatically and loop. Space and a contextual control
-  pause or resume them without restarting the animation.
+  pause or resume them without restarting the animation. Pausing holds the current
+  frame and stops repeated decode/upload work. Window suspension is independent
+  of user pause; restoring the window never overrides it. The contextual button
+  reflects playback state, and toggling flashes “Paused” or “Play”.
 - **NFR-1.3 / NFR-3.3** Async decode, animation, SVG and metadata results apply only to the media
   generation that started them.
 

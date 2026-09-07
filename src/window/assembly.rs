@@ -127,6 +127,13 @@ impl App {
             &Action::PlayPause.detailed_name(),
             "Play / pause",
         );
+        let animation_btn = bar_button(
+            "media-playback-pause-symbolic",
+            &Action::PlayPause.detailed_name(),
+            "Pause animation",
+        );
+        animation_btn.set_visible(false);
+        normal_controls.append(&animation_btn);
         let mute_btn = bar_button(
             "audio-volume-high-symbolic",
             &Action::Mute.detailed_name(),
@@ -373,6 +380,8 @@ impl App {
             monitor: RefCell::new(None),
             fs_queries: RefCell::new(FsQueryVersions::default()),
             media: RefCell::new(MediaState::Empty),
+            animation: RefCell::new(None),
+            animation_btn,
             cache: loader::Cache::new(3, cache_budget_bytes(cfg.cache_budget_mb)),
             editable_mimes: RefCell::new(BTreeSet::new()),
             player: RefCell::new(None),
@@ -465,6 +474,15 @@ impl App {
             }
         ));
 
+        app.win.connect_suspended_notify(clone!(
+            #[weak]
+            app,
+            move |win| {
+                if let Some(playback) = app.animation.borrow().as_ref() {
+                    playback.suspend(win.is_suspended());
+                }
+            }
+        ));
         more_btn.connect_active_notify(clone!(
             #[strong(rename_to = app)]
             app,

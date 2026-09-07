@@ -147,7 +147,7 @@ arrows adjust video volume unless they can pan the media. Use `next`, `prev`,
 
 Other actions whose names may not be self-explanatory:
 
-- `play-pause` pauses or resumes video; on a still image it opens the next file.
+- `play-pause` pauses or resumes video or animated images; on a still image it opens the next file.
 - `subtitle-open` lets you attach a local subtitle file to the current video.
 - `save` writes a supported image rotation back to the source file.
 - `undo` undoes the latest Quick Markup shape or the latest offered trash
