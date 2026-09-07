@@ -67,7 +67,9 @@ new product decisions rather than incidental implementation.
 - **FR-4.2–FR-4.4** Zoom spans at least 5%–2000%, anchors pointer and pinch input correctly, and
   supports pan, fit, actual size and quarter-turn view rotation.
 - **FR-4.5 / FR-4.6** Navigation resets the view; resize preserves fit or manual zoom semantics.
-  Pan state is clamped so no hidden overshoot accumulates.
+  Pan state is clamped for both pointer and keyboard input so no hidden
+  overshoot accumulates. Reversing a drag at any edge moves immediately,
+  including after zoom, rotation or fractional scaling.
 - **FR-2.2** Animated images play automatically and loop. Space and a contextual control
   pause or resume them without restarting the animation.
 - **NFR-1.3 / NFR-3.3** Async decode, animation, SVG and metadata results apply only to the media
