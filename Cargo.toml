@@ -16,3 +16,9 @@ tempfile = "3.27.0"
 [profile.release]
 lto = "thin"
 strip = true
+
+# Local reproduction builds retain optimized behavior and symbolized stacks.
+[profile.diagnostic]
+inherits = "release"
+debug = 2
+strip = false

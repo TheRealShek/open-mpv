@@ -138,6 +138,10 @@ new product decisions rather than incidental implementation.
   video previews, cache policy and typed keybindings. `none` removes a default
   binding.
 - **FR-8.3** Unknown or malformed content warns on stderr and never prevents startup.
+  A missing config uses defaults quietly; other read failures report their cause
+  and use defaults. Overlay delay must be finite and fit the GLib timer range
+  documented in [Configuration](CONFIGURATION.md); invalid values retain the
+  previous value or default.
 - **FR-8.4** Preferences is a later graphical wrapper over this same file for common
   settings. Changes apply immediately through atomic updates while preserving
   comments, ordering, keybindings, advanced settings and unknown content.
@@ -173,7 +177,10 @@ new product decisions rather than incidental implementation.
   on the Reference environment; unsupported streams may fall back to installed
   software decoding. Requirements do not mandate one vendor backend.
 - **FR-10.6** Missing codecs, refused seeks/rates and subtitle errors are normal in-window
-  errors. Playback failure never crashes the app.
+  errors. Refused playback state changes never report success, and replacing
+  media requires the old pipeline to finish stopping. Playback failure never
+  crashes the app. Technical causes belong in diagnostics; user messages use
+  plain language.
 - **FR-10.9** Frame stepping, playlists, network playback, subtitle downloading and video
   editing are outside the current direction.
 

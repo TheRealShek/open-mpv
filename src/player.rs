@@ -53,6 +53,7 @@ pub enum Event {
     AudioChanged(AudioSnapshot),
     SubtitlesChanged(SubtitleSnapshot),
     PlaybackRateError(PlaybackRateError),
+    StateError(PlayerError),
 }
 
 #[derive(Debug)]
@@ -61,6 +62,11 @@ pub enum PlayerError {
     SinkUnavailable(glib::BoolError),
     PlaybinUnavailable(glib::BoolError),
     MissingBus,
+    State {
+        operation: &'static str,
+        source: gst::StateChangeError,
+    },
+    SeekRefused,
     BusWatch(glib::BoolError),
     Uri {
         path: PathBuf,
@@ -87,6 +93,8 @@ impl fmt::Display for PlayerError {
                 write!(f, "playbin3 unavailable: {source}")
             }
             PlayerError::MissingBus => f.write_str("playbin has no bus"),
+            PlayerError::State { operation, source } => write!(f, "cannot {operation}: {source}"),
+            PlayerError::SeekRefused => f.write_str("restart seek was refused"),
             PlayerError::BusWatch(source) => write!(f, "cannot watch pipeline bus: {source}"),
             PlayerError::Uri { path, source } => {
                 write!(f, "cannot build uri for {}: {source}", path.display())
@@ -108,9 +116,11 @@ impl std::error::Error for PlayerError {
             PlayerError::SinkUnavailable(source)
             | PlayerError::PlaybinUnavailable(source)
             | PlayerError::BusWatch(source) => Some(source),
-            PlayerError::Playback { source, .. } => Some(source),
+            PlayerError::Playback { source, .. } | PlayerError::State { source, .. } => {
+                Some(source)
+            }
             PlayerError::SubtitleFile { source, .. } => Some(source),
-            PlayerError::MissingBus => None,
+            PlayerError::MissingBus | PlayerError::SeekRefused => None,
         }
     }
 }
@@ -298,69 +308,7 @@ impl Player {
                             }
                         }
                         gst::MessageView::AsyncDone(_) => {
-                            // Replacing an external sidecar rebuilds the
-                            // same URI, then restores position and
-                            // the former playback state without blocking the
-                            // GTK main loop (FR-10.7).
-                            let resume_action = playback.borrow_mut().observe_async_done();
-                            match resume_action {
-                                ResumeAction::Seek {
-                                    position,
-                                    rate,
-                                    resume_playing,
-                                } => {
-                                    let needs_seek = position > f64::EPSILON
-                                        || !same_rate(rate, playback.borrow().accepted_rate());
-                                    if !needs_seek
-                                        || !issue_seek(
-                                            &seek_target,
-                                            &playback,
-                                            SeekRequest::new(position, rate),
-                                        )
-                                    {
-                                        if needs_seek
-                                            && !same_rate(rate, playback.borrow().accepted_rate())
-                                        {
-                                            on_event(Event::PlaybackRateError(
-                                                PlaybackRateError::SeekRefused,
-                                            ));
-                                        }
-                                        playback.borrow_mut().cancel_resume();
-                                        let target = if resume_playing {
-                                            gst::State::Playing
-                                        } else {
-                                            gst::State::Paused
-                                        };
-                                        let _ = playbin.set_state(target);
-                                        playback.borrow_mut().set_playing(resume_playing);
-                                    }
-                                    return glib::ControlFlow::Continue;
-                                }
-                                ResumeAction::Finish { resume_playing } => {
-                                    let target = if resume_playing {
-                                        gst::State::Playing
-                                    } else {
-                                        gst::State::Paused
-                                    };
-                                    let _ = playbin.set_state(target);
-                                    playback.borrow_mut().set_playing(resume_playing);
-                                }
-                                ResumeAction::None => {}
-                            }
-
-                            // The seek landed: real positions are truthful
-                            // again, and the newest scrub position that piled
-                            // up behind it can go out now.
-                            let next = { playback.borrow_mut().finish_seek() };
-                            if let Some(request) = next {
-                                let rate_change =
-                                    !same_rate(request.rate(), playback.borrow().accepted_rate());
-                                if !issue_seek(&seek_target, &playback, request) && rate_change {
-                                    on_event(Event::PlaybackRateError(
-                                        PlaybackRateError::SeekRefused,
-                                    ));
-                                }
-                            }
+                            finish_async(&playbin, &seek_target, &playback, &on_event);
                         }
                         gst::MessageView::StreamCollection(message) => {
                             let collection = message.stream_collection();
@@ -430,7 +378,7 @@ impl Player {
         }
         let uri = file_uri(path)?;
         let suburi = subtitle.as_deref().map(file_uri).transpose()?;
-        let _ = teardown_pipeline(&self.playbin);
+        self.teardown()?;
         lock_decoder_fallback(&self.decoder_fallback).restore();
         self.playback
             .borrow_mut()
@@ -450,13 +398,25 @@ impl Player {
     }
 
     /// Drop to `Null`: stops playback and frees decoder state.
-    pub fn stop(&self) {
+    pub fn stop(&self) -> Result<(), PlayerError> {
         let (_, current, _) = self.playbin.state(gst::ClockTime::ZERO);
-        let _ = teardown_pipeline(&self.playbin);
+        let result = self.teardown();
         self.forget_stream();
+        result?;
         if current != gst::State::Null {
             crate::applog!("player: stopped, pipeline released");
         }
+        Ok(())
+    }
+
+    fn teardown(&self) -> Result<(), PlayerError> {
+        teardown_pipeline(&self.playbin).map_err(|source| {
+            self.forget_stream();
+            PlayerError::State {
+                operation: "stop the previous video",
+                source,
+            }
+        })
     }
 
     /// Drop everything that describes the outgoing stream so the next
@@ -526,13 +486,7 @@ impl Player {
         // A full teardown matters here. READY can retain the old playsink
         // pads, so the new text pad may reach it before the replacement
         // video pad and fail with "Have text pad but no video pad".
-        teardown_pipeline(&self.playbin).map_err(|source| {
-            lock_decoder_fallback(&self.decoder_fallback).restore();
-            PlayerError::Playback {
-                path: video.clone(),
-                source,
-            }
-        })?;
+        self.teardown()?;
         crate::applog!("player: subtitle rebuild reached null");
         lock_decoder_fallback(&self.decoder_fallback).restore();
         self.playback.borrow_mut().prepare_subtitle_rebuild(
@@ -545,7 +499,11 @@ impl Player {
         crate::applog!("player: attached subtitle {}", path.display());
         if let Err(source) = self.playbin.set_state(gst::State::Playing) {
             self.playback.borrow_mut().cancel_resume();
-            let _ = recover_without_external(&self.playbin, &self.playback);
+            if !recover_without_external(&self.playbin, &self.playback)
+                && let Err(error) = self.stop()
+            {
+                eprintln!("open-mpv: subtitle recovery cleanup: {error}");
+            }
             return Err(PlayerError::Playback {
                 path: video,
                 source,
@@ -611,19 +569,11 @@ impl Player {
         self.playbin.property::<bool>("mute")
     }
 
-    /// Toggle pause; returns true when now playing.
-    pub fn toggle_pause(&self) -> bool {
-        if self.playback.borrow().is_playing() {
-            let _ = self.playbin.set_state(gst::State::Paused);
-            self.playback.borrow_mut().set_playing(false);
-            crate::applog!("player: paused");
-            false
-        } else {
-            let _ = self.playbin.set_state(gst::State::Playing);
-            self.playback.borrow_mut().set_playing(true);
-            crate::applog!("player: playing");
-            true
-        }
+    /// Toggle pause; only report the requested state after acceptance.
+    pub fn toggle_pause(&self) -> Result<bool, PlayerError> {
+        let playing = !self.is_playing();
+        change_playing(&self.playbin, &self.playback, playing)?;
+        Ok(playing)
     }
 
     /// Position and duration in seconds, once the pipeline knows them.
@@ -733,10 +683,14 @@ impl Player {
     }
 
     /// Restart from the beginning (EOS loop, FR-10.3).
-    pub fn rewind(&self) {
-        self.seek_to(0.0);
-        let _ = self.playbin.set_state(gst::State::Playing);
-        self.playback.borrow_mut().set_playing(true);
+    pub fn rewind(&self) -> Result<(), PlayerError> {
+        // EOS has stopped advancing, even if the pipeline still says Playing.
+        self.playback.borrow_mut().set_playing(false);
+        let request = SeekRequest::new(0.0, self.playback_rate());
+        if !issue_seek(&self.seek_target, &self.playback, request) {
+            return Err(PlayerError::SeekRefused);
+        }
+        change_playing(&self.playbin, &self.playback, true)
     }
 
     /// Set the starting volume from config (FR-8.2). The pipeline is
@@ -761,6 +715,96 @@ impl Player {
         crate::applog!("player: mute {}", muted);
         muted
     }
+}
+
+fn finish_async(
+    playbin: &gst::Element,
+    seek_target: &gst::Element,
+    playback: &Rc<RefCell<FocusedPlayback>>,
+    on_event: &Rc<dyn Fn(Event)>,
+) {
+    // Replacing an external sidecar rebuilds the
+    // same URI, then restores position and
+    // the former playback state without blocking the
+    // GTK main loop (FR-10.7).
+    let resume_action = playback.borrow_mut().observe_async_done();
+    match resume_action {
+        ResumeAction::Seek {
+            position,
+            rate,
+            resume_playing,
+        } => {
+            let needs_seek =
+                position > f64::EPSILON || !same_rate(rate, playback.borrow().accepted_rate());
+            if !needs_seek || !issue_seek(seek_target, playback, SeekRequest::new(position, rate)) {
+                if needs_seek && !same_rate(rate, playback.borrow().accepted_rate()) {
+                    on_event(Event::PlaybackRateError(PlaybackRateError::SeekRefused));
+                }
+                playback.borrow_mut().cancel_resume();
+                finish_resume(playbin, playback, on_event, resume_playing);
+            }
+            return;
+        }
+        ResumeAction::Finish { resume_playing } => {
+            finish_resume(playbin, playback, on_event, resume_playing);
+        }
+        ResumeAction::None => {}
+    }
+
+    // The seek landed: real positions are truthful
+    // again, and the newest scrub position that piled
+    // up behind it can go out now.
+    let next = { playback.borrow_mut().finish_seek() };
+    if let Some(request) = next {
+        let rate_change = !same_rate(request.rate(), playback.borrow().accepted_rate());
+        if !issue_seek(seek_target, playback, request) && rate_change {
+            on_event(Event::PlaybackRateError(PlaybackRateError::SeekRefused));
+        }
+    }
+}
+
+fn finish_resume(
+    playbin: &gst::Element,
+    playback: &Rc<RefCell<FocusedPlayback>>,
+    on_event: &Rc<dyn Fn(Event)>,
+    playing: bool,
+) {
+    if let Err(error) = change_playing(playbin, playback, playing) {
+        let context = playback.borrow().context();
+        let playback = playback.clone();
+        let on_event = on_event.clone();
+        // Let the bus callback return before the window tears down the pipeline.
+        glib::idle_add_local_once(move || {
+            if playback.borrow().error_is_current(&context) {
+                on_event(Event::StateError(error));
+            }
+        });
+    }
+}
+
+/// All transport and subtitle-resume state requests commit through this boundary.
+fn change_playing(
+    playbin: &gst::Element,
+    playback: &RefCell<FocusedPlayback>,
+    playing: bool,
+) -> Result<(), PlayerError> {
+    let target = if playing {
+        gst::State::Playing
+    } else {
+        gst::State::Paused
+    };
+    playbin
+        .set_state(target)
+        .map_err(|source| PlayerError::State {
+            operation: if playing {
+                "resume playback"
+            } else {
+                "pause playback"
+            },
+            source,
+        })?;
+    playback.borrow_mut().set_playing(playing);
+    Ok(())
 }
 
 fn file_uri(path: &Path) -> Result<String, PlayerError> {
@@ -804,6 +848,9 @@ fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError
     if current == gst::State::Null && pending == gst::State::VoidPending {
         Ok(())
     } else {
+        eprintln!(
+            "open-mpv: pipeline teardown timed out: current={current:?}, pending={pending:?}"
+        );
         Err(gst::StateChangeError)
     }
 }
@@ -819,8 +866,12 @@ fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPl
     let Some(video) = playback.borrow().current_video().map(Path::to_path_buf) else {
         return false;
     };
-    let Ok(uri) = glib::filename_to_uri(&video, None) else {
-        return false;
+    let uri = match file_uri(&video) {
+        Ok(uri) => uri,
+        Err(error) => {
+            eprintln!("open-mpv: subtitle recovery: {error}");
+            return false;
+        }
     };
     // Never query a failed pipeline here. Some sinks answer position/state
     // synchronously by waiting on the streaming thread that just errored.
@@ -829,17 +880,25 @@ fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPl
     let (position, rate, play_after_seek) = playback.borrow().resume_point();
 
     crate::applog!("player: subtitle recovery tearing pipeline down");
-    if teardown_pipeline(playbin).is_err() {
-        crate::applog!("player: subtitle recovery could not reach null");
+    if let Err(error) = teardown_pipeline(playbin) {
+        playback.borrow_mut().reset(true);
+        eprintln!(
+            "open-mpv: subtitle recovery for {} could not reach null: {error}",
+            video.display()
+        );
         return false;
     }
     playback
         .borrow_mut()
         .prepare_subtitle_rebuild(position, rate, play_after_seek, None);
     configure_uris(playbin, &uri, None);
-    if playbin.set_state(gst::State::Playing).is_err() {
+    if let Err(error) = playbin.set_state(gst::State::Playing) {
         playback.borrow_mut().cancel_resume();
-        crate::applog!("player: subtitle recovery could not restart video");
+        playback.borrow_mut().set_playing(false);
+        eprintln!(
+            "open-mpv: subtitle recovery could not restart {}: {error}",
+            video.display()
+        );
         return false;
     }
     crate::applog!("player: external subtitle failed; restoring video without it");
@@ -849,6 +908,11 @@ fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPl
 impl Drop for Player {
     fn drop(&mut self) {
         // NFR-2.2: nothing keeps running once the window is gone.
-        self.stop();
+        if let Err(error) = self.stop() {
+            eprintln!("open-mpv: player cleanup: {error}");
+        }
     }
 }
+
+#[cfg(test)]
+mod tests;

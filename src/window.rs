@@ -32,6 +32,7 @@ use crate::viewer::ImageView;
 mod action;
 mod animation;
 mod assembly;
+mod error;
 mod monitor;
 mod operation;
 use action::{Action, Command, Media, WorkspaceState};
@@ -342,8 +343,19 @@ impl App {
         };
         crate::applog!("folder: {} with {} media files", directory.display(), len);
         let monitor = gio::File::for_path(&directory)
-            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
-            .ok();
+            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE);
+        let monitor = match monitor {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                if !error.matches(gio::IOErrorEnum::Cancelled) {
+                    eprintln!(
+                        "open-mpv: cannot monitor folder {}: {error}",
+                        directory.display()
+                    );
+                }
+                None
+            }
+        };
         if let Some(m) = &monitor {
             m.connect_changed(clone!(
                 #[strong(rename_to = app)]
@@ -420,7 +432,12 @@ impl App {
                         }
                         Err(e) => {
                             if app.navigation.borrow().is_current_generation(generation) {
-                                app.on_decode_failed(&path, &e.to_string(), arrival);
+                                eprintln!("open-mpv: decode {}: {e}", path.display());
+                                app.on_decode_failed(
+                                    &path,
+                                    &error::message(&e, "Could not open the image."),
+                                    arrival,
+                                );
                             }
                         }
                     }
@@ -496,20 +513,25 @@ impl App {
             self.player.borrow().as_ref().is_some_and(|player| {
                 player.has_external_subtitle() || Player::path_has_sidecar(path)
             });
-        if replace_player && let Some(player) = self.player.borrow_mut().take() {
-            player.stop();
+        if replace_player
+            && let Some(player) = self.player.borrow_mut().take()
+            && let Err(error) = player.stop()
+        {
+            eprintln!("open-mpv: replacing player: {error}");
         }
         let player = match self.player() {
             Ok(player) => player,
             Err(e) => {
-                self.show_error(path, &e.to_string());
+                eprintln!("open-mpv: play {}: {e}", path.display());
+                self.show_error(path, &error::message(&e, "Could not play the video."));
                 return;
             }
         };
         self.hide_status();
         self.view.show_live_paintable(player.paintable());
         if let Err(e) = player.play(path) {
-            self.show_error(path, &e.to_string());
+            eprintln!("open-mpv: play {}: {e}", path.display());
+            self.show_error(path, &error::message(&e, "Could not play the video."));
             return;
         }
         self.update_subtitles(player.subtitle_snapshot());
@@ -535,13 +557,16 @@ impl App {
     }
 
     fn stop_video(&self) {
-        let discard_player = self
+        let mut discard_player = self
             .player
             .borrow()
             .as_ref()
             .is_some_and(|player| player.has_external_subtitle());
         let snapshots = if let Some(p) = self.player.borrow().as_ref() {
-            p.stop();
+            if let Err(error) = p.stop() {
+                eprintln!("open-mpv: stopping video: {error}");
+                discard_player = true;
+            }
             Some((p.audio_snapshot(), p.subtitle_snapshot()))
         } else {
             None
@@ -592,8 +617,10 @@ impl App {
 
         // Taking the player also drops its bus-watch guard after stop reaches
         // Null, so no streaming callback can outlive process shutdown.
-        if let Some(player) = self.player.borrow_mut().take() {
-            player.stop();
+        if let Some(player) = self.player.borrow_mut().take()
+            && let Err(error) = player.stop()
+        {
+            eprintln!("open-mpv: shutdown player: {error}");
         }
 
         crate::applog!(
@@ -617,7 +644,10 @@ impl App {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 self.flash(&format!("Subtitles: {name}"));
             }
-            Err(error) => self.show_toast(&error.to_string()),
+            Err(error) => {
+                eprintln!("open-mpv: operation failed: {error}");
+                self.show_toast(&error::message(&error, "Could not add the subtitles."));
+            }
         }
     }
 
@@ -1071,28 +1101,40 @@ impl App {
                 // (FR-10.3, `loop=no`) — then the last frame stays up.
                 if self.is_video_showing()
                     && self.cfg.loop_video
-                    && let Some(p) = self.player.borrow().as_ref()
+                    && let Some(Err(error)) = self.with_video(Player::rewind)
                 {
-                    p.rewind();
+                    self.on_player_event(player::Event::StateError(error));
+                }
+            }
+            player::Event::StateError(error) => {
+                eprintln!("open-mpv: playback failed: {error}");
+                if let Some(path) = self.current_path() {
+                    self.show_error(
+                        &path,
+                        "Playback could not continue. Try opening the video again.",
+                    );
                 }
             }
             player::Event::Error(error) => {
                 let path = self.current_path();
                 self.stop_video();
                 if let Some(path) = path {
-                    self.show_error(&path, &error.to_string());
+                    eprintln!("open-mpv: playback {}: {error}", path.display());
+                    self.show_error(&path, &error::message(&error, "Could not play the video. The file may be damaged or need an additional codec."));
                 }
             }
             player::Event::MissingVideoDecoder(description) => {
                 let path = self.current_path();
                 self.stop_video();
                 if let Some(path) = path {
-                    self.show_error(&path, &format!("video decoder unavailable: {description}"));
+                    eprintln!("open-mpv: missing video decoder: {description}");
+                    self.show_error(&path, "A video codec is missing. Check the video packages listed in Troubleshooting.");
                 }
             }
             player::Event::SubtitleError(description) => {
                 if self.is_video_showing() {
-                    self.show_toast(&description);
+                    eprintln!("open-mpv: subtitle error: {description}");
+                    self.show_toast("Could not display the subtitles. Try another subtitle file.");
                 }
             }
             player::Event::AudioChanged(snapshot) => {
@@ -1196,7 +1238,14 @@ impl App {
                         Ok(frame) => frame,
                         Err(error) => {
                             if let Some(path) = app.current_path() {
-                                app.show_error(&path, &error.to_string());
+                                eprintln!("open-mpv: animation {}: {error}", path.display());
+                                app.show_error(
+                                    &path,
+                                    &error::message(
+                                        &error,
+                                        "Could not read the next animation frame.",
+                                    ),
+                                );
                             }
                             return;
                         }
@@ -1553,7 +1602,10 @@ impl App {
                         app.operations.borrow_mut().cancel_trash(&token);
                         eprintln!("open-mpv: error: {e}");
                         if !app.shutting_down.get() {
-                            app.show_toast(&e.to_string());
+                            app.show_toast(&error::message(
+                                &e,
+                                "Could not move the file to trash.",
+                            ));
                         }
                     }
                 }
@@ -1577,31 +1629,35 @@ impl App {
                 // disk. Keep that synchronous filesystem work off the GTK
                 // main thread while the Gio pool runs it (NFR-1.2).
                 let restore_path = path.clone();
-                let result: Result<FileSnapshot, String> = match gio::spawn_blocking(move || {
-                    fileops::restore(&restore_path).map_err(|error| error.to_string())?;
-                    let metadata =
-                        std::fs::metadata(&restore_path).map_err(|error| error.to_string())?;
-                    if !metadata.is_file() {
-                        return Err(format!(
-                            "restored path is not a regular file: {}",
-                            restore_path.display()
-                        ));
-                    }
-                    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                    Ok(FileSnapshot::new(
-                        restore_path,
-                        modified,
-                        SnapshotKind::Regular,
-                    ))
-                })
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(format!(
-                        "could not restore {}: restore worker failed",
-                        path.display()
-                    )),
-                };
+                let result: Result<FileSnapshot, Box<dyn std::error::Error + Send + Sync>> =
+                    match gio::spawn_blocking(
+                        move || -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                            fileops::restore(&restore_path)?;
+                            let metadata = std::fs::metadata(&restore_path)?;
+                            if !metadata.is_file() {
+                                return Err(std::io::Error::other(format!(
+                                    "restored path is not a regular file: {}",
+                                    restore_path.display()
+                                ))
+                                .into());
+                            }
+                            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                            Ok(FileSnapshot::new(
+                                restore_path,
+                                modified,
+                                SnapshotKind::Regular,
+                            ))
+                        },
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(std::io::Error::other(format!(
+                            "could not restore {}: restore worker failed",
+                            path.display()
+                        ))
+                        .into()),
+                    };
                 match result {
                     Ok(snapshot) => {
                         crate::applog!("restore: {}", path.display());
@@ -1629,7 +1685,10 @@ impl App {
                         app.operations.borrow_mut().cancel_undo(&token);
                         eprintln!("open-mpv: error: {e}");
                         if !app.shutting_down.get() {
-                            app.show_toast(&e.to_string());
+                            app.show_toast(&error::message(
+                                e.as_ref(),
+                                "Could not restore the file.",
+                            ));
                         }
                     }
                 }
@@ -1682,7 +1741,7 @@ impl App {
                                         path.display()
                                     );
                                     eprintln!("open-mpv: warning: {warning}");
-                                    app.show_toast(&warning);
+                                    app.show_toast("The rotation was saved, but storage could not confirm it is safely written.");
                                 }
                             }
                             // Reload only the destination that initiated the
@@ -1697,7 +1756,7 @@ impl App {
                         app.operations.borrow_mut().cancel_save(&token);
                         eprintln!("open-mpv: error: {e}");
                         if !app.shutting_down.get() {
-                            app.show_toast(&e.to_string());
+                            app.show_toast(&error::message(&e, "Could not save the rotation."));
                         }
                     }
                 }
@@ -1769,7 +1828,7 @@ impl App {
         if self.is_video_showing() {
             self.start_transport_tick();
         }
-        let timeout = Duration::from_secs_f64(self.cfg.overlay_timeout.max(0.2));
+        let timeout = self.cfg.overlay_timeout;
         reset_timer(
             &self.chrome_timer,
             timeout,
@@ -2026,13 +2085,17 @@ impl App {
                 self.update_control_mode();
             }
             Command::TogglePlayback => match self.with_video(Player::toggle_pause) {
-                Some(true) => {
+                Some(Ok(true)) => {
                     self.set_idle_inhibited(true);
                     self.flash("Play");
                 }
-                Some(false) => {
+                Some(Ok(false)) => {
                     self.set_idle_inhibited(false);
                     self.flash("Paused");
+                }
+                Some(Err(error)) => {
+                    eprintln!("open-mpv: playback command: {error}");
+                    self.show_toast("Could not change playback. Try opening the video again.");
                 }
                 None => {}
             },
