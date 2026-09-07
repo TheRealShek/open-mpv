@@ -67,7 +67,9 @@ new product decisions rather than incidental implementation.
 - **FR-4.2–FR-4.4** Zoom spans at least 5%–2000%, anchors pointer and pinch input correctly, and
   supports pan, fit, actual size and quarter-turn view rotation.
 - **FR-4.5 / FR-4.6** Navigation resets the view; resize preserves fit or manual zoom semantics.
-  Pan state is clamped so no hidden overshoot accumulates.
+  Pan state is clamped for both pointer and keyboard input so no hidden
+  overshoot accumulates. Reversing a drag at any edge moves immediately,
+  including after zoom, rotation or fractional scaling.
 - **FR-2.2** Animated images play automatically and loop. Space and a contextual control
   pause or resume them without restarting the animation.
 - **NFR-1.3 / NFR-3.3** Async decode, animation, SVG and metadata results apply only to the media
@@ -105,7 +107,12 @@ new product decisions rather than incidental implementation.
   action layer. Direct manipulation gestures may manipulate the view directly;
   command-equivalent clicks use the action layer.
 - **FR-6.3 / FR-6.4 / FR-6.6** Fullscreen, compositor-owned move/resize, edge cursors and pointer hiding
-  work natively on Wayland. Initial size uses the active monitor work area.
+  work natively on Wayland. Initial media size is 100% in physical pixels,
+  capped at 85% of the compositor-provided bounds for the window. These
+  exclude shell-reserved space where the platform exposes usable bounds;
+  the window's monitor geometry also limits sizing when available. Placement
+  remains compositor-owned. Subsequent media reuses the window size; the
+  initial video may resize once when preroll supplies its dimensions.
 - **FR-6.7** Escape unwinds the active draft, focused mode, Explorer destination and
   fullscreen before closing. Quit closes immediately and leaves no process.
 - **NFR-5.2** A generated help surface documents every active action and binding.

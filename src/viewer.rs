@@ -140,7 +140,7 @@ pub struct State {
     rotation: u8,
     default_fit_actual: bool,
     pointer: (f64, f64),
-    drag_origin: (f64, f64),
+    drag_delta: (f64, f64),
     annotation: Option<Session>,
 }
 
@@ -155,9 +155,47 @@ impl Default for State {
             rotation: 0,
             default_fit_actual: false,
             pointer: (0.0, 0.0),
-            drag_origin: (0.0, 0.0),
+            drag_delta: (0.0, 0.0),
             annotation: None,
         }
+    }
+}
+
+impl State {
+    fn displayed_size(&self, source: (f64, f64), viewport: (f64, f64), scale: f64) -> (f64, f64) {
+        let z = effective_zoom(self, viewport.0, viewport.1, scale, source.0, source.1);
+        let (w, h) = (source.0 * z / scale, source.1 * z / scale);
+        if self.rotation % 2 == 1 {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    }
+
+    fn pan_by(&mut self, delta: (f64, f64), displayed: (f64, f64), viewport: (f64, f64)) {
+        // Zoom or resize can change the bounds between pointer updates.
+        let offset = clamp_offset(
+            self.offset,
+            displayed.0,
+            displayed.1,
+            viewport.0,
+            viewport.1,
+        );
+        self.offset = clamp_offset(
+            (offset.0 + delta.0, offset.1 + delta.1),
+            displayed.0,
+            displayed.1,
+            viewport.0,
+            viewport.1,
+        );
+    }
+
+    fn drag_to(&mut self, delta: (f64, f64), displayed: (f64, f64), viewport: (f64, f64)) {
+        // GTK reports cumulative travel. Consume each event even at an edge,
+        // so reversing the pointer immediately moves the clamped image.
+        let step = (delta.0 - self.drag_delta.0, delta.1 - self.drag_delta.1);
+        self.drag_delta = delta;
+        self.pan_by(step, displayed, viewport);
     }
 }
 
@@ -766,15 +804,11 @@ impl ImageView {
         if tw <= 0.0 || th <= 0.0 {
             return None;
         }
-        let (w, h) = (self.width() as f64, self.height() as f64);
-        let scale = self.surface_scale();
-        let z = effective_zoom(&st, w, h, scale, tw, th);
-        let (dw, dh) = (tw * z / scale, th * z / scale);
-        Some(if st.rotation % 2 == 1 {
-            (dh, dw)
-        } else {
-            (dw, dh)
-        })
+        Some(st.displayed_size(
+            (tw, th),
+            (f64::from(self.width()), f64::from(self.height())),
+            self.surface_scale(),
+        ))
     }
 
     pub fn is_pannable(&self) -> bool {
@@ -784,10 +818,7 @@ impl ImageView {
         rw > self.width() as f64 + 0.5 || rh > self.height() as f64 + 0.5
     }
 
-    /// Shift the view by a step in logical pixels (FR-4.3). Unlike the
-    /// drag path this clamps as it writes: an arrow key held against an
-    /// edge would otherwise bank offset the draw silently discards, and
-    /// the first press back would spend it instead of moving.
+    /// Shift the view by a clamped step in logical pixels (FR-4.3).
     pub fn pan_by(&self, dx: f64, dy: f64) {
         let Some((rw, rh)) = self.displayed_size() else {
             return;
@@ -795,7 +826,7 @@ impl ImageView {
         let (w, h) = (self.width() as f64, self.height() as f64);
         {
             let mut st = self.state();
-            st.offset = clamp_offset((st.offset.0 + dx, st.offset.1 + dy), rw, rh, w, h);
+            st.pan_by((dx, dy), (rw, rh), (w, h));
         }
         self.queue_draw();
     }
@@ -1037,11 +1068,7 @@ impl ImageView {
                 if view.is_marking_up() {
                     gesture.set_state(gtk::EventSequenceState::Denied);
                 } else if view.is_pannable() {
-                    // Single borrow: the RHS temporary of a two-borrow
-                    // assignment lives until end of statement and aborts
-                    // the process inside this non-unwinding GTK callback.
-                    let mut st = view.state();
-                    st.drag_origin = st.offset;
+                    view.state().drag_delta = (0.0, 0.0);
                 } else {
                     gesture.set_state(gtk::EventSequenceState::Denied);
                 }
@@ -1051,8 +1078,11 @@ impl ImageView {
             #[weak(rename_to = view)]
             self,
             move |_, dx, dy| {
-                let origin = view.imp().state.borrow().drag_origin;
-                view.state().offset = (origin.0 + dx, origin.1 + dy);
+                let Some(displayed) = view.displayed_size() else {
+                    return;
+                };
+                let viewport = (f64::from(view.width()), f64::from(view.height()));
+                view.state().drag_to((dx, dy), displayed, viewport);
                 view.queue_draw();
             }
         ));
@@ -1217,6 +1247,58 @@ mod tests {
         // Image overflows: clamped to edges.
         let (ox, oy) = clamp_offset((500.0, -500.0), 800.0, 800.0, 400.0, 400.0);
         assert_eq!((ox, oy), (200.0, -200.0));
+    }
+
+    #[test]
+    fn drag_discards_overshoot_and_reverses_at_every_edge() {
+        let viewport = (400.0, 300.0);
+        for rotation in 0..4 {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                for zoom in [1.0, 2.5] {
+                    for direction in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                        let mut drag = State {
+                            rotation,
+                            mode: Mode::Manual(zoom),
+                            ..State::default()
+                        };
+                        let displayed = drag.displayed_size((1600.0, 1200.0), viewport, scale);
+                        let mut keys = State::default();
+                        let travel = (direction.0 * 10000.0, direction.1 * 10000.0);
+                        drag.drag_to(travel, displayed, viewport);
+                        keys.pan_by(travel, displayed, viewport);
+                        let edge = (
+                            direction.0 * (displayed.0 - viewport.0) / 2.0,
+                            direction.1 * (displayed.1 - viewport.1) / 2.0,
+                        );
+                        assert_eq!(drag.offset, edge);
+                        assert_eq!(drag.offset, keys.offset);
+                        // Still pushing against the edge must consume the pointer travel.
+                        drag.drag_to((travel.0 * 2.0, travel.1 * 2.0), displayed, viewport);
+                        assert_eq!(drag.offset, edge);
+                        let reverse = (-direction.0 * 0.5, -direction.1 * 0.25);
+                        drag.drag_to(
+                            (travel.0 * 2.0 + reverse.0, travel.1 * 2.0 + reverse.1),
+                            displayed,
+                            viewport,
+                        );
+                        keys.pan_by(reverse, displayed, viewport);
+                        assert_eq!(drag.offset, (edge.0 + reverse.0, edge.1 + reverse.1));
+                        assert_eq!(drag.offset, keys.offset);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drag_reclamps_after_bounds_change_and_centers_fitting_axes() {
+        let mut state = State::default();
+        state.drag_to((10000.0, 10000.0), (1000.0, 800.0), (400.0, 300.0));
+        state.drag_to((9999.5, 9999.5), (600.0, 200.0), (400.0, 300.0));
+        assert_eq!(state.offset, (99.5, 0.0));
+        state.drag_delta = (0.0, 0.0);
+        state.drag_to((-0.5, 200.0), (600.0, 200.0), (400.0, 300.0));
+        assert_eq!(state.offset, (99.0, 0.0));
     }
 
     #[test]

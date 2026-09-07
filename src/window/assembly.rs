@@ -419,6 +419,7 @@ impl App {
             inhibit_cookie: Cell::new(None),
             shutting_down: Cell::new(false),
             sized_from_media: Cell::new(false),
+            pending_media_size: Cell::new(None),
             indicator,
             toast_revealer,
             toast_label,
@@ -528,6 +529,23 @@ impl App {
             }
         ));
         view.add_controller(context_click);
+
+        app.win.connect_realize(clone!(
+            #[weak]
+            app,
+            move |win| {
+                let Some(toplevel) = win.surface().and_downcast::<gdk::Toplevel>() else {
+                    return;
+                };
+                // GtkWindow installs its handler during realize. Run after it
+                // so the one-time media request is not overwritten by GTK.
+                toplevel.connect_compute_size(clone!(
+                    #[weak]
+                    app,
+                    move |toplevel, size| app.compute_initial_size(toplevel, size)
+                ));
+            }
+        ));
 
         if app.cfg.start_fullscreen {
             app.win.fullscreen();
