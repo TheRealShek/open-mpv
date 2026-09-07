@@ -191,6 +191,7 @@ pub struct App {
     /// video presents before its dimensions are known, so its sizing
     /// arrives late and must still be applied once (FR-6.6).
     sized_from_media: Cell<bool>,
+    pending_media_size: Cell<Option<(f64, f64)>>,
     indicator: gtk::Label,
     toast_revealer: gtk::Revealer,
     toast_label: gtk::Label,
@@ -1279,6 +1280,7 @@ impl App {
     /// decoded image, and bump the generation so async work already in
     /// flight knows it has been superseded.
     fn clear_media(&self) {
+        self.pending_media_size.set(None);
         self.navigation.borrow_mut().supersede();
         self.stop_video();
         self.view.clear();
@@ -1344,24 +1346,45 @@ impl App {
     /// work area (FR-6.6). Only the first media of a session does this;
     /// everything after reuses whatever size the window has (FR-4.6).
     fn size_to_media(&self, size: (f64, f64)) {
-        if self.sized_from_media.get() || size.0 <= 0.0 || size.1 <= 0.0 {
+        if self.sized_from_media.get() || !valid_media_size(size) {
             return;
         }
-        let (mut mw, mut mh) = (1920.0f64, 1080.0f64);
-        if let Some(display) = gdk::Display::default()
-            && let Some(monitor) = display.monitors().item(0).and_downcast::<gdk::Monitor>()
-        {
-            let geo = monitor.geometry();
-            (mw, mh) = (f64::from(geo.width()), f64::from(geo.height()));
-        }
-        let (cap_w, cap_h) = (mw * 0.85, mh * 0.85);
-        let s = (cap_w / size.0).min(cap_h / size.1).min(1.0);
-        self.win.set_default_size(
-            window_dimension(size.0 * s, 200),
-            window_dimension(size.1 * s, 150),
-        );
+        self.pending_media_size.set(Some(size));
+        // A present/resize asks GDK to compute the size using the compositor's
+        // bounds. This also runs when video dimensions arrive after preroll.
+        self.win.queue_resize();
+    }
+
+    fn compute_initial_size(&self, toplevel: &gdk::Toplevel, size: &mut gdk::ToplevelSize) {
+        let Some(media) = self.pending_media_size.get() else {
+            return;
+        };
+        let surface = toplevel.upcast_ref::<gdk::Surface>();
+        let monitor = surface
+            .display()
+            .monitor_at_surface(surface)
+            .map(|monitor| {
+                let geometry = monitor.geometry();
+                (geometry.width(), geometry.height())
+            });
+        let Some((width, height)) =
+            initial_media_size(media, surface.scale(), size.bounds(), monitor)
+        else {
+            return;
+        };
+        self.pending_media_size.set(None);
         self.sized_from_media.set(true);
-        crate::applog!("window sized to media {}x{}", size.0, size.1);
+        self.win.set_default_size(width, height);
+        // The compositor owns fullscreen/maximized allocations. Remember the
+        // normal size without overriding GTK's request for those states.
+        if !self.win.is_fullscreen() && !self.win.is_maximized() {
+            size.set_size(width, height);
+        }
+        crate::applog!(
+            "window sized to media {}x{}: {width}x{height}",
+            media.0,
+            media.1
+        );
     }
 
     // ----- navigation ---------------------------------------------------
@@ -2096,6 +2119,42 @@ fn svg_render_dimension(value: f64) -> u32 {
     dimension
 }
 
+fn valid_media_size(size: (f64, f64)) -> bool {
+    size.0.is_finite() && size.1.is_finite() && size.0 > 0.0 && size.1 > 0.0
+}
+
+/// GDK bounds carry the platform's usable area; monitor geometry limits
+/// backends that instead report the union of all outputs. Both are logical px.
+fn initial_media_size(
+    media: (f64, f64),
+    scale: f64,
+    bounds: (i32, i32),
+    monitor: Option<(i32, i32)>,
+) -> Option<(i32, i32)> {
+    if !valid_media_size(media) || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let bound =
+        |available: i32, monitor: Option<i32>| match (available > 0, monitor.filter(|n| *n > 0)) {
+            (true, Some(monitor)) => Some(available.min(monitor)),
+            (true, None) => Some(available),
+            (false, monitor) => monitor,
+        };
+    let width = bound(bounds.0, monitor.map(|m| m.0))?;
+    let height = bound(bounds.1, monitor.map(|m| m.1))?;
+    let cap = (
+        (f64::from(width) * 0.85).floor().max(1.0),
+        (f64::from(height) * 0.85).floor().max(1.0),
+    );
+    let media = (media.0 / scale, media.1 / scale);
+    let fit = (cap.0 / media.0).min(cap.1 / media.1).min(1.0);
+    // Minimum convenience sizes must never defeat the monitor cap.
+    Some((
+        window_dimension((media.0 * fit).max(200.0).min(cap.0), 1),
+        window_dimension((media.1 * fit).max(150.0).min(cap.1), 1),
+    ))
+}
+
 fn window_dimension(value: f64, minimum: i32) -> i32 {
     if !value.is_finite() {
         return minimum;
@@ -2395,10 +2454,11 @@ mod tests {
     use super::{
         Action, Arrival, Direction, SEEK_STEP_SECONDS, SKIP_BUDGET, adjacent_playback_rate,
         cache_budget_bytes, chrome_is_held, dialog_initial_folder_path, dialog_was_cancelled,
-        excluded_path_message, format_playback_rate, format_time, looks_like_subtitle,
-        position_text, rebuild_audio_context, rebuild_audio_menu, rebuild_markup_context,
-        rebuild_subtitle_context, rebuild_subtitle_menu, resize_edge_at, save_control_visible,
-        skip_target, supported_media_extensions, svg_render_dimension, window_dimension,
+        excluded_path_message, format_playback_rate, format_time, initial_media_size,
+        looks_like_subtitle, position_text, rebuild_audio_context, rebuild_audio_menu,
+        rebuild_markup_context, rebuild_subtitle_context, rebuild_subtitle_menu, resize_edge_at,
+        save_control_visible, skip_target, supported_media_extensions, svg_render_dimension,
+        window_dimension,
     };
 
     use super::assembly::playback_speed_menu;
@@ -2447,6 +2507,60 @@ mod tests {
         let mut navigation = Navigation::default();
         navigation.install(folder);
         (dir, navigation)
+    }
+
+    #[test]
+    fn initial_size_uses_compositor_work_area_and_selected_monitor() {
+        // The window is on a small second monitor, not the large first output.
+        assert_eq!(
+            initial_media_size((4000.0, 3000.0), 1.0, (3840, 2160), Some((1280, 720))),
+            Some((816, 612))
+        );
+        // Shell reservations further reduce the same monitor's usable height.
+        assert_eq!(
+            initial_media_size((4000.0, 3000.0), 1.0, (1280, 680), Some((1280, 720))),
+            Some((771, 578))
+        );
+        // Before surface/monitor association, compositor bounds suffice.
+        assert_eq!(
+            initial_media_size((4000.0, 3000.0), 1.0, (1280, 680), None),
+            Some((771, 578))
+        );
+        assert_eq!(
+            initial_media_size((4000.0, 3000.0), 1.0, (0, 0), Some((1280, 720))),
+            Some((816, 612))
+        );
+        assert_eq!(
+            initial_media_size((4000.0, 3000.0), 1.0, (0, 0), None),
+            None
+        );
+    }
+
+    #[test]
+    fn initial_size_is_pixel_exact_until_capped() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            assert_eq!(
+                initial_media_size((600.0, 450.0), scale, (1920, 1080), None),
+                Some(((600.0 / scale) as i32, (450.0 / scale) as i32))
+            );
+        }
+        // The convenience minimum and rounding cannot cross the 85% cap.
+        assert_eq!(
+            initial_media_size((10.0, 10.0), 1.0, (100, 100), None),
+            Some((85, 85))
+        );
+        assert_eq!(
+            initial_media_size((1000.0, 1000.0), 1.0, (101, 101), None),
+            Some((85, 85))
+        );
+        for media in [
+            (0.0, 10.0),
+            (-1.0, 10.0),
+            (f64::NAN, 10.0),
+            (10.0, f64::INFINITY),
+        ] {
+            assert_eq!(initial_media_size(media, 1.0, (1920, 1080), None), None);
+        }
     }
 
     #[test]

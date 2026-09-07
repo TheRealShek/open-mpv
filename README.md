@@ -54,6 +54,8 @@ You can also start open-mpv without a path and choose **Open File** or
 - Moves through the supported media files in the current folder.
 - Supports zoom, pan, fit, rotation and fullscreen. Dragging stops at image
   edges and responds immediately when you reverse direction.
+- Sizes the first media to the window's available display area, then keeps
+  the window size as you navigate. See [window sizing](docs/REQUIREMENTS.md#fr-6--window-and-interaction).
 - Plays video with seeking, volume, speed, audio-track and subtitle controls.
 - Moves files to trash and offers a short Undo action.
 - Saves supported image rotations atomically. JPEG rotation is lossless, and
