@@ -81,8 +81,9 @@ new product decisions rather than incidental implementation.
 ### FR-5 — File, clipboard and editing safety
 
 - **FR-5.1 / FR-5.2** Trash immediately moves the current item to freedesktop trash and offers a
-  short Undo. Undo never overwrites a path recreated after deletion and never
-  mutates an unrelated folder or media generation.
+  short Undo. Undo resolves mount-relative paths from both `.Trash/<uid>` and
+  `.Trash-<uid>` against the mount root. Undo never overwrites a path recreated
+  after deletion and never mutates an unrelated folder or media generation.
 - **FR-5.3 / FR-5.4 / FR-5.5** Explicit rotate-save supports only editable static images. JPEG remains
   lossless; every save path is atomic and preserves either the complete old or
   complete new file across interruption. Replacement preserves the source
