@@ -383,6 +383,7 @@ impl App {
             animation: RefCell::new(None),
             animation_btn,
             cache: loader::Cache::new(3, cache_budget_bytes(cfg.cache_budget_mb)),
+            decodes: RefCell::new(loader::Scheduler::default()),
             editable_mimes: RefCell::new(BTreeSet::new()),
             player: RefCell::new(None),
             operations: RefCell::new(OperationCoordinator::default()),

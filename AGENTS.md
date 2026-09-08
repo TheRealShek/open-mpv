@@ -94,7 +94,7 @@ Keep each rule in the module that owns it:
 | `main` | GTK application lifecycle, activation and the single-instance entry point |
 | `config` | defaults, parsing, supported extensions and key bindings |
 | `folder` | selected folder, sorted Navigation set, current destination, generation and changes to the set |
-| `loader` | background Glycin image decoding and the limited image cache |
+| `loader` | bounded, deduplicated Glycin image decoding and the limited image cache |
 | `annotation` | bounded Quick Markup shapes and shared preview/copy drawing |
 | `viewer` | fit, zoom, pan, view rotation and source/view transforms for any paintable |
 | `player` | GStreamer setup, playback, seeking and stream selection |

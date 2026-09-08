@@ -61,7 +61,8 @@ file with open-mpv from Files, or drag one into the window.
 Opening a file lets you browse the other supported photos and videos in the
 same folder. Opening a folder starts with its first supported file.
 The window starts at a size that fits your display and keeps that size as
-you browse.
+you browse. Rapid navigation keeps image-loading work bounded and gives the
+current photo priority over preloading neighbors.
 
 If you prefer the terminal:
 

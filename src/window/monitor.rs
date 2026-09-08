@@ -229,6 +229,13 @@ impl App {
             FsChange::Rename { old, .. } => (old.as_path(), false),
         };
         let path = path.to_path_buf();
+        // Invalidate both sides of a rename before a new destination can use
+        // a cached result or join an in-flight decode of replaced contents.
+        let invalidated = match &change {
+            FsChange::Remove(path) => vec![path.clone()],
+            FsChange::Rename { old, new, .. } => vec![old.clone(), new.clone()],
+            FsChange::Insert(_) => Vec::new(),
+        };
         let (before_generation, presentation) = {
             let mut navigation = self.navigation.borrow_mut();
             let before = navigation.generation();
@@ -237,6 +244,10 @@ impl App {
             };
             (before, presentation)
         };
+        for path in invalidated {
+            self.cache.invalidate(&path);
+            self.decodes.borrow_mut().invalidate(&path);
+        }
         let current_changed = !matches!(presentation, FsPresentation::Unchanged);
         crate::applog!(
             "fs event: {event:?} {}{}",

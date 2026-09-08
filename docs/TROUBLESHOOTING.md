@@ -46,6 +46,37 @@ including whether GStreamer classifies it as hardware or software. When
 reporting a playback problem, include the relevant log lines, the media format
 and the installed decoder reported by `gst-inspect-1.0`.
 
+## Image loading under rapid navigation
+
+`loader: start` and `loader: finish` diagnostics report active and queued
+first-frame jobs. Active counts include cancelled jobs until their futures
+finish. The exact bounds are in [Performance and bounded work](REQUIREMENTS.md#nfr-1--performance-and-bounded-work).
+These counts exclude retained animated-image/SVG loaders and Glycin's idle
+process pool, so also measure processes and PSS when investigating growth.
+
+From a source checkout in a GNOME/Wayland session, run the deterministic slow
+loader regression separately from other desktop tests:
+
+```sh
+cargo test --locked window::decode_tests::rapid_navigation_bounds_slow_decodes -- --ignored --exact --nocapture
+```
+
+For real decoding, provide a disposable fixture folder with at least 12 valid
+images (for example, 12 MP PNGs) and run:
+
+```sh
+OPEN_MPV_STRESS_DIR=/path/to/fixtures cargo test --release --locked window::decode_tests::sustained_real_decodes -- --ignored --exact --nocapture
+```
+
+This performs six rounds of 200 selections, 25 ms apart, with a three-second
+settling period after each round. The log gives the test process PID. Sample
+`Pss` in `/proc/<pid>/smaps_rollup` for that process and its descendants, and
+count Glycin loader processes throughout navigation and settling. Compare
+successive rounds; record image dimensions/formats, peak counts and PSS, and
+settled values. A large image can require substantial decode memory even with
+bounded job counts. This automated check does not replace human testing of
+navigation, animation, SVG zoom, mixed video/image folders and quit.
+
 ## Configuration and folder changes
 
 A missing optional configuration file uses defaults. If the file cannot be read

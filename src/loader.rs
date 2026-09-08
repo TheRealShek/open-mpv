@@ -1,6 +1,11 @@
 //! Async image loading through glycin's sandboxed loaders (FR-2,
 //! NFR-3.2) and a small bounded cache so neighbor navigation is
 //! instant without memory growing with folder size (NFR-1.2, NFR-2.1).
+//! The scheduler owns first-frame concurrency, demand and cancellation; the
+//! window supplies destination tokens and presents completed results.
+
+mod scheduler;
+pub use scheduler::{Interest, Scheduler};
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -68,10 +73,20 @@ impl Decoded {
     }
 }
 
-pub async fn decode(path: &Path) -> Result<(Rc<Decoded>, String), DecodeError> {
+pub async fn decode(
+    path: &Path,
+    cancellable: &gio::Cancellable,
+) -> Result<(Rc<Decoded>, String), DecodeError> {
+    #[cfg(test)]
+    if let Some(gate) = slow_test_gate(path) {
+        use gio::prelude::CancellableExtManual;
+        gate.future().await;
+    }
     let started = std::time::Instant::now();
     let file = gio::File::for_path(path);
-    let image = glycin::Loader::new(file)
+    let mut loader = glycin::Loader::new(file);
+    loader.cancellable(cancellable.clone());
+    let image = loader
         .load()
         .await
         .map_err(|source| DecodeError::Load(Box::new(source)))?;
@@ -366,4 +381,21 @@ mod tests {
         assert!(!cache.contains(Path::new("a")));
         assert!(cache.contains(Path::new("d")));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SLOW_TEST: RefCell<Option<(Vec<PathBuf>, gio::Cancellable)>> = const { RefCell::new(None) };
+}
+
+// The desktop regression holds real window requests at the decoder boundary,
+// including cancelled ones, until it explicitly releases them.
+#[cfg(test)]
+fn slow_test_gate(path: &Path) -> Option<gio::Cancellable> {
+    SLOW_TEST.with(|state| {
+        let mut state = state.borrow_mut();
+        let (paths, gate) = state.as_mut()?;
+        paths.push(path.to_path_buf());
+        Some(gate.clone())
+    })
 }
