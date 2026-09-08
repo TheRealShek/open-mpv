@@ -245,6 +245,15 @@ new product decisions rather than incidental implementation.
 - **NFR-2.1 / NFR-2.1a** The displayed image may exceed a cache budget, but all additional decoded
   media is bounded by checked byte and count limits. A zero neighbor budget
   retains no neighbors.
+- **NFR-1.3 / NFR-2.1b** Viewer first-frame decoding has at most two active jobs,
+  including jobs awaiting cancellation, and at most three queued requests
+  (the current image and two neighbors). Requests for the same path share
+  in-flight work; a neighbor promoted to foreground uses the latest destination
+  token. Foreground work starts before queued speculation, with at most one
+  uncancelled speculative job. Obsolete work is cancelled and its results are
+  discarded. Folder replacement, clearing the Viewer and shutdown cancel all
+  outstanding requests; source-file invalidation also invalidates running work.
+  These are work-count limits, not a byte limit on decoding a single large file.
 - **NFR-1.4 / NFR-2.1a** Explorer memory is proportional to its viewport, not folder size. Preview
   concurrency and in-flight work are bounded and stale recycled-cell results
   are discarded.

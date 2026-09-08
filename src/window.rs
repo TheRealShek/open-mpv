@@ -29,6 +29,9 @@ use crate::player::{
 };
 use crate::viewer::ImageView;
 
+#[cfg(test)]
+mod decode_tests;
+
 mod action;
 mod animation;
 mod assembly;
@@ -121,6 +124,7 @@ pub struct App {
     animation: RefCell<Option<Rc<animation::Playback>>>,
     animation_btn: gtk::Button,
     cache: loader::Cache,
+    decodes: RefCell<loader::Scheduler<(u64, Arrival)>>,
     editable_mimes: RefCell<BTreeSet<String>>,
     /// Created on the first video (lazy GStreamer init, NFR-1.1) and
     /// reused; `None` also while videos have never been opened.
@@ -328,6 +332,7 @@ impl App {
     }
 
     fn install_folder(self: &Rc<Self>, folder: Folder) {
+        self.decodes.borrow_mut().cancel_all();
         let len = folder.len();
         self.fs_queries.borrow_mut().cancel_all();
         let (directory, set) = {
@@ -402,49 +407,20 @@ impl App {
         self.update_pos_label();
         if config::is_video(&path) {
             self.show_video(&path);
-            self.preload_neighbors(idx);
+            self.schedule_decodes(idx, None);
             return;
         }
         // Leaving a video for an image: silence and free the decoder.
         self.stop_video();
 
-        if let Some((decoded, mime)) = self.cache.get(&path) {
+        let foreground = if let Some((decoded, mime)) = self.cache.get(&path) {
             crate::applog!("show: {} (cache hit)", path.display());
             self.apply_decoded(path, decoded, mime, generation);
+            None
         } else {
-            glib::spawn_future_local(clone!(
-                #[strong(rename_to = app)]
-                self,
-                async move {
-                    match loader::decode(&path).await {
-                        Ok((decoded, mime)) => {
-                            if app.navigation.borrow().is_current_generation(generation) {
-                                app.cache.put_foreground(
-                                    path.clone(),
-                                    decoded.clone(),
-                                    mime.clone(),
-                                );
-                                app.apply_decoded(path.clone(), decoded, mime, generation);
-                            } else {
-                                app.cache.put_neighbor(path.clone(), decoded, mime);
-                                crate::applog!("show: {} superseded", path.display());
-                            }
-                        }
-                        Err(e) => {
-                            if app.navigation.borrow().is_current_generation(generation) {
-                                eprintln!("open-mpv: decode {}: {e}", path.display());
-                                app.on_decode_failed(
-                                    &path,
-                                    &error::message(&e, "Could not open the image."),
-                                    arrival,
-                                );
-                            }
-                        }
-                    }
-                }
-            ));
-        }
-        self.preload_neighbors(idx);
+            Some((path, (generation, arrival)))
+        };
+        self.schedule_decodes(idx, foreground);
     }
 
     /// A file did not decode. Stepping through a folder carries on in the
@@ -603,6 +579,7 @@ impl App {
         // sources, then prevent monitors and timers from scheduling more UI
         // work while the close request proceeds.
         self.navigation.borrow_mut().supersede();
+        self.decodes.borrow_mut().cancel_all();
         self.stop_animation();
         self.monitor.borrow_mut().take();
         self.fs_queries.borrow_mut().cancel_all();
@@ -1337,7 +1314,11 @@ impl App {
         );
     }
 
-    fn preload_neighbors(self: &Rc<Self>, idx: usize) {
+    fn schedule_decodes(
+        self: &Rc<Self>,
+        idx: usize,
+        foreground: Option<(PathBuf, (u64, Arrival))>,
+    ) {
         let neighbors: Vec<PathBuf> = {
             let navigation = self.navigation.borrow();
             [idx.checked_sub(1), Some(idx + 1)]
@@ -1349,20 +1330,57 @@ impl App {
                 .map(Path::to_path_buf)
                 .collect()
         };
-        for path in neighbors {
-            if self.cache.contains(&path) {
-                continue;
-            }
-            glib::spawn_future_local(clone!(
-                #[strong(rename_to = app)]
-                self,
-                async move {
-                    if let Ok((decoded, mime)) = loader::decode(&path).await {
-                        crate::applog!("preload: {}", path.display());
-                        app.cache.put_neighbor(path, decoded, mime);
+        self.decodes.borrow_mut().replace(
+            foreground,
+            neighbors
+                .into_iter()
+                .filter(|path| !self.cache.contains(path)),
+        );
+        self.start_decodes();
+    }
+
+    fn start_decodes(self: &Rc<Self>) {
+        loop {
+            let Some(job) = self.decodes.borrow_mut().start() else {
+                break;
+            };
+            let weak = Rc::downgrade(self);
+            glib::spawn_future_local(async move {
+                let result = loader::decode(&job.path, &job.cancellable).await;
+                let Some(app) = weak.upgrade() else { return };
+                let interest = app.decodes.borrow_mut().finish(&job.path);
+                match interest {
+                    Some(loader::Interest::Foreground((generation, arrival)))
+                        if app.navigation.borrow().is_current_generation(generation) =>
+                    {
+                        match result {
+                            Ok((decoded, mime)) => {
+                                app.cache.put_foreground(
+                                    job.path.clone(),
+                                    decoded.clone(),
+                                    mime.clone(),
+                                );
+                                app.apply_decoded(job.path, decoded, mime, generation);
+                            }
+                            Err(e) => {
+                                eprintln!("open-mpv: decode {}: {e}", job.path.display());
+                                app.on_decode_failed(
+                                    &job.path,
+                                    &error::message(&e, "Could not open the image."),
+                                    arrival,
+                                );
+                            }
+                        }
                     }
+                    Some(loader::Interest::Neighbor) => {
+                        if let Ok((decoded, mime)) = result {
+                            app.cache.put_neighbor(job.path, decoded, mime);
+                        }
+                    }
+                    _ => {}
                 }
-            ));
+                app.start_decodes();
+            });
         }
     }
 
@@ -1372,6 +1390,7 @@ impl App {
     fn clear_media(&self) {
         self.pending_media_size.set(None);
         self.navigation.borrow_mut().supersede();
+        self.decodes.borrow_mut().cancel_all();
         self.stop_animation();
         self.stop_video();
         self.view.clear();
@@ -1568,6 +1587,7 @@ impl App {
                             started.elapsed().as_secs_f64() * 1000.0
                         );
                         app.cache.invalidate(&path);
+                        app.decodes.borrow_mut().invalidate(&path);
                         if !app.shutting_down.get()
                             && app
                                 .operations
@@ -1747,6 +1767,7 @@ impl App {
                             started.elapsed().as_secs_f64() * 1000.0
                         );
                         app.cache.invalidate(&path);
+                        app.decodes.borrow_mut().invalidate(&path);
                         if !app.shutting_down.get() {
                             match outcome {
                                 fileops::SaveRotationOutcome::Saved => app.flash("Saved"),
@@ -2953,6 +2974,55 @@ mod tests {
         navigation.select(1).unwrap();
         assert_eq!(operations.finish_save(&save, &navigation), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_finishing_after_navigation_or_monitor_reload_keeps_latest_decode_demand() {
+        for monitor_first in [false, true] {
+            let (dir, mut navigation) = navigation_of(
+                if monitor_first {
+                    "save-decode-monitor"
+                } else {
+                    "save-decode-return"
+                },
+                &["a.jpg", "b.jpg"],
+            );
+            navigation.select(0).unwrap();
+            let saved = dir.join("a.jpg");
+            let mut operations = OperationCoordinator::default();
+            let save = operations.start_save(&navigation, &saved).unwrap();
+            if monitor_first {
+                // Atomic replacement observed by the folder monitor refreshes A.
+                navigation.rename(
+                    &dir.join("temporary.jpg"),
+                    &saved,
+                    Some(FileSnapshot::new(
+                        saved.clone(),
+                        std::time::SystemTime::UNIX_EPOCH,
+                        SnapshotKind::Regular,
+                    )),
+                );
+            } else {
+                navigation.select(1).unwrap();
+                navigation.select(0).unwrap();
+            }
+            let generation = navigation.generation();
+            let mut decodes = loader::Scheduler::default();
+            decodes.replace(Some((saved.clone(), generation)), []);
+            let old = decodes.start().unwrap();
+            assert_eq!(operations.finish_save(&save, &navigation), None);
+            decodes.invalidate(&saved);
+            assert!(decodes.finish(&old.path).is_none());
+            let fresh = decodes
+                .start()
+                .expect("latest current image must retry after save");
+            assert!(
+                matches!(decodes.finish(&fresh.path), Some(loader::Interest::Foreground(token)) if token == generation)
+            );
+            assert!(navigation.is_current_generation(generation));
+            assert_eq!(navigation.current_path(), Some(saved.as_path()));
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
