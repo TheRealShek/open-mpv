@@ -170,7 +170,11 @@ pub async fn trash(path: &Path) -> Result<(), TrashError> {
 /// GUI main loop.
 pub fn restore(orig: &Path) -> Result<(), RestoreError> {
     let trash_dirs = trash_dirs_for(orig);
-    let (file, info) = find_trashed_file(orig, &trash_dirs)
+    restore_from(orig, &trash_dirs)
+}
+
+fn restore_from(orig: &Path, trash_dirs: &[TrashDirectory]) -> Result<(), RestoreError> {
+    let (file, info) = find_trashed_file(orig, trash_dirs)
         .ok_or_else(|| RestoreError::NotFound(orig.to_path_buf()))?;
     rustix::fs::renameat_with(
         rustix::fs::CWD,
@@ -194,10 +198,30 @@ pub fn restore(orig: &Path) -> Result<(), RestoreError> {
     Ok(())
 }
 
-fn find_trashed_file(orig: &Path, trash_dirs: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
+/// Relative metadata paths use the mount root for either mount-local layout,
+/// or the data directory for the home trash. Layout depth is not a path root.
+struct TrashDirectory {
+    path: PathBuf,
+    relative_root: PathBuf,
+}
+
+impl TrashDirectory {
+    fn mount_local(top: &Path, uid: u32) -> [Self; 2] {
+        [
+            top.join(".Trash").join(uid.to_string()),
+            top.join(format!(".Trash-{uid}")),
+        ]
+        .map(|path| Self {
+            path,
+            relative_root: top.to_path_buf(),
+        })
+    }
+}
+
+fn find_trashed_file(orig: &Path, trash_dirs: &[TrashDirectory]) -> Option<(PathBuf, PathBuf)> {
     let mut best: Option<(PathBuf, PathBuf, String)> = None; // (files/<n>, info file, date)
     for trash_dir in trash_dirs {
-        let info_dir = trash_dir.join("info");
+        let info_dir = trash_dir.path.join("info");
         let Ok(entries) = std::fs::read_dir(&info_dir) else {
             continue;
         };
@@ -218,14 +242,10 @@ fn find_trashed_file(orig: &Path, trash_dirs: &[PathBuf]) -> Option<(PathBuf, Pa
                 }
             }
             let Some(path) = path else { continue };
-            // Mount-level trashes store paths relative to the mount root.
             let abs = if path.is_absolute() {
                 path
             } else {
-                match trash_dir.parent().and_then(Path::parent) {
-                    Some(top) => top.join(path),
-                    None => continue,
-                }
+                trash_dir.relative_root.join(path)
             };
             if abs != orig {
                 continue;
@@ -233,7 +253,7 @@ fn find_trashed_file(orig: &Path, trash_dirs: &[PathBuf]) -> Option<(PathBuf, Pa
             let Some(stem) = info_path.file_stem() else {
                 continue;
             };
-            let file = trash_dir.join("files").join(stem);
+            let file = trash_dir.path.join("files").join(stem);
             // ISO 8601 deletion dates compare correctly as strings.
             if best.as_ref().is_none_or(|(_, _, d)| date > *d) {
                 best = Some((file, info_path, date));
@@ -246,15 +266,18 @@ fn find_trashed_file(orig: &Path, trash_dirs: &[PathBuf]) -> Option<(PathBuf, Pa
 /// Trash directories that could hold `orig` per the freedesktop trash
 /// spec: the home trash, and the `.Trash`/`.Trash-$uid` dirs at the top
 /// of the file's mount point.
-fn trash_dirs_for(orig: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![glib::user_data_dir().join("Trash")];
+fn trash_dirs_for(orig: &Path) -> Vec<TrashDirectory> {
+    let data_dir = glib::user_data_dir();
+    let mut dirs = vec![TrashDirectory {
+        path: data_dir.join("Trash"),
+        relative_root: data_dir,
+    }];
     if let Some(top) = mount_topdir(orig) {
         // Effective uid without adding a libc dependency (Linux).
         if let Ok(meta) = std::fs::metadata("/proc/self") {
             use std::os::unix::fs::MetadataExt;
             let uid = meta.uid();
-            dirs.push(top.join(".Trash").join(uid.to_string()));
-            dirs.push(top.join(format!(".Trash-{uid}")));
+            dirs.extend(TrashDirectory::mount_local(&top, uid));
         }
     }
     dirs
@@ -604,6 +627,92 @@ mod tests {
     }
 
     #[test]
+    fn restore_resolves_each_trash_layout_without_replacing_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("mount");
+        let data_dir = dir.path().join("data");
+        let mut trash_dirs = Vec::from(TrashDirectory::mount_local(&top, 1000));
+        trash_dirs.push(TrashDirectory {
+            path: data_dir.join("Trash"),
+            relative_root: data_dir,
+        });
+
+        for trash in trash_dirs {
+            std::fs::create_dir_all(trash.path.join("info")).unwrap();
+            std::fs::create_dir_all(trash.path.join("files")).unwrap();
+            for (relative, encoded) in [
+                ("photo.jpg", "photo.jpg"),
+                ("photos/photo one.jpg", "photos/photo%20one.jpg"),
+            ] {
+                let orig = trash.relative_root.join(relative);
+                std::fs::create_dir_all(orig.parent().unwrap()).unwrap();
+                for metadata_path in [
+                    encoded.to_owned(),
+                    orig.to_str().unwrap().replace(' ', "%20"),
+                ] {
+                    let payload = trash.path.join("files/unique-name.jpg");
+                    let info = trash.path.join("info/unique-name.jpg.trashinfo");
+                    let metadata = format!(
+                        "[Trash Info]\nPath={metadata_path}\nDeletionDate=2026-01-01T00:00:00\n"
+                    );
+                    std::fs::write(&payload, b"trashed payload").unwrap();
+                    std::fs::write(&info, &metadata).unwrap();
+                    let candidates = std::slice::from_ref(&trash);
+                    assert_eq!(
+                        find_trashed_file(&orig, candidates),
+                        Some((payload.clone(), info.clone()))
+                    );
+                    assert!(
+                        find_trashed_file(&dir.path().join("unrelated/photo.jpg"), candidates)
+                            .is_none()
+                    );
+
+                    std::fs::write(&orig, b"replacement").unwrap();
+                    assert!(matches!(
+                        restore_from(&orig, candidates),
+                        Err(RestoreError::DestinationExists(path)) if path == orig
+                    ));
+                    assert_eq!(std::fs::read(&orig).unwrap(), b"replacement");
+                    assert_eq!(std::fs::read(&payload).unwrap(), b"trashed payload");
+                    assert_eq!(std::fs::read_to_string(&info).unwrap(), metadata);
+
+                    std::fs::remove_file(&orig).unwrap();
+                    restore_from(&orig, candidates).unwrap();
+                    assert_eq!(std::fs::read(&orig).unwrap(), b"trashed payload");
+                    assert!(!payload.exists());
+                    assert!(!info.exists());
+                    assert!(matches!(
+                        restore_from(&orig, candidates),
+                        Err(RestoreError::NotFound(path)) if path == orig
+                    ));
+                    std::fs::remove_file(&orig).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trash_lookup_selects_the_newest_entry_across_mount_layouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash_dirs = TrashDirectory::mount_local(dir.path(), 1000);
+        let orig = dir.path().join("photo.jpg");
+        for (trash, date) in trash_dirs.iter().zip(["2026-01-01", "2026-01-02"]) {
+            std::fs::create_dir_all(trash.path.join("info")).unwrap();
+            std::fs::create_dir_all(trash.path.join("files")).unwrap();
+            std::fs::write(trash.path.join("files/photo.jpg"), date).unwrap();
+            std::fs::write(
+                trash.path.join("info/photo.jpg.trashinfo"),
+                format!("[Trash Info]\nPath=photo.jpg\nDeletionDate={date}T00:00:00\n"),
+            )
+            .unwrap();
+        }
+        restore_from(&orig, &trash_dirs).unwrap();
+        assert_eq!(std::fs::read_to_string(&orig).unwrap(), "2026-01-02");
+        assert!(trash_dirs[0].path.join("files/photo.jpg").exists());
+        assert!(trash_dirs[0].path.join("info/photo.jpg.trashinfo").exists());
+    }
+
+    #[test]
     fn percent_decode_handles_untrusted_bytes_without_panicking() {
         assert_eq!(
             percent_decode("photo%20one%2Ejpg").as_os_str().as_bytes(),
@@ -645,7 +754,14 @@ mod tests {
         .unwrap();
         std::fs::write(trash.join("files/good"), b"payload").unwrap();
 
-        let selected = find_trashed_file(&orig, std::slice::from_ref(&trash)).unwrap();
+        let selected = find_trashed_file(
+            &orig,
+            &[TrashDirectory {
+                path: trash.clone(),
+                relative_root: dir.path().to_path_buf(),
+            }],
+        )
+        .unwrap();
         assert_eq!(selected.0, trash.join("files/good"));
         assert_eq!(selected.1, trash.join("info/good.trashinfo"));
     }
