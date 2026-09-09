@@ -188,6 +188,54 @@ only from tags; GitHub retains older releases for explicit downgrade.
 Use no fixed calendar. Release meaningful improvements when ready; publish
 security or data-safety fixes promptly with a plain impact statement.
 
+## Immutable publication checklist
+
+Repository release immutability was enabled and verified on 9 September 2026.
+Before each publication, confirm **Settings → General → Releases → Enable
+release immutability** is still enabled. This protects future publications;
+existing published versions remain untouched. Never delete and republish a
+published version to correct it: use a new version.
+
+1. Keep the release as a draft while attaching the Fedora RPM and `SHA256SUMS`.
+   Download both draft assets into a fresh directory and run `sha256sum -c
+   SHA256SUMS` there. Record the tag, exact source commit, workflow run and RPM
+   SHA-256 in the validation record.
+2. Validate that exact downloaded RPM in GNOME/Wayland, including launch and
+   the applicable packaging checks. The author must test that artifact or
+   explicitly approve publication without personal testing, recording the
+   remaining risk. A rebuild or replacement invalidates previous artifact
+   testing, even when the version and source commit are unchanged; repeat the
+   validation gate for the replacement bytes.
+3. Complete the draft notes, including known issues and configuration changes,
+   and publish manually only after approving the exact attached assets. After
+   publication, the tag and assets are immutable; the title and notes remain
+   editable. Corrections to a binary require a new release version.
+4. For the next normally authorized publication, confirm the release page
+   shows **Immutable** and verify its attestation and local assets with a
+   GitHub CLI version that supports release verification:
+
+   ```sh
+   # Set this to the version just published; run beside its downloaded assets.
+   tag=v0.1.3
+   gh release verify "$tag" --repo TheRealShek/open-mpv
+   gh release verify-asset "$tag" open-mpv-fedora44-x86_64.rpm --repo TheRealShek/open-mpv
+   gh release verify-asset "$tag" SHA256SUMS --repo TheRealShek/open-mpv
+   ```
+
+5. When publishing the new latest stable release, download the stable URL and
+   compare its bytes with the approved RPM before using the documented DNF
+   install command:
+
+   ```sh
+   curl --fail --location --output latest.rpm \
+     https://github.com/TheRealShek/open-mpv/releases/latest/download/open-mpv-fedora44-x86_64.rpm
+   cmp open-mpv-fedora44-x86_64.rpm latest.rpm
+   ```
+
+Publication verification remains pending until the next authorized release.
+Do not publish a dummy production release for this check. Retain the successful
+verification output with that release's validation record.
+
 ## First-release gate
 
 1. Add AppStream metadata, including a summary, description, screenshots,
@@ -222,6 +270,10 @@ passes the functional and performance checks without permissions that
 undermine the product; otherwise keep Fedora as the honest supported target.
 
 ## References
+
+- [GitHub: immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+- [GitHub: enable release immutability](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes)
+- [GitHub CLI: verify release assets](https://cli.github.com/manual/gh_release_verify-asset)
 
 - [GitHub: link to the latest release asset](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
 - [GitHub: manually run a workflow](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
