@@ -93,6 +93,7 @@ jobs:
             gstreamer1-plugins-good \
             gtk4-devel \
             pkgconf-pkg-config \
+            python3-rpm \
             rpm-build \
             rust \
             rustfmt
@@ -118,6 +119,7 @@ jobs:
 
       - name: Validate repository files
         run: |
+          python3 -m unittest discover -s packaging/tests -v
           shellcheck install.sh uninstall.sh packaging/build-rpm.sh
           sh -n install.sh uninstall.sh packaging/build-rpm.sh
           desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
