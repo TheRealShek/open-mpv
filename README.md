@@ -34,6 +34,8 @@ when you choose to save a rotation, move them to trash or restore them.
 Currently supported on **Fedora 44 Workstation, GNOME, Wayland and x86-64**.
 Other distributions and desktops are not supported yet.
 
+Previously installed from source? Follow the [source-to-RPM migration guide](docs/DISTRIBUTION.md#migrate-a-source-installation-to-rpm) first so an old binary or desktop launcher does not hide the RPM.
+
 Install the latest release:
 
 ```sh

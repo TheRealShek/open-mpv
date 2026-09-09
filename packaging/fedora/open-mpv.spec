@@ -60,7 +60,7 @@ done
 set -x
 
 %check
-shellcheck install.sh uninstall.sh
+shellcheck -x install.sh uninstall.sh packaging/source-ownership.sh
 sh -n install.sh uninstall.sh
 desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
 appstreamcli validate --no-net data/io.github.TheRealShek.OpenMpv.metainfo.xml

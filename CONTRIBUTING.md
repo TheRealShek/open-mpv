@@ -23,6 +23,10 @@ cd open-mpv
 cargo run -- <file-or-folder>
 ```
 
+To switch an existing source installation to the packaged release, follow the
+[source-to-RPM migration guide](docs/DISTRIBUTION.md#migrate-a-source-installation-to-rpm).
+Source scripts refuse package-owned destinations; use DNF for RPM installations.
+
 ## Check a change
 
 Start with the smallest test that covers the behavior you changed. Before
