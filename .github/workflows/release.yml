@@ -1,6 +1,14 @@
-name: Prepare release
+name: Package signed release
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -34,7 +42,9 @@ jobs:
         with:
           persist-credentials: false
       - id: tag
-        run: python3 packaging/release.py validate --tag "$RELEASE_TAG"
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: python3 packaging/release.py validate --tag "$RELEASE_TAG" --commit "$EXPECTED_COMMIT"
 
   release:
     needs: validate

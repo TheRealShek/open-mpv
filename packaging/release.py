@@ -26,7 +26,8 @@ def api(path):
 def pages(path):
     page = 1
     while True:
-        items = api(f'{path}?per_page=100&page={page}')
+        separator = '&' if '?' in path else '?'
+        items = api(f'{path}{separator}per_page=100&page={page}')
         yield from items
         if len(items) < 100:
             return
