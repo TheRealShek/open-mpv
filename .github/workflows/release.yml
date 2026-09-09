@@ -1,6 +1,14 @@
-name: Prepare release
+name: Package signed release
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -19,7 +27,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate release request
+    runs-on: ubuntu-24.04
+    outputs:
+      commit_sha: ${{ steps.tag.outputs.commit_sha }}
+      tag_sha: ${{ steps.tag.outputs.tag_sha }}
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: tag
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: python3 packaging/release.py validate --tag "$RELEASE_TAG" --commit "$EXPECTED_COMMIT"
+
   release:
+    needs: validate
     name: Verify, package and prepare
     runs-on: ubuntu-24.04
     container: fedora:44
@@ -44,41 +72,48 @@ jobs:
             dbus-daemon \
             desktop-file-utils \
             gcc \
+            gnupg2 \
             gh \
+            git \
             glycin-devel \
             glycin-loaders \
             gstreamer1-devel \
             gstreamer1-plugin-gtk4 \
             gstreamer1-plugins-good \
             gtk4-devel \
+            python3 \
+            python3-rpm \
             rpm-build \
             rpmlint \
             rust \
             rustfmt
 
-      - name: Resolve verified release tag
-        id: release_tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.type)
-          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)
-          test "$tag_type" = tag
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .verification.verified)" = true
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.type)" = commit
-          commit_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .object.sha)
-          echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=${commit_sha}" >> "$GITHUB_OUTPUT"
-
       - name: Check out verified source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.release_tag.outputs.commit_sha }}
+          ref: ${{ needs.validate.outputs.commit_sha }}
+          persist-credentials: false
+
+      - name: Check out release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .release-tools
+          persist-credentials: false
+
+      - name: Move release tooling outside the source archive
+        run: mv .release-tools "$RUNNER_TEMP/release-tools"
+
+      - name: Restore completed draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ needs.validate.outputs.commit_sha }}
+          TAG_SHA: ${{ needs.validate.outputs.tag_sha }}
+        run: python3 "$RUNNER_TEMP/release-tools/packaging/release.py" restore --tag "$RELEASE_TAG" --commit "$COMMIT" --tag-sha "$TAG_SHA"
 
       - name: Run required checks
         run: |
           install -d -m 700 "$XDG_RUNTIME_DIR"
-          python3 -m unittest discover -s packaging/tests -v
+          python3 -m unittest discover -s "$RUNNER_TEMP/release-tools/packaging/tests" -v
           shellcheck -x install.sh uninstall.sh packaging/build-rpm.sh packaging/source-ownership.sh
           sh -n install.sh uninstall.sh packaging/build-rpm.sh
           desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
@@ -90,7 +125,10 @@ jobs:
 
       - name: Build and inspect RPM
         run: |
-          ./packaging/build-rpm.sh "$RELEASE_TAG"
+          if [ ! -f dist/open-mpv-fedora44-x86_64.rpm ]; then
+            ./packaging/build-rpm.sh "$RELEASE_TAG"
+          fi
+          test "$(rpm -qp --qf '%{NAME}:%{VERSION}:%{ARCH}' dist/open-mpv-fedora44-x86_64.rpm)" = "open-mpv:${RELEASE_TAG#v}:x86_64"
           (cd dist && sha256sum -c SHA256SUMS)
           rpmlint dist/open-mpv-fedora44-x86_64.rpm
           rpm -qpl dist/open-mpv-fedora44-x86_64.rpm
@@ -114,24 +152,9 @@ jobs:
           test ! -e /usr/share/licenses/open-mpv
           test ! -e /usr/share/metainfo/io.github.TheRealShek.OpenMpv.metainfo.xml
 
-          release_candidates=$(gh release list --exclude-drafts --exclude-pre-releases \
-            --limit 20 --json tagName --jq '.[].tagName')
-          previous_tag=""
-          for candidate in $release_candidates; do
-            asset_names=$(gh release view "$candidate" --json assets \
-              --jq '.assets[].name')
-            if printf '%s\n' "$asset_names" | \
-                grep -qx open-mpv-fedora44-x86_64.rpm; then
-              previous_tag=$candidate
-              break
-            fi
-          done
-          if [ -n "$previous_tag" ]; then
-            install -d /tmp/open-mpv-previous
-            gh release download "$previous_tag" \
-              --pattern open-mpv-fedora44-x86_64.rpm \
-              --dir /tmp/open-mpv-previous
-            previous_rpm=/tmp/open-mpv-previous/open-mpv-fedora44-x86_64.rpm
+          python3 "$RUNNER_TEMP/release-tools/packaging/release.py" predecessor --tag "$RELEASE_TAG"
+          if [ -f dist/previous.rpm ]; then
+            previous_rpm=dist/previous.rpm
             previous_evr=$(rpm -qp --qf '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' "$previous_rpm")
             current_evr=$(rpm -qp --qf '%{EPOCHNUM}:%{VERSION}-%{RELEASE}' dist/open-mpv-fedora44-x86_64.rpm)
             dnf -y install "$previous_rpm"
@@ -143,16 +166,9 @@ jobs:
             dnf -y remove open-mpv
           fi
 
-      - name: Create draft GitHub release
+      - name: Resume draft GitHub release
         env:
-          EXPECTED_TAG_SHA: ${{ steps.release_tag.outputs.tag_sha }}
+          COMMIT: ${{ needs.validate.outputs.commit_sha }}
+          TAG_SHA: ${{ needs.validate.outputs.tag_sha }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)" = "$EXPECTED_TAG_SHA"
-          gh release create "$RELEASE_TAG" \
-            dist/open-mpv-fedora44-x86_64.rpm \
-            dist/SHA256SUMS \
-            --draft \
-            --generate-notes \
-            --title "open-mpv ${RELEASE_TAG#v}" \
-            --verify-tag
+        run: python3 "$RUNNER_TEMP/release-tools/packaging/release.py" upload --tag "$RELEASE_TAG" --commit "$COMMIT" --tag-sha "$TAG_SHA"
