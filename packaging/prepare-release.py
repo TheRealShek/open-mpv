@@ -177,7 +177,9 @@ def merged(number):
     refs = release.api(f'git/matching-refs/tags/{tag}')
     if any(ref['ref'] == f'refs/tags/{tag}' for ref in refs):
         release.validate(tag, commit)
-    emit(commit=commit, tag=tag, pr=item['html_url'])
+    emit(commit=commit, tag=tag, pr=item['html_url'],
+         commit_url=f'https://github.com/{os.environ["GH_REPO"]}/commit/{commit}',
+         checks=f'{item["html_url"]}/checks')
 
 
 def main():

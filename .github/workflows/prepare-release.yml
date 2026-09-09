@@ -112,6 +112,7 @@ jobs:
           set -euo pipefail
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             python3 packaging/release.py validate --tag "$TAG" --commit "$COMMIT"
+            printf 'Preparation: %s\nCommit: %s\nTag: %s (reused)\nChecks: %s/checks\n' "$PR_URL" "$COMMIT" "$TAG" "$PR_URL" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           test -n "$RELEASE_SIGNING_KEY"
