@@ -168,18 +168,18 @@ changes.
 The update flow should be:
 
 ```text
-version + release metadata -> signed source tag -> automatic Prepare release workflow
+version + release metadata -> signed source tag -> automatic Package signed release workflow
                                   -> Fedora 44 verification and RPM build
                                   -> reviewed GitHub draft and assets
                                   -> user re-runs the stable DNF URL
 ```
 
-Pushing a signed version tag starts the Prepare release workflow. A maintainer
+Pushing a signed version tag starts the Package signed release workflow. A maintainer
 can also start it manually with an existing tag when a retry is needed. The
 workflow rejects a lightweight, unsigned or GitHub-unverified tag, checks out
 the verified tag's exact commit, runs the complete required checks, creates the
 RPM from vendored locked Cargo sources, and verifies the package, lifecycle and
-checksum. It then uses GitHub's repository-scoped token to create a draft
+checksum. It then uses GitHub's repository-scoped token to create or resume a draft
 containing generated notes and the assets. It needs no maintainer token or
 release secret. The maintainer completes the known-issue and configuration
 sections, reviews the draft and explicitly publishes it. Build stable packages
@@ -187,6 +187,137 @@ only from tags; GitHub retains older releases for explicit downgrade.
 
 Use no fixed calendar. Release meaningful improvements when ready; publish
 security or data-safety fixes promptly with a plain impact statement.
+
+## Prepare a release in the browser
+
+After merging the release automation into `main` and completing the one-time
+signing setup below:
+
+Use **Prepare release** (`prepare-release.yml`) for a new version. **Package
+signed release** (`release.yml`) is only for an existing signed tag or packaging
+retry. Typing a new version into the packaging workflow does not create its tag.
+If the Prepare release form shows only a `tag` field, `main` still has the old
+workflow. Make sure the automation PR actually targeted and merged into `main`;
+merging stacked PRs into a previously merged feature branch does not update main.
+
+Then:
+
+1. Open **Actions → Prepare release → Run workflow** on `main`. Enter a new
+   stable version such as `0.1.3` and a short single-line description. Leave
+   `pr` empty. The workflow links a preparation PR that updates Cargo metadata,
+   the RPM changelog and AppStream together without updating dependencies.
+2. Open the PR. If GitHub displays **Approve workflows to run**, approve it;
+   repository-token-created PRs require this step before their CI can run.
+   Review the metadata and successful required checks, then merge normally.
+   Automation never approves or merges its own PR or bypasses main protection.
+3. The merged PR starts a signing run. Review its PR and exact merge commit,
+   then approve the `release-signing` environment. The job validates the merged
+   metadata against the request and signs that commit, even if `main` advances.
+   It refuses unrelated PR changes, changed metadata or a conflicting tag.
+4. Follow the explicitly called **Package signed release** job to its draft,
+   source manifest and RPM SHA-256 summary. Download the draft assets, validate
+   the exact RPM, and follow the immutable publication checklist below.
+   Publication is always manual.
+
+Only one preparation may remain active, including a merged preparation waiting
+for publication. Repeating its version links the existing PR without resetting
+its branch or edited text. Finish that release before requesting another one;
+close an unmerged PR to abandon it. An orphaned preparation branch is never
+reset automatically: inspect it and open its PR manually. The request file
+`.github/release-request.json` is reviewed release metadata, not a secret.
+
+If signing is denied or a run fails after merge, rerun **Prepare release** on
+`main` with only the merged `pr` number. This revalidates that exact PR and asks
+for signing approval again. An existing verified tag at that commit is reused;
+a conflicting tag is never overwritten. Packaging retries use the shared path
+below. Repository-token tag pushes do not start tag workflows, so the browser
+flow explicitly calls packaging. Locally signed tags remain supported through
+**Package signed release**.
+
+### One-time signing setup and recovery
+
+On 9 September 2026, Actions PR creation was enabled and `release-signing` was
+created with the owner as required reviewer, self-approval allowed, and a
+custom deployment policy allowing only the `main` branch. Verify these settings
+before use. Keep default workflow permissions read-only and main's required PR
+and CI rules enabled. GitHub groups its Actions PR creation and approval setting;
+although enabled, these workflows never approve PRs.
+
+Provision a **dedicated release-only OpenPGP signing key**, separate from the
+owner's everyday key, with a signing-capable primary key and an email verified
+on the owner's GitHub account. Register its armored public key under GitHub
+**Settings → SSH and GPG keys** so GitHub can verify its tags. Record the full
+40-character uppercase fingerprint independently. Export only that dedicated
+private key into the `release-signing` environment secret `RELEASE_SIGNING_KEY`.
+Set environment variables `RELEASE_SIGNING_FINGERPRINT` to the recorded primary
+fingerprint and `RELEASE_SIGNING_EMAIL` to the registered email.
+
+The automation key must support unattended signing within the approved job
+(no interactive passphrase prompt). Protect its private export in the GitHub
+environment, retain an offline recovery/revocation copy securely, and never put
+it in repository files, workflow inputs or logs. Signing imports it into a
+private temporary GnuPG home and removes that home on exit. Only the signing
+step receives the key; preparation PRs and build/test jobs do not receive it.
+The job pins and verifies the fingerprint before signing, and GitHub must
+verify the pushed tag before packaging proceeds.
+
+For rotation, create and register a new dedicated key, then replace the secret,
+fingerprint and email together while no signing job is active, and update the
+committed public key in the same reviewed rotation. For compromise,
+disable signing runs, revoke/remove the compromised key in GitHub, and provision
+a replacement. Investigate any affected tags; never move a conflicting or
+published tag. Resume only reviewed commits, or prepare a new version when a
+bad tag has consumed the requested version. Existing published assets stay fixed.
+
+A dedicated one-year key was generated on 9 September 2026 and installed in the
+protected environment with its fingerprint and email. Its public half is
+[release-signing.asc](../.github/release-signing.asc); the private key is never
+committed. The local recovery keyring and revocation certificate are stored
+under `~/.local/share/open-mpv-release-signing` with owner-only access. Keep a
+secure offline backup and rotate the automation key before it expires.
+
+The owner must register the complete public file at
+[GitHub → New GPG key](https://github.com/settings/gpg/new), titled
+`open-mpv release signing`. This is a one-time browser action; routine releases
+need no terminal. The current maintainer CLI token cannot perform this
+account-level registration because it lacks `admin:gpg_key`. Preparation checks
+GitHub registration and the verified signing email before creating a PR.
+
+A complete rehearsal in an isolated repository remains required before using
+this browser flow for a production release. The
+rehearsal must cover PR CI approval, merge and owner signing approval, moved
+main, denied approval, tag conflicts, failed-upload recovery and preserved draft
+notes. Do not use a dummy production release for these tests.
+
+## Retrying release preparation
+
+Run **Actions → Package signed release → Run workflow** with the existing signed tag.
+Validation runs before Fedora setup and rejects invalid versions, unsigned or
+unverified tags, mismatched source versions and published releases. Preparation
+for the same tag is serialized across automatic and manual requests. GitHub
+may replace a pending request with a newer pending request; it does not cancel
+an active preparation. Never move an existing tag to resolve a conflict.
+
+Retries retain the draft's title and maintainer-edited notes. Completed assets
+are downloaded and checked against `release-source.json` (tag, signed tag object
+and exact commit) and `SHA256SUMS`, then the package checks run again on those
+same bytes. The manifest is uploaded first. A draft with no assets, or only a
+matching manifest, can resume building. No upload overwrites an existing asset.
+
+A partial upload, missing provenance for an older draft, mismatched checksum or
+conflicting bytes stops preparation. Inspect the failed run and draft before
+recovery. While it is still a draft, either restore the original matching asset
+set from the exact failed run or explicitly remove all three preparation assets
+(`release-source.json`, RPM, `SHA256SUMS`) and retry. Retain edited notes; do not
+delete the release. Stop other preparation runs before manual asset recovery.
+Rebuilding or replacing assets requires renewed author validation even at the
+same commit. Never recover by deleting or changing a published release.
+
+Upgrade/downgrade testing examines all published stable releases, downloads
+matching Fedora 44 x86-64 RPMs, and chooses the highest package epoch/version/
+release strictly below the candidate using native RPM comparison. Equal,
+newer and incompatible packages are excluded. The run explicitly reports when
+no predecessor exists and skips only that upgrade/downgrade portion.
 
 ## Immutable publication checklist
 
@@ -249,7 +380,7 @@ verification output with that release's validation record.
    downgrade against its retained RPM.
 5. Complete the author validation gate and explicitly approve publication.
 6. Enable immutable GitHub Releases, push a signed release tag, wait for the
-   Prepare release workflow, complete and publish its draft, then verify the
+   Package signed release workflow, complete and publish its draft, then verify the
    stable GitHub URL through DNF.
 
 ## Decision checkpoints

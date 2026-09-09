@@ -85,6 +85,7 @@ jobs:
             dbus-daemon \
             desktop-file-utils \
             gcc \
+            gnupg2 \
             git \
             glycin-devel \
             glycin-loaders \
@@ -93,6 +94,7 @@ jobs:
             gstreamer1-plugins-good \
             gtk4-devel \
             pkgconf-pkg-config \
+            python3-rpm \
             rpm-build \
             rust \
             rustfmt
