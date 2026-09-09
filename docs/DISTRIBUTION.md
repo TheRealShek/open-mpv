@@ -115,7 +115,7 @@ can also start it manually with an existing tag when a retry is needed. The
 workflow rejects a lightweight, unsigned or GitHub-unverified tag, checks out
 the verified tag's exact commit, runs the complete required checks, creates the
 RPM from vendored locked Cargo sources, and verifies the package, lifecycle and
-checksum. It then uses GitHub's repository-scoped token to create a draft
+checksum. It then uses GitHub's repository-scoped token to create or resume a draft
 containing generated notes and the assets. It needs no maintainer token or
 release secret. The maintainer completes the known-issue and configuration
 sections, reviews the draft and explicitly publishes it. Build stable packages
@@ -123,6 +123,36 @@ only from tags; GitHub retains older releases for explicit downgrade.
 
 Use no fixed calendar. Release meaningful improvements when ready; publish
 security or data-safety fixes promptly with a plain impact statement.
+
+## Retrying release preparation
+
+Run **Actions → Prepare release → Run workflow** with the existing signed tag.
+Validation runs before Fedora setup and rejects invalid versions, unsigned or
+unverified tags, mismatched source versions and published releases. Preparation
+for the same tag is serialized across automatic and manual requests. GitHub
+may replace a pending request with a newer pending request; it does not cancel
+an active preparation. Never move an existing tag to resolve a conflict.
+
+Retries retain the draft's title and maintainer-edited notes. Completed assets
+are downloaded and checked against `release-source.json` (tag, signed tag object
+and exact commit) and `SHA256SUMS`, then the package checks run again on those
+same bytes. The manifest is uploaded first. A draft with no assets, or only a
+matching manifest, can resume building. No upload overwrites an existing asset.
+
+A partial upload, missing provenance for an older draft, mismatched checksum or
+conflicting bytes stops preparation. Inspect the failed run and draft before
+recovery. While it is still a draft, either restore the original matching asset
+set from the exact failed run or explicitly remove all three preparation assets
+(`release-source.json`, RPM, `SHA256SUMS`) and retry. Retain edited notes; do not
+delete the release. Stop other preparation runs before manual asset recovery.
+Rebuilding or replacing assets requires renewed author validation even at the
+same commit. Never recover by deleting or changing a published release.
+
+Upgrade/downgrade testing examines all published stable releases, downloads
+matching Fedora 44 x86-64 RPMs, and chooses the highest package epoch/version/
+release strictly below the candidate using native RPM comparison. Equal,
+newer and incompatible packages are excluded. The run explicitly reports when
+no predecessor exists and skips only that upgrade/downgrade portion.
 
 ## Immutable publication checklist
 
