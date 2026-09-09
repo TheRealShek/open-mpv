@@ -6,6 +6,7 @@ set -eu
 APP_ID="io.github.TheRealShek.OpenMpv"
 LEGACY_APP_ID="dev.thakur.OpenMpv"
 PREFIX="${HOME}/.local"
+SRC_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
     cat <<'EOF'
@@ -42,6 +43,10 @@ esac
 DATA_DIR="${PREFIX%/}/share"
 APP_DIR="${DATA_DIR}/applications"
 ICON_DIR="${DATA_DIR}/icons/hicolor/scalable/apps"
+
+# shellcheck source=packaging/source-ownership.sh
+. "${SRC_DIR}/packaging/source-ownership.sh"
+check_source_ownership "${PREFIX%/}/bin" "$DATA_DIR"
 
 rm -f "${PREFIX%/}/bin/open-mpv" \
     "${APP_DIR}/${APP_ID}.desktop" \

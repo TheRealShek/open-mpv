@@ -83,6 +83,70 @@ AI-assisted repository ineligible without a discretionary exception. Recheck
 the linked policy before any submission; absent eligibility or a confirmed
 exception, use a project-controlled Flatpak repository instead.
 
+## Migrate a source installation to RPM
+
+A source build in `~/.local` can shadow the RPM through both `PATH` and the
+per-user desktop launcher. RPM installation never deletes home-directory
+files. Identify the installation before removing anything:
+
+```sh
+type -a open-mpv
+command -v open-mpv
+rg '^Exec=' ~/.local/share/applications/io.github.TheRealShek.OpenMpv.desktop
+```
+
+A missing per-user launcher is normal. Also inspect
+`${XDG_DATA_HOME:-$HOME/.local/share}/applications` if you use a custom XDG data
+location, and `dev.thakur.OpenMpv.desktop` for pre-release source installations.
+An absolute `Exec=` path identifies the old source prefix. Use the prefix you
+actually installed, which may differ from the current command found on PATH.
+Do not delete unknown launchers or binaries just because their names match.
+
+1. Close open-mpv completely so single-instance activation cannot send requests
+   to an already-running source build. From the current source checkout, remove
+   the known previous source installation with its correct prefix:
+
+   ```sh
+   ./uninstall.sh --prefix "$HOME/.local"
+   ```
+
+   For a custom installation, substitute its actual prefix. This removes only
+   the known installed application files and refreshes desktop caches. It
+   preserves configuration, media and file-association preferences. Source
+   scripts preflight all affected destinations and refuse RPM-owned paths with
+   a DNF message before modifying any installation files. If ownership conflicts,
+   resolve the package through DNF; do not force the source script over it.
+2. Install the RPM using the existing stable URL:
+
+   ```sh
+   sudo dnf install https://github.com/TheRealShek/open-mpv/releases/latest/download/open-mpv-fedora44-x86_64.rpm
+   ```
+
+3. Open a fresh terminal (or run `rehash` in zsh), then verify the executable:
+
+   ```sh
+   command -v open-mpv
+   rpm -qf "$(command -v open-mpv)"
+   rpm -V open-mpv
+   rg '^Exec=' /usr/share/applications/io.github.TheRealShek.OpenMpv.desktop
+   ```
+
+   The command should resolve to `/usr/bin/open-mpv`, owned by the `open-mpv`
+   RPM, and the system launcher should use `/usr/bin`. Confirm that no old
+   per-user launcher with the same application ID remains. If GNOME still shows
+   an old launcher, sign out and back in after removing the known source copy.
+4. Launch from GNOME and inspect `readlink /proc/$(pgrep -n -x open-mpv)/exe`;
+   it should show `/usr/bin/open-mpv`. Close the app, launch from the terminal
+   with a local media file, and repeat that check. Confirm your existing
+   configuration and chosen default associations still apply.
+
+Legitimate per-user and custom-prefix source installations remain supported.
+Source scripts require working RPM tooling to check ownership. Staged packaging
+with `install.sh --no-build --prefix /usr --destdir <buildroot>` checks the
+actual staged destinations, including symlink targets; it does not reject a
+safe buildroot merely because the live `/usr` installation is package-owned.
+Repeated uninstallation remains safe when unowned files are already absent.
+
 ## Permanent application ID
 
 The permanent ID is `io.github.TheRealShek.OpenMpv`. GTK uses it for D-Bus

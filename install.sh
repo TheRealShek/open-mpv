@@ -83,6 +83,11 @@ ICON_DIR="${DESTDIR}${INSTALL_DATA_DIR}/icons/hicolor/scalable/apps"
 METAINFO_DIR="${DESTDIR}${INSTALL_DATA_DIR}/metainfo"
 LICENSE_DIR="${DESTDIR}${INSTALL_DATA_DIR}/licenses/open-mpv"
 
+# Preflight every write/removal before building or changing installed files.
+# shellcheck source=packaging/source-ownership.sh
+. "${SRC_DIR}/packaging/source-ownership.sh"
+check_source_ownership "$BIN_DIR" "${DESTDIR}${INSTALL_DATA_DIR}"
+
 if [ "$BUILD" = true ]; then
     cargo build --release --locked --manifest-path "${SRC_DIR}/Cargo.toml"
 fi
