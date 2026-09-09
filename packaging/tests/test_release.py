@@ -29,10 +29,16 @@ class ReleaseTests(unittest.TestCase):
         obj = {'tag': 'v1.2.3', 'object': {'type': 'commit', 'sha': 'commit'},
                'verification': {'verified': True}}
         for changed in ({'verification': {'verified': False}}, {'tag': 'v1.2.4'},
-                        {'object': {'type': 'tag', 'sha': 'nested'}}, {}):
+                        {'object': {'type': 'tag', 'sha': 'nested'}}):
             with patch.object(r, 'api', side_effect=[{'object': {'type': 'tag', 'sha': 'tag'}}, obj | changed]):
                 with self.assertRaises(ValueError):
-                    r.validate('v1.2.3', expected_commit='different')
+                    r.validate('v1.2.3', expected_commit='commit')
+        with patch.object(r, 'api', side_effect=[{'object': {'type': 'tag', 'sha': 'tag'}}, obj]):
+            with self.assertRaises(ValueError):
+                r.validate('v1.2.3', expected_commit='different')
+        with patch.object(r, 'api', side_effect=[{'object': {'type': 'tag', 'sha': 'tag'}}, obj]), patch.object(r, 'run', return_value='[package]\nversion="1.2.3"'), patch.object(r, 'release', return_value=None), patch.dict(r.os.environ, {'GH_REPO': 'owner/repo'}):
+            self.assertEqual(r.validate('v1.2.3', 'commit', 'tag'),
+                             {'tag': 'v1.2.3', 'commit_sha': 'commit', 'tag_sha': 'tag'})
         with patch.object(r, 'api', return_value={'object': {'type': 'commit'}}):
             with self.assertRaises(ValueError):
                 r.validate('v1.2.3')
@@ -102,6 +108,14 @@ class ReleaseTests(unittest.TestCase):
                 r.predecessor('v2.0.0', directory)
                 self.assertFalse((directory / 'previous.rpm').exists())
 
+    def test_nonexistent_tag_and_shared_concurrency(self):
+        with patch.object(r, 'api', side_effect=r.subprocess.CalledProcessError(1, 'gh')):
+            with self.assertRaises(r.subprocess.CalledProcessError):
+                r.validate('v1.2.3')
+        workflow = (Path(__file__).parents[2] / '.github/workflows/release.yml').read_text()
+        self.assertIn('group: release-${{ inputs.tag || github.ref_name }}', workflow)
+        self.assertIn('cancel-in-progress: false', workflow)
+
     def test_upload_preserves_notes_and_never_clobbers(self):
         identity = {'tag': 'v1.2.3', 'commit_sha': 'commit', 'tag_sha': 'tag'}
         item = {'id': 1, 'draft': True, 'html_url': 'draft', 'body': 'Edited notes', 'name': 'Edited title'}
@@ -115,6 +129,11 @@ class ReleaseTests(unittest.TestCase):
                 for call in run.call_args_list:
                     self.assertEqual(call.args[:3], ('gh', 'release', 'upload'))
                     self.assertNotIn('--clobber', call.args)
+                run.reset_mock()
+                assets = [{'name': name, 'state': 'uploaded', 'id': i} for i, name in enumerate(r.ASSETS)]
+                with patch.object(r, 'pages', return_value=assets), patch.object(r, 'download', side_effect=lambda a, p: p.write_bytes((directory / a['name']).read_bytes())):
+                    r.upload('v1.2.3', 'commit', 'tag', directory)
+                run.assert_not_called()
 
 
 if __name__ == '__main__':
