@@ -26,7 +26,8 @@ def api(path):
 def pages(path):
     page = 1
     while True:
-        items = api(f'{path}?per_page=100&page={page}')
+        separator = '&' if '?' in path else '?'
+        items = api(f'{path}{separator}per_page=100&page={page}')
         yield from items
         if len(items) < 100:
             return
@@ -120,6 +121,13 @@ def upload(tag, commit, tag_sha, directory):
     summary = (f'Draft: {item["html_url"]}\nCommit: {commit}\nTag: {tag} ({tag_sha})\n'
                f'RPM SHA-256: {digest(directory / RPM)}\n'
                'Download and validate these exact assets before manual publication.\n')
+    repo = os.environ.get('GH_REPO', '')
+    summary += (f'Checks: https://github.com/{repo}/actions/runs/{os.environ.get("GITHUB_RUN_ID", "")}\n'
+                f'Commit: https://github.com/{repo}/commit/{commit}\n'
+                f'Tag: https://github.com/{repo}/releases/tag/{tag}\n'
+                f'RPM: https://github.com/{repo}/releases/download/{tag}/{RPM}\n'
+                f'Checksum: https://github.com/{repo}/releases/download/{tag}/SHA256SUMS\n'
+                f'Before publication, download authenticated assets through the draft: {item["html_url"]}\n')
     print(summary)
     if os.getenv('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:

@@ -1,0 +1,144 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version (for example 0.1.3); leave empty when resuming a merged PR
+        type: string
+      description:
+        description: Short single-line release description
+        type: string
+      pr:
+        description: Merged preparation PR number to resume signing; leave empty for a new request
+        type: string
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-preparation
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.pr == '' &&
+      github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Create or reuse preparation PR
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          DESCRIPTION: ${{ inputs.description }}
+        run: python3 packaging/prepare-release.py prepare --version "$VERSION" --description "$DESCRIPTION"
+
+  resolve:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.pr != '' &&
+       github.ref == 'refs/heads/main' && github.actor == github.repository_owner) ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.merged &&
+       startsWith(github.event.pull_request.head.ref, 'release/prepare-v') &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    outputs:
+      commit: ${{ steps.merged.outputs.commit }}
+      tag: ${{ steps.merged.outputs.tag }}
+      pr: ${{ steps.merged.outputs.pr }}
+    steps:
+      # Only trusted main tooling runs. PR source is read as data by git show.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate the reviewed merge
+        id: merged
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+        run: python3 packaging/prepare-release.py merged --pr "$PR"
+
+  sign:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    permissions:
+      contents: write
+      pull-requests: read
+      checks: read
+    outputs:
+      tag: ${{ needs.resolve.outputs.tag }}
+      commit: ${{ needs.resolve.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Revalidate approval target
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+        run: python3 packaging/prepare-release.py merged --pr "$PR"
+      - name: Sign only the approved commit
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          FINGERPRINT: ${{ vars.RELEASE_SIGNING_FINGERPRINT }}
+          SIGNING_EMAIL: ${{ vars.RELEASE_SIGNING_EMAIL }}
+          PR_URL: ${{ needs.resolve.outputs.pr }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            python3 packaging/release.py validate --tag "$TAG" --commit "$COMMIT"
+            printf 'Preparation: %s\nCommit: %s\nTag: %s (reused)\nChecks: %s/checks\n' "$PR_URL" "$COMMIT" "$TAG" "$PR_URL" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          test -n "$RELEASE_SIGNING_KEY"
+          test -n "$SIGNING_EMAIL"
+          [[ "$FINGERPRINT" =~ ^[A-F0-9]{40}$ ]]
+          export GNUPGHOME
+          GNUPGHOME=$(mktemp -d)
+          trap 'gpgconf --kill gpg-agent; rm -rf -- "$GNUPGHOME"' EXIT
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$RELEASE_SIGNING_KEY" | gpg --batch --import
+          unset RELEASE_SIGNING_KEY
+          actual=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" {print $10; exit}')
+          test "$actual" = "$FINGERPRINT"
+          git -c user.name='open-mpv release signing' -c user.email="$SIGNING_EMAIL" \
+            -c user.signingkey="$FINGERPRINT!" tag --sign "$TAG" "$COMMIT" -m "open-mpv ${TAG#v}"
+          git verify-tag "$TAG"
+          git push origin "refs/tags/$TAG"
+          python3 packaging/release.py validate --tag "$TAG" --commit "$COMMIT"
+          printf 'Preparation: %s\nCommit: %s\nTag: %s\n' "$PR_URL" "$COMMIT" "$TAG" >> "$GITHUB_STEP_SUMMARY"
+        # The private key is available only to this step; no compilation runs here.
+
+  package:
+    needs: sign
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.sign.outputs.tag }}
+      commit: ${{ needs.sign.outputs.commit }}
