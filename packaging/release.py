@@ -35,7 +35,20 @@ def pages(path):
 
 
 def release(tag):
-    return next((item for item in pages('releases') if item['tag_name'] == tag), None)
+    # GraphQL can find drafts by tag; REST's tag endpoint only finds published
+    # releases, and enumerating release lists adds a stale-discovery boundary.
+    owner, name = os.environ['GH_REPO'].split('/')
+    query = ('query($owner:String!,$name:String!,$tag:String!){'
+             'repository(owner:$owner,name:$name){release(tagName:$tag){databaseId}}}')
+    result = json.loads(run('gh', 'api', 'graphql', '-f', f'query={query}',
+                            '-f', f'owner={owner}', '-f', f'name={name}', '-f', f'tag={tag}'))
+    item = result['data']['repository']['release']
+    if item is None:
+        return None
+    item = api(f'releases/{item["databaseId"]}')
+    if item['tag_name'] != tag:
+        raise ValueError('Release tag changed during lookup; inspect the draft before retrying.')
+    return item
 
 
 def require_draft(item):

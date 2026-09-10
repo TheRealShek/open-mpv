@@ -48,6 +48,27 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(list(r.pages('releases')), list(range(101)))
             self.assertIn('page=2', api.call_args.args[0])
 
+    def test_draft_lookup_does_not_depend_on_release_listing(self):
+        item = {'id': 7, 'tag_name': 'v1.2.3', 'draft': True}
+        lookup = {'data': {'repository': {'release': {'databaseId': 7}}}}
+        with patch.dict(r.os.environ, {'GH_REPO': 'owner/repo'}), patch.object(r, 'pages', return_value=[]) as pages, patch.object(r, 'run', return_value=json.dumps(lookup)), patch.object(r, 'api', return_value=item) as api:
+            self.assertEqual(r.release('v1.2.3'), item)
+            api.assert_called_once_with('releases/7')
+            pages.assert_not_called()
+
+    def test_release_lookup_distinguishes_absence_from_failure(self):
+        with patch.dict(r.os.environ, {'GH_REPO': 'owner/repo'}), patch.object(r, 'api') as api:
+            with patch.object(r, 'run', return_value='{"data":{"repository":{"release":null}}}'):
+                self.assertIsNone(r.release('v1.2.3'))
+                api.assert_not_called()
+            with patch.object(r, 'run', side_effect=r.subprocess.CalledProcessError(1, 'gh')):
+                with self.assertRaises(r.subprocess.CalledProcessError):
+                    r.release('v1.2.3')
+            with patch.object(r, 'run', return_value='{"data":{"repository":{"release":{"databaseId":7}}}}'):
+                api.return_value = {'id': 7, 'tag_name': 'v1.2.4', 'draft': True}
+                with self.assertRaisesRegex(ValueError, 'tag changed'):
+                    r.release('v1.2.3')
+
     def test_assets_compared_before_upload(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

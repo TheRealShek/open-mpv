@@ -308,8 +308,9 @@ and exact commit) and `SHA256SUMS`, then the package checks run again on those
 same bytes. The manifest is uploaded first. A draft with no assets, or only a
 matching manifest, can resume building. No upload overwrites an existing asset.
 
-New draft creation and asset uploads use the release identity returned by
-GitHub's creation response instead of searching for that draft again. A successful
+Retries look up the release directly by tag through GitHub's GraphQL API, then
+read its state by release ID. New draft creation and asset uploads use the
+release identity returned by GitHub's creation response. A successful
 creation must not fail merely because the new draft is absent from that list.
 If creation itself fails, the run stops without retrying the write; rerun the
 workflow to discover any draft that GitHub already created.
