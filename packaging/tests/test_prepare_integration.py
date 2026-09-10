@@ -21,6 +21,16 @@ spec.loader.exec_module(p)
 
 class GitPreparationTests(unittest.TestCase):
     def test_prepare_merge_validate_after_main_moves(self):
+        for method in ('merge', 'squash', 'rebase'):
+            with self.subTest(method=method):
+                self.check_merge(method)
+
+    def test_unrelated_changes_refused_with_each_merge_method(self):
+        for method in ('merge', 'squash', 'rebase'):
+            with self.subTest(method=method):
+                self.check_merge(method, unrelated=True)
+
+    def check_merge(self, method, unrelated=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             remote = root / 'remote.git'
@@ -47,9 +57,34 @@ class GitPreparationTests(unittest.TestCase):
                     return original_run(*args)
                 with patch.object(p.release, 'pages', return_value=[]), patch.object(p.release, 'release', return_value=None), patch.object(p.release, 'run', side_effect=run), contextlib.redirect_stdout(io.StringIO()):
                     p.prepare('9.0.0', 'Fix image & video handling')
-                head = git('rev-parse', 'HEAD')
+                if unrelated:
+                    Path('unrelated.txt').write_text('Not release metadata')
+                    git('add', 'unrelated.txt')
+                    git('commit', '-m', 'Unrelated PR change')
+                # A legitimate owner follow-up may change only one file. A
+                # rebase merge must validate the whole PR, not its last commit.
+                request = Path(p.REQUEST)
+                request.write_text(json.dumps(json.loads(request.read_text())) + '\n')
+                git('add', p.REQUEST)
+                git('commit', '-m', 'Reformat reviewed request')
+                prep_commits = git('rev-list', '--reverse', 'main..HEAD').splitlines()
                 git('switch', 'main')
-                git('merge', '--no-ff', 'release/prepare-v9.0.0', '-m', 'Reviewed release preparation')
+                Path('upstream.txt').write_text('Reviewed upstream change while the release PR was open.')
+                git('add', 'upstream.txt')
+                git('commit', '-m', 'Main advanced before release merge')
+                git('switch', 'release/prepare-v9.0.0')
+                if method != 'rebase':
+                    git('merge', 'main', '-m', 'Update preparation for strict required checks')
+                head = git('rev-parse', 'HEAD')
+                git('push', 'origin', 'release/prepare-v9.0.0')
+                git('switch', 'main')
+                if method == 'rebase':
+                    git('cherry-pick', *prep_commits)
+                elif method == 'squash':
+                    git('merge', '--squash', 'release/prepare-v9.0.0')
+                    git('commit', '-m', 'Reviewed release preparation')
+                else:
+                    git('merge', '--no-ff', 'release/prepare-v9.0.0', '-m', 'Reviewed release preparation')
                 merged = git('rev-parse', 'HEAD')
                 Path('later.txt').write_text('Main advanced after the release merge.')
                 git('add', 'later.txt')
@@ -65,6 +100,11 @@ class GitPreparationTests(unittest.TestCase):
                         return []
                     raise AssertionError(path)
                 with patch.object(p.release, 'api', side_effect=api), patch.object(p.release, 'release', return_value=None), patch.object(p, 'emit') as emit:
+                    if unrelated:
+                        with self.assertRaisesRegex(ValueError, 'unexpected file changes'):
+                            p.merged(1)
+                        emit.assert_not_called()
+                        return
                     p.merged(1)
                     self.assertEqual(emit.call_args.kwargs['commit'], merged)
                     self.assertNotEqual(merged, git('rev-parse', 'main'))

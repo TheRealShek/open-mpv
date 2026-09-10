@@ -190,8 +190,12 @@ def merged(number):
     subprocess.run(['git', 'merge-base', '--is-ancestor', base, commit], check=True)
     files = {name: git_file(base, name) for name in FILES}
     expected = edits(files, version, request['description'], request['date'])
-    changed = set(release.run('git', 'diff', '--name-only', base, item['head']['sha']).splitlines())
-    if changed != set(FILES) | {REQUEST}:
+    # Compare the contribution to main, not all changes since preparation began:
+    # strict CI may require merging newer main commits into the preparation PR.
+    # Inspect the entire reviewed head, including for rebase merges where
+    # commit^ may already contain earlier commits contributed by the PR.
+    head_changes = set(release.run('git', 'diff', '--name-only', f'{commit}^...{item["head"]["sha"]}').splitlines())
+    if head_changes != set(FILES) | {REQUEST}:
         raise ValueError('Preparation PR contains unexpected file changes.')
     for name, content in expected.items():
         if git_file(commit, name) != content or git_file(item['head']['sha'], name) != content:

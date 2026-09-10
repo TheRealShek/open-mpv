@@ -214,6 +214,8 @@ Then:
    then approve the `release-signing` environment. The job validates the merged
    metadata against the request and signs that commit, even if `main` advances.
    It refuses unrelated PR changes, changed metadata or a conflicting tag.
+   Updating the preparation branch with unrelated changes already on `main`
+   is supported; required checks must pass again on the updated PR head.
 4. Follow the explicitly called **Package signed release** job to its draft,
    source manifest and RPM SHA-256 summary. Download the draft assets, validate
    the exact RPM, and follow the immutable publication checklist below.
@@ -306,8 +308,8 @@ and exact commit) and `SHA256SUMS`, then the package checks run again on those
 same bytes. The manifest is uploaded first. A draft with no assets, or only a
 matching manifest, can resume building. No upload overwrites an existing asset.
 
-New draft creation uses the release identity returned by GitHub's creation
-response instead of immediately searching the release list again. A successful
+New draft creation and asset uploads use the release identity returned by
+GitHub's creation response instead of searching for that draft again. A successful
 creation must not fail merely because the new draft is absent from that list.
 If creation itself fails, the run stops without retrying the write; rerun the
 workflow to discover any draft that GitHub already created.

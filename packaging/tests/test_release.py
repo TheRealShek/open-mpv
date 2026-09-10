@@ -123,12 +123,13 @@ class ReleaseTests(unittest.TestCase):
             directory = Path(tmp)
             (directory / r.RPM).write_text('rpm')
             (directory / 'SHA256SUMS').write_text(f'{r.digest(directory / r.RPM)}  {r.RPM}\n')
-            with patch.object(r, 'validate', return_value=identity), patch.object(r, 'release', return_value=item), patch.object(r, 'api', return_value=item), patch.object(r, 'pages', return_value=[]), patch.object(r, 'run') as run:
+            with patch.dict(r.os.environ, {'GH_REPO': 'owner/repo'}), patch.object(r, 'validate', return_value=identity), patch.object(r, 'release', return_value=item), patch.object(r, 'api', return_value=item), patch.object(r, 'pages', return_value=[]), patch.object(r, 'run') as run:
                 r.upload('v1.2.3', 'commit', 'tag', directory)
                 self.assertEqual(run.call_count, 3)
                 for call in run.call_args_list:
-                    self.assertEqual(call.args[:3], ('gh', 'release', 'upload'))
-                    self.assertNotIn('--clobber', call.args)
+                    self.assertEqual(call.args[:4], ('gh', 'api', '--method', 'POST'))
+                    self.assertTrue(call.args[4].startswith('https://uploads.github.com/repos/owner/repo/releases/1/assets?name='))
+                    self.assertIn('--input', call.args)
                 run.reset_mock()
                 assets = [{'name': name, 'state': 'uploaded', 'id': i} for i, name in enumerate(r.ASSETS)]
                 with patch.object(r, 'pages', return_value=assets), patch.object(r, 'download', side_effect=lambda a, p: p.write_bytes((directory / a['name']).read_bytes())):
@@ -149,7 +150,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn('draft=true', creation)
                 self.assertIn('target_commitish=commit', creation)
                 self.assertIn('generate_release_notes=true', creation)
-                uploads = [call for call in run.call_args_list if call.args[:3] == ('gh', 'release', 'upload')]
+                uploads = [call for call in run.call_args_list if call.args[4].startswith('https://uploads.github.com/repos/owner/repo/releases/7/assets?name=')]
                 self.assertEqual(len(uploads), 3)
 
     def test_failed_draft_creation_does_not_retry_or_upload(self):

@@ -122,7 +122,13 @@ def upload(tag, commit, tag_sha, directory):
         validate(tag, commit, tag_sha)
         current = api(f'releases/{item["id"]}')
         require_draft(current)
-        run('gh', 'release', 'upload', tag, str(directory / name))
+        # Keep the release identity through the write too. `gh release upload`
+        # would perform another tag lookup instead of using this known draft.
+        run('gh', 'api', '--method', 'POST',
+            f'https://uploads.github.com/repos/{os.environ["GH_REPO"]}/releases/{item["id"]}/assets?name={name}',
+            '-H', 'Content-Type: application/octet-stream',
+            '-H', f'Content-Length: {(directory / name).stat().st_size}',
+            '--input', str(directory / name))
     summary = (f'Draft: {item["html_url"]}\nCommit: {commit}\nTag: {tag} ({tag_sha})\n'
                f'RPM SHA-256: {digest(directory / RPM)}\n'
                'Download and validate these exact assets before manual publication.\n')
