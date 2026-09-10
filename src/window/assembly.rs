@@ -624,6 +624,11 @@ impl App {
             }
         ));
 
+        app.view.connect_interaction_changed(clone!(
+            #[strong]
+            app,
+            move || app.update_cursor()
+        ));
         app.view.connect_view_changed(clone!(
             #[strong]
             app,
@@ -840,7 +845,8 @@ impl App {
             "<tt>Escape</tt> cancels Quick Markup, leaves fullscreen, then closes".to_string(),
         );
         lines.push("Scroll: zoom · horizontal scroll: navigate".to_string());
-        lines.push("Drag: pan (zoomed) or move window · double-click: fullscreen".to_string());
+        lines.push("Left-drag: pan (zoomed) · middle-drag: move window".to_string());
+        lines.push("Middle-click: fit/actual size · double-click: fullscreen".to_string());
         lines.push("Drag an edge or corner: resize the window".to_string());
         self.help_label.set_markup(&lines.join("\n"));
     }
@@ -849,6 +855,9 @@ impl App {
         // Mouse movement reveals the chrome (FR-6.2); keyboard-only use
         // never shows it.
         let motion = gtk::EventControllerMotion::new();
+        // Keep pointer position and idle feedback current even after a child
+        // gesture claims panning or drawing and stops bubble propagation.
+        motion.set_propagation_phase(gtk::PropagationPhase::Capture);
         motion.connect_motion(clone!(
             #[strong(rename_to = app)]
             self,
@@ -865,7 +874,9 @@ impl App {
                 // Order matters: hide_chrome re-decides the cursor from
                 // the last known position, so the reset goes after it.
                 app.hide_chrome();
-                app.win.set_cursor_from_name(None);
+                if !app.view.is_panning() {
+                    app.win.set_cursor_from_name(None);
+                }
             }
         ));
         self.win.add_controller(motion);
@@ -966,16 +977,18 @@ impl App {
         self.win.add_controller(click);
         let middle = gtk::GestureClick::new();
         middle.set_button(gdk::BUTTON_MIDDLE);
-        middle.connect_pressed(clone!(
+        // Toggle only on release: a middle drag must leave the zoom alone.
+        middle.connect_released(clone!(
             #[strong(rename_to = app)]
             self,
             move |_, _, _, _| app.view.toggle_fit_actual()
         ));
         self.win.add_controller(middle);
 
-        // Dragging the (non-pannable) image moves the window (FR-6.4).
-        // The viewer's pan gesture claims the drag first when zoomed in.
+        // Middle-button canvas drag moves the window at any zoom, including
+        // during Quick Markup. Primary drag remains owned by the Viewer.
         let drag = gtk::GestureDrag::new();
+        drag.set_button(gdk::BUTTON_MIDDLE);
         let began = Rc::new(Cell::new(false));
         drag.connect_drag_begin(clone!(
             #[strong]
@@ -988,10 +1001,14 @@ impl App {
             #[strong]
             began,
             move |gesture, dx, dy| {
-                if app.view.is_marking_up() {
+                if began.get() || dx.hypot(dy) < crate::viewer::DRAG_THRESHOLD {
                     return;
                 }
-                if began.get() || (dx * dx + dy * dy) < 36.0 {
+                // Claim before attempting the compositor handoff, so release
+                // cannot toggle zoom even when moving is unavailable.
+                began.set(true);
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if app.win.is_fullscreen() {
                     return;
                 }
                 let Some(surface) = app.win.surface() else {
@@ -1004,11 +1021,9 @@ impl App {
                     return;
                 };
                 let (sx, sy) = gesture.start_point().unwrap_or((0.0, 0.0));
-                began.set(true);
-                gesture.set_state(gtk::EventSequenceState::Claimed);
                 toplevel.begin_move(
                     &device,
-                    i32::try_from(gdk::BUTTON_PRIMARY).unwrap_or(1),
+                    i32::try_from(gdk::BUTTON_MIDDLE).unwrap_or(2),
                     sx,
                     sy,
                     gesture.current_event_time(),

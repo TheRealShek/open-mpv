@@ -899,21 +899,26 @@ impl App {
         )
     }
 
-    /// Show the grab as a resize cursor, so the border can be found
-    /// without knowing it is there.
-    ///
-    /// The single owner of the cursor: a resize arrow near an edge, hidden
-    /// once the overlay has faded (mpv-style, `hide-cursor`), the theme
-    /// default otherwise. Routing both through here keeps the resize
-    /// border and the idle-hide from overwriting each other.
+    /// Own cursor priority in one place so gestures, controls and idle hiding
+    /// cannot overwrite one another's feedback.
     fn update_cursor(&self) {
         let (x, y) = self.pointer.get();
+        // Hit-test the actual target, including transient overlays such as
+        // the Undo toast, rather than maintaining a second list of controls.
+        let on_canvas = self.win.pick(x, y, gtk::PickFlags::DEFAULT).as_ref()
+            == Some(self.view.upcast_ref::<gtk::Widget>());
+        let canvas_cursor = if self.view.is_panning() {
+            Some("grabbing")
+        } else if on_canvas && self.view.is_marking_up() {
+            self.view.contains_image_point(x, y).then_some("crosshair")
+        } else if on_canvas && self.view.is_pannable() {
+            Some("grab")
+        } else {
+            None
+        };
         let name = cursor_name(
             self.resize_edge(x, y),
-            self.view.is_marking_up()
-                && self.view.contains_image_point(x, y)
-                && !self.pointer_on_chrome.get()
-                && !self.pointer_on_status.get(),
+            canvas_cursor,
             self.chrome_visible(),
             self.cfg.hide_cursor,
         );
@@ -2507,21 +2512,22 @@ fn resize_edge_at(x: f64, y: f64, w: f64, h: f64) -> Option<gdk::SurfaceEdge> {
 }
 
 /// The cursor to show: the resize arrow wins wherever there is an edge to
-/// grab, then Quick Markup uses a crosshair over the image, and otherwise
-/// the pointer goes away with the controls (mpv-style).
+/// grab, except during an already-owned pan. Markup and active pan stay
+/// visible; an idle grab cursor follows the configured hide policy.
 fn cursor_name(
     edge: Option<gdk::SurfaceEdge>,
-    marking_up: bool,
+    canvas_cursor: Option<&'static str>,
     chrome_visible: bool,
     hide_cursor: bool,
 ) -> Option<&'static str> {
     match edge {
+        _ if canvas_cursor == Some("grabbing") => canvas_cursor,
         Some(edge) => Some(edge_cursor_name(edge)),
-        None if marking_up => Some("crosshair"),
+        None if canvas_cursor == Some("crosshair") => canvas_cursor,
         // Only once the controls are gone: a pointer that vanishes while
         // there are still buttons to aim at is just lost.
         None if hide_cursor && !chrome_visible => Some("none"),
-        None => None,
+        None => canvas_cursor,
     }
 }
 
@@ -2643,6 +2649,61 @@ mod tests {
         let mut navigation = Navigation::default();
         navigation.install(folder);
         (dir, navigation)
+    }
+
+    #[test]
+    #[ignore = "requires a GNOME/Wayland session; run with --ignored --exact"]
+    fn middle_button_moves_window_and_click_toggles_only_on_release() {
+        use super::*;
+        gtk::init().expect("GNOME/Wayland test requires GTK");
+        let gtk_app = gtk::Application::builder()
+            .application_id("io.github.TheRealShek.OpenMpv.PointerTest")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        gtk_app.register(gio::Cancellable::NONE).unwrap();
+        let app = App::new(&gtk_app, Config::default());
+        let controllers = app.win.observe_controllers();
+        let mut drag_buttons = Vec::new();
+        let mut middle_click = None;
+        for i in 0..controllers.n_items() {
+            let controller = controllers.item(i).unwrap();
+            if let Some(drag) = controller.downcast_ref::<gtk::GestureDrag>() {
+                drag_buttons.push(drag.button());
+            }
+            if let Some(click) = controller.downcast_ref::<gtk::GestureClick>()
+                && click.button() == gdk::BUTTON_MIDDLE
+            {
+                middle_click = Some(click.clone());
+            }
+        }
+        drag_buttons.sort_unstable();
+        assert_eq!(
+            drag_buttons,
+            [gdk::BUTTON_PRIMARY, gdk::BUTTON_MIDDLE],
+            "window must have primary resize and middle move gestures"
+        );
+        let texture = gdk::MemoryTexture::new(
+            1,
+            1,
+            gdk::MemoryFormat::R8g8b8,
+            &glib::Bytes::from_static(&[0, 0, 0]),
+            3,
+        );
+        app.view.allocate(400, 300, -1, None);
+        app.view
+            .show_texture(texture.upcast(), Some((800.0, 600.0)));
+        assert!(!app.view.is_pannable());
+        let click = middle_click.expect("middle click must remain available");
+        click.emit_by_name::<()>("pressed", &[&1_i32, &100.0_f64, &100.0_f64]);
+        assert!(
+            !app.view.is_pannable(),
+            "pressing to move must not change zoom"
+        );
+        click.emit_by_name::<()>("released", &[&1_i32, &100.0_f64, &100.0_f64]);
+        assert!(
+            app.view.is_pannable(),
+            "a plain click still toggles actual size"
+        );
     }
 
     #[test]
@@ -3351,22 +3412,49 @@ mod tests {
     fn the_pointer_hides_with_the_overlay_but_never_over_a_resize_edge() {
         use super::cursor_name;
         // Overlay up: ordinary pointer.
-        assert_eq!(cursor_name(None, false, true, true), None);
+        assert_eq!(cursor_name(None, None, true, true), None);
         // Overlay faded: gone, mpv-style.
-        assert_eq!(cursor_name(None, false, false, true), Some("none"));
+        assert_eq!(cursor_name(None, None, false, true), Some("none"));
         // Opted out via config.
-        assert_eq!(cursor_name(None, false, false, false), None);
+        assert_eq!(cursor_name(None, None, false, false), None);
         // Drawing uses a crosshair even if ordinary chrome would hide it.
-        assert_eq!(cursor_name(None, true, false, true), Some("crosshair"));
+        assert_eq!(
+            cursor_name(None, Some("crosshair"), false, true),
+            Some("crosshair")
+        );
         // An edge always wins — hiding the pointer on the resize border
         // would make a frameless window impossible to grab.
         assert_eq!(
-            cursor_name(Some(SurfaceEdge::SouthEast), true, false, true),
+            cursor_name(Some(SurfaceEdge::SouthEast), Some("crosshair"), false, true),
             Some("se-resize")
         );
         assert_eq!(
-            cursor_name(Some(SurfaceEdge::North), true, true, true),
+            cursor_name(Some(SurfaceEdge::North), Some("crosshair"), true, true),
             Some("n-resize")
+        );
+    }
+
+    #[test]
+    fn pan_cursor_respects_controls_idle_and_active_drag_ownership() {
+        use super::cursor_name;
+        use gtk4::gdk::SurfaceEdge;
+
+        assert_eq!(cursor_name(None, Some("grab"), true, true), Some("grab"));
+        assert_eq!(cursor_name(None, Some("grab"), false, true), Some("none"));
+        assert_eq!(cursor_name(None, Some("grab"), false, false), Some("grab"));
+        assert_eq!(cursor_name(None, None, true, true), None);
+        assert_eq!(
+            cursor_name(Some(SurfaceEdge::West), Some("grab"), true, true),
+            Some("w-resize")
+        );
+        // Crossing the border during a pan must not advertise a resize.
+        assert_eq!(
+            cursor_name(Some(SurfaceEdge::West), Some("grabbing"), false, true),
+            Some("grabbing")
+        );
+        assert_eq!(
+            cursor_name(None, Some("grabbing"), false, true),
+            Some("grabbing")
         );
     }
 
