@@ -78,13 +78,20 @@ open-mpv ~/Pictures
 
 Move the pointer to show the controls. Right-click the photo or video, or
 click the three-dot button, for more options. Press `?` for all shortcuts.
-When zoomed in, dragging stops at the image edges; drag back to move again.
+Hold the scroll-wheel (middle) button and drag to move the window at any
+zoom. A middle-click without dragging switches between fit and actual size.
+Left-drag pans when the image or video extends beyond the window; it does
+nothing when the media fits. A grab cursor shows when panning is available and changes
+to grabbing during a pan. Panning stops at the media edges; drag back to move
+again. Window borders still resize, and Quick Markup uses left-drag to draw.
 
 | Key or gesture | What it does |
 | --- | --- |
 | `Ctrl+O` / `Ctrl+Shift+O` | Open a file / folder |
 | `Right` / `Left` | Next / previous file; move around the image when zoomed in |
 | Scroll / pinch | Zoom in or out |
+| Left-drag | Pan overflowing media; draw in Quick Markup |
+| Middle-drag / middle-click | Move the window / switch fit and actual size |
 | `0` / `1` / `Z` | Fit to the window / actual size / switch between them |
 | `R` / `Shift+R` | Rotate right / left |
 | `S` | Save the rotation, if the format supports it |

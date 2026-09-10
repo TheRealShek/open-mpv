@@ -22,6 +22,8 @@ use crate::annotation::{self, Point, Session, Status, Tool};
 
 pub const ZOOM_MIN: f64 = 0.05;
 pub const ZOOM_MAX: f64 = 20.0;
+/// Logical-pixel travel before either canvas pan or window move takes over.
+pub const DRAG_THRESHOLD: f64 = 6.0;
 
 /// Zoom applied per wheel detent (FR-4.2).
 const ZOOM_STEP: f64 = 1.1;
@@ -221,6 +223,10 @@ mod imp {
         pub(super) on_source_size: Callback<(f64, f64)>,
         /// Fired after a Quick Markup command changes its tool or history.
         pub(super) on_annotation_changed: Callback<Status>,
+        /// Pointer feedback changes independently of zoom and SVG rendering.
+        pub(super) on_interaction_changed: Callback<()>,
+        pub(super) pan_drag: RefCell<Option<gtk::GestureDrag>>,
+        pub(super) panning: std::cell::Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -242,6 +248,11 @@ mod imp {
     }
 
     impl WidgetImpl for ImageView {
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            self.parent_size_allocate(width, height, baseline);
+            self.obj().emit_interaction_changed();
+        }
+
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
             // Copy everything out of the state first: a foreign
@@ -330,6 +341,22 @@ glib::wrapper! {
 impl Default for ImageView {
     fn default() -> Self {
         glib::Object::new()
+    }
+}
+
+/// Match the window-move threshold, allowing click sequences through until
+/// the pointer actually drags. The decision applies equally to all media.
+fn pan_gesture_state(
+    marking_up: bool,
+    pannable: bool,
+    delta: (f64, f64),
+) -> gtk::EventSequenceState {
+    if marking_up || !pannable {
+        gtk::EventSequenceState::Denied
+    } else if delta.0.hypot(delta.1) < DRAG_THRESHOLD {
+        gtk::EventSequenceState::None
+    } else {
+        gtk::EventSequenceState::Claimed
     }
 }
 
@@ -504,6 +531,7 @@ impl ImageView {
         nominal: Option<(f64, f64)>,
         fit_policy: FitPolicy,
     ) {
+        self.cancel_pan();
         self.watch_live_source(&paintable);
         {
             let mut st = self.state();
@@ -565,6 +593,7 @@ impl ImageView {
 
     /// Remove the image (empty and error states).
     pub fn clear(&self) {
+        self.cancel_pan();
         if let Some((old, ids)) = self.imp().live.borrow_mut().take() {
             for id in ids {
                 old.disconnect(id);
@@ -573,6 +602,7 @@ impl ImageView {
         self.state().paintable = None;
         self.state().annotation = None;
         self.queue_draw();
+        self.emit_interaction_changed();
     }
 
     /// Swap the texture without touching view state (animation frames,
@@ -624,6 +654,7 @@ impl ImageView {
     }
 
     pub fn start_markup(&self) -> bool {
+        self.cancel_pan();
         let mut st = self.state();
         if !st
             .paintable
@@ -905,10 +936,39 @@ impl ImageView {
     }
 
     fn emit_view_changed(&self) {
+        self.emit_interaction_changed();
         let percent = self.zoom_percent();
         if let Some(f) = self.imp().on_view_changed.borrow().as_ref() {
             f(percent);
         }
+    }
+
+    pub fn connect_interaction_changed(&self, f: impl Fn() + 'static) {
+        *self.imp().on_interaction_changed.borrow_mut() = Some(Box::new(move |()| f()));
+    }
+
+    fn emit_interaction_changed(&self) {
+        if let Some(f) = self.imp().on_interaction_changed.borrow().as_ref() {
+            f(());
+        }
+    }
+
+    pub fn is_panning(&self) -> bool {
+        self.imp().panning.get()
+    }
+
+    fn set_panning(&self, panning: bool) {
+        if self.imp().panning.replace(panning) != panning {
+            self.emit_interaction_changed();
+        }
+    }
+
+    fn cancel_pan(&self) {
+        let drag = self.imp().pan_drag.borrow().clone();
+        if let Some(drag) = drag {
+            drag.reset();
+        }
+        self.set_panning(false);
     }
 
     fn emit_annotation_changed(&self, status: Status) {
@@ -1057,27 +1117,36 @@ impl ImageView {
         ));
         self.add_controller(markup_drag);
 
-        // Drag pans when the image overflows the viewport; otherwise the
-        // gesture is denied so the window's drag-to-move can take over
-        // (FR-6.4).
+        // Leave presses unclaimed so double-click fullscreen still receives
+        // them. Claim once movement starts so a pan cannot become a click.
+        // Primary-button resize and markup capture run first.
         let drag = gtk::GestureDrag::new();
         drag.connect_drag_begin(glib::clone!(
             #[weak(rename_to = view)]
             self,
             move |gesture, _, _| {
-                if view.is_marking_up() {
-                    gesture.set_state(gtk::EventSequenceState::Denied);
-                } else if view.is_pannable() {
-                    view.state().drag_delta = (0.0, 0.0);
-                } else {
-                    gesture.set_state(gtk::EventSequenceState::Denied);
-                }
+                view.set_panning(false);
+                view.state().drag_delta = (0.0, 0.0);
+                gesture.set_state(pan_gesture_state(
+                    view.is_marking_up(),
+                    view.is_pannable(),
+                    (0.0, 0.0),
+                ));
             }
         ));
         drag.connect_drag_update(glib::clone!(
             #[weak(rename_to = view)]
             self,
-            move |_, dx, dy| {
+            move |gesture, dx, dy| {
+                if !view.is_panning() {
+                    let state =
+                        pan_gesture_state(view.is_marking_up(), view.is_pannable(), (dx, dy));
+                    gesture.set_state(state);
+                    if state != gtk::EventSequenceState::Claimed {
+                        return;
+                    }
+                    view.set_panning(true);
+                }
                 let Some(displayed) = view.displayed_size() else {
                     return;
                 };
@@ -1086,6 +1155,17 @@ impl ImageView {
                 view.queue_draw();
             }
         ));
+        drag.connect_drag_end(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_, _, _| view.set_panning(false)
+        ));
+        drag.connect_cancel(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_, _| view.set_panning(false)
+        ));
+        *self.imp().pan_drag.borrow_mut() = Some(drag.clone());
         self.add_controller(drag);
 
         // Touchpad pinch zoom, anchored at the gesture center (FR-4.2).
@@ -1123,6 +1203,70 @@ mod tests {
     /// One touchpad event, in the logical pixels GDK reports.
     fn swipe(g: &mut ScrollGesture, dx: f64, dy: f64) -> ScrollAction {
         g.event(Surface, dx, dy)
+    }
+
+    #[test]
+    #[ignore = "requires a GNOME/Wayland session; run with --ignored --exact"]
+    fn pan_feedback_tracks_geometry_and_media_lifecycle() {
+        gtk::init().expect("GNOME/Wayland test requires GTK");
+        let view = ImageView::default();
+        let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = changes.clone();
+        view.connect_interaction_changed(move || observed.set(observed.get() + 1));
+        let texture = gtk::gdk::MemoryTexture::new(
+            1,
+            1,
+            gtk::gdk::MemoryFormat::R8g8b8,
+            &glib::Bytes::from_static(&[0, 0, 0]),
+            3,
+        );
+        view.allocate(400, 300, -1, None);
+        view.show_texture(texture.clone().upcast(), Some((800.0, 600.0)));
+        assert!(!view.is_pannable());
+        view.zoom_to(1.0, None);
+        assert!(view.is_pannable());
+        let before_resize = changes.get();
+        view.allocate(1000, 800, -1, None);
+        assert!(!view.is_pannable());
+        assert!(changes.get() > before_resize);
+        view.allocate(400, 300, -1, None);
+        assert!(view.is_pannable());
+        view.set_panning(true);
+        view.zoom_fit();
+        assert!(
+            view.is_panning(),
+            "fit must not hand an owned drag to the window"
+        );
+        view.show_texture(texture.clone().upcast(), Some((800.0, 600.0)));
+        assert!(!view.is_panning());
+        view.set_panning(true);
+        assert!(view.start_markup());
+        assert!(!view.is_panning());
+        view.cancel_markup();
+        view.set_panning(true);
+        let before_clear = changes.get();
+        view.clear();
+        assert!(!view.is_panning());
+        assert!(!view.is_pannable());
+        assert!(changes.get() > before_clear);
+    }
+
+    #[test]
+    fn pan_claims_movement_but_leaves_clicks_and_other_modes_alone() {
+        use gtk::EventSequenceState::{Claimed, Denied, None};
+
+        for delta in [(0.0, 0.0), (2.0, 3.0)] {
+            assert_eq!(pan_gesture_state(false, true, delta), None);
+        }
+        // Claim at the same threshold as window move, in every direction.
+        for delta in [(6.0, 0.0), (-6.0, 0.0), (0.0, 6.0), (0.0, -6.0), (5.0, 5.0)] {
+            assert_eq!(pan_gesture_state(false, true, delta), Claimed);
+        }
+        for delta in [(0.0, 0.0), (100.0, 100.0)] {
+            assert_eq!(pan_gesture_state(false, false, delta), Denied);
+            assert_eq!(pan_gesture_state(true, false, delta), Denied);
+            assert_eq!(pan_gesture_state(true, true, delta), Denied);
+        }
     }
 
     #[test]

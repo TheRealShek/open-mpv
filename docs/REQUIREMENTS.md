@@ -66,6 +66,18 @@ new product decisions rather than incidental implementation.
   HiDPI and fractional scales.
 - **FR-4.2–FR-4.4** Zoom spans at least 5%–2000%, anchors pointer and pinch input correctly, and
   supports pan, fit, actual size and quarter-turn view rotation.
+  Primary-button canvas drag pans whenever the displayed image or video
+  overflows either viewport axis; otherwise it leaves the view and window
+  unchanged. Middle-button canvas drag moves the frameless window at any zoom,
+  including during Quick Markup, without changing zoom or drawing. In fullscreen
+  a middle drag does not move the window or change zoom. A middle-click without
+  dragging toggles fit/actual size on release. Primary-button resize borders
+  and Quick Markup drawing take priority when a primary drag starts.
+  Clicks still reach double-click fullscreen. Once a pan owns a drag, changes
+  to zoom cannot transfer it to window movement; release, cancellation or
+  media replacement ends that pan. Pannable canvas shows a grab cursor,
+  changing to grabbing during a pan. Controls retain their ordinary pointer;
+  idle grab feedback respects `hide-cursor`, while active grabbing stays visible.
 - **FR-4.5 / FR-4.6** Navigation resets the view; resize preserves fit or manual zoom semantics.
   Pan state is clamped for both pointer and keyboard input so no hidden
   overshoot accumulates. Reversing a drag at any edge moves immediately,
