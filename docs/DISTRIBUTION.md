@@ -276,11 +276,13 @@ committed. The local recovery keyring and revocation certificate are stored
 under `~/.local/share/open-mpv-release-signing` with owner-only access. Keep a
 secure offline backup and rotate the automation key before it expires.
 
-The owner must register the complete public file at
+When provisioning or rotating the key, register the complete public file at
 [GitHub → New GPG key](https://github.com/settings/gpg/new), titled
 `open-mpv release signing`. This is a one-time browser action; routine releases
 need no terminal. The current maintainer CLI token cannot perform this
-account-level registration because it lacks `admin:gpg_key`. Preparation checks
+account-level registration because it lacks `admin:gpg_key`. The current key
+successfully signed the v0.1.3 preparation merge on 9 September 2026.
+Preparation checks
 GitHub registration and the verified signing email before creating a PR.
 
 A complete rehearsal in an isolated repository remains required before using
@@ -303,6 +305,12 @@ are downloaded and checked against `release-source.json` (tag, signed tag object
 and exact commit) and `SHA256SUMS`, then the package checks run again on those
 same bytes. The manifest is uploaded first. A draft with no assets, or only a
 matching manifest, can resume building. No upload overwrites an existing asset.
+
+New draft creation uses the release identity returned by GitHub's creation
+response instead of immediately searching the release list again. A successful
+creation must not fail merely because the new draft is absent from that list.
+If creation itself fails, the run stops without retrying the write; rerun the
+workflow to discover any draft that GitHub already created.
 
 A partial upload, missing provenance for an older draft, mismatched checksum or
 conflicting bytes stops preparation. Inspect the failed run and draft before
@@ -363,9 +371,14 @@ published version to correct it: use a new version.
    cmp open-mpv-fedora44-x86_64.rpm latest.rpm
    ```
 
-Publication verification remains pending until the next authorized release.
-Do not publish a dummy production release for this check. Retain the successful
-verification output with that release's validation record.
+On 10 September 2026, published **v0.1.3** was verified immutable with
+`gh release verify`; downloaded RPM and `SHA256SUMS` both passed
+`gh release verify-asset`. The stable latest-download URL returned identical
+RPM bytes, with SHA-256
+`5add2c4e4e9b14b3b52db619628085a95e5d3793dfccd71b92a528c656845cbf`.
+This verifies publication integrity, not human desktop or source-migration
+testing. Repeat the checklist for each release; do not publish a dummy
+production release for verification.
 
 ## First-release gate
 

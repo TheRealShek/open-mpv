@@ -106,11 +106,16 @@ def upload(tag, commit, tag_sha, directory):
     item = release(tag)
     require_draft(item)
     if not item:
-        run('gh', 'release', 'create', tag, '--draft', '--generate-notes',
-            '--title', f'open-mpv {tag[1:]}', '--verify-tag', '--target', commit)
-        item = release(tag)
-    if not item:
-        raise ValueError('Draft was not found after creation.')
+        # Creation returns the draft identity even before release listings catch
+        # up. Never create twice or rediscover the result through a stale list.
+        item = json.loads(run(
+            'gh', 'api', '--method', 'POST', f'repos/{os.environ["GH_REPO"]}/releases',
+            '-f', f'tag_name={tag}', '-f', f'target_commitish={commit}',
+            '-f', f'name=open-mpv {tag[1:]}', '-F', 'draft=true',
+            '-F', 'generate_release_notes=true'))
+        require_draft(item)
+        if item['tag_name'] != tag:
+            raise ValueError('Created draft does not match the verified tag.')
     existing = list(pages(f'releases/{item["id"]}/assets'))
     missing = asset_plan(existing, directory)
     for name in missing:

@@ -135,6 +135,36 @@ class ReleaseTests(unittest.TestCase):
                     r.upload('v1.2.3', 'commit', 'tag', directory)
                 run.assert_not_called()
 
+    def test_create_draft_when_release_list_has_not_updated(self):
+        identity = {'tag': 'v1.2.3', 'commit_sha': 'commit', 'tag_sha': 'tag'}
+        item = {'id': 7, 'tag_name': 'v1.2.3', 'draft': True, 'html_url': 'draft'}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / r.RPM).write_text('rpm')
+            (directory / 'SHA256SUMS').write_text(f'{r.digest(directory / r.RPM)}  {r.RPM}\n')
+            with patch.dict(r.os.environ, {'GH_REPO': 'owner/repo'}), patch.object(r, 'validate', return_value=identity), patch.object(r, 'release', return_value=None), patch.object(r, 'api', return_value=item), patch.object(r, 'pages', return_value=[]), patch.object(r, 'run', return_value=json.dumps(item)) as run:
+                r.upload('v1.2.3', 'commit', 'tag', directory)
+                creation = run.call_args_list[0].args
+                self.assertEqual(creation[:5], ('gh', 'api', '--method', 'POST', 'repos/owner/repo/releases'))
+                self.assertIn('draft=true', creation)
+                self.assertIn('target_commitish=commit', creation)
+                self.assertIn('generate_release_notes=true', creation)
+                uploads = [call for call in run.call_args_list if call.args[:3] == ('gh', 'release', 'upload')]
+                self.assertEqual(len(uploads), 3)
+
+    def test_failed_draft_creation_does_not_retry_or_upload(self):
+        identity = {'tag': 'v1.2.3', 'commit_sha': 'commit', 'tag_sha': 'tag'}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / r.RPM).write_text('rpm')
+            (directory / 'SHA256SUMS').write_text(f'{r.digest(directory / r.RPM)}  {r.RPM}\n')
+            # An ambiguous network failure or a concurrent creation must stop;
+            # a later run can discover the draft without creating another one.
+            with patch.dict(r.os.environ, {'GH_REPO': 'owner/repo'}), patch.object(r, 'validate', return_value=identity), patch.object(r, 'release', return_value=None), patch.object(r, 'run', side_effect=r.subprocess.CalledProcessError(1, 'gh')) as run:
+                with self.assertRaises(r.subprocess.CalledProcessError):
+                    r.upload('v1.2.3', 'commit', 'tag', directory)
+                self.assertEqual(run.call_count, 1)
+
 
 if __name__ == '__main__':
     unittest.main()
