@@ -203,7 +203,7 @@ merging stacked PRs into a previously merged feature branch does not update main
 Then:
 
 1. Open **Actions → Prepare release → Run workflow** on `main`. Enter a new
-   stable version such as `0.1.3` and a short single-line description. Leave
+   stable version such as `0.1.4` and a short single-line description. Leave
    `pr` empty. The workflow links a preparation PR that updates Cargo metadata,
    the RPM changelog and AppStream together without updating dependencies.
 2. Open the PR. If GitHub displays **Approve workflows to run**, approve it;
@@ -287,11 +287,22 @@ successfully signed the v0.1.3 preparation merge on 9 September 2026.
 Preparation checks
 GitHub registration and the verified signing email before creating a PR.
 
-A complete rehearsal in an isolated repository remains required before using
-this browser flow for a production release. The
-rehearsal must cover PR CI approval, merge and owner signing approval, moved
-main, denied approval, tag conflicts, failed-upload recovery and preserved draft
-notes. Do not use a dummy production release for these tests.
+The browser flow was rehearsed on 11 September 2026 in
+[open-mpv-release-rehearsal](https://github.com/TheRealShek/open-mpv-release-rehearsal).
+The [successful signing and packaging run](https://github.com/TheRealShek/open-mpv-release-rehearsal/actions/runs/34565321409)
+signed preparation merge `99cd93a51e5f46c8ee88d8c00cbc853afd2312b0` after
+`main` advanced, then built and uploaded a draft RPM. Retrying those assets
+preserved the draft and asset IDs, edited notes and exact RPM bytes.
+[PR #73](https://github.com/TheRealShek/open-mpv/pull/73) records the remaining
+verification evidence: required CI, duplicate and competing requests, denied
+approval and recovery, tag conflicts, concurrent packaging and interrupted
+upload recovery. The sandbox had no published predecessor, so its
+upgrade/downgrade portion was explicitly skipped; native RPM ordering has
+fixture coverage. The sandbox release remains unpublished.
+
+Repeat an isolated rehearsal when changing this flow. Keep owner approval,
+exact-commit signing and manual publication intact. Do not use a dummy
+production release for these tests.
 
 ## Retrying release preparation
 
