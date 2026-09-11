@@ -203,7 +203,7 @@ merging stacked PRs into a previously merged feature branch does not update main
 Then:
 
 1. Open **Actions → Prepare release → Run workflow** on `main`. Enter a new
-   stable version such as `0.1.3` and a short single-line description. Leave
+   stable version such as `0.1.4` and a short single-line description. Leave
    `pr` empty. The workflow links a preparation PR that updates Cargo metadata,
    the RPM changelog and AppStream together without updating dependencies.
 2. Open the PR. If GitHub displays **Approve workflows to run**, approve it;
@@ -214,6 +214,8 @@ Then:
    then approve the `release-signing` environment. The job validates the merged
    metadata against the request and signs that commit, even if `main` advances.
    It refuses unrelated PR changes, changed metadata or a conflicting tag.
+   Updating the preparation branch with unrelated changes already on `main`
+   is supported; required checks must pass again on the updated PR head.
 4. Follow the explicitly called **Package signed release** job to its draft,
    source manifest and RPM SHA-256 summary. Download the draft assets, validate
    the exact RPM, and follow the immutable publication checklist below.
@@ -276,18 +278,31 @@ committed. The local recovery keyring and revocation certificate are stored
 under `~/.local/share/open-mpv-release-signing` with owner-only access. Keep a
 secure offline backup and rotate the automation key before it expires.
 
-The owner must register the complete public file at
+When provisioning or rotating the key, register the complete public file at
 [GitHub → New GPG key](https://github.com/settings/gpg/new), titled
 `open-mpv release signing`. This is a one-time browser action; routine releases
 need no terminal. The current maintainer CLI token cannot perform this
-account-level registration because it lacks `admin:gpg_key`. Preparation checks
+account-level registration because it lacks `admin:gpg_key`. The current key
+successfully signed the v0.1.3 preparation merge on 9 September 2026.
+Preparation checks
 GitHub registration and the verified signing email before creating a PR.
 
-A complete rehearsal in an isolated repository remains required before using
-this browser flow for a production release. The
-rehearsal must cover PR CI approval, merge and owner signing approval, moved
-main, denied approval, tag conflicts, failed-upload recovery and preserved draft
-notes. Do not use a dummy production release for these tests.
+The browser flow was rehearsed on 11 September 2026 in
+[open-mpv-release-rehearsal](https://github.com/TheRealShek/open-mpv-release-rehearsal).
+The [successful signing and packaging run](https://github.com/TheRealShek/open-mpv-release-rehearsal/actions/runs/34565321409)
+signed preparation merge `99cd93a51e5f46c8ee88d8c00cbc853afd2312b0` after
+`main` advanced, then built and uploaded a draft RPM. Retrying those assets
+preserved the draft and asset IDs, edited notes and exact RPM bytes.
+[PR #73](https://github.com/TheRealShek/open-mpv/pull/73) records the remaining
+verification evidence: required CI, duplicate and competing requests, denied
+approval and recovery, tag conflicts, concurrent packaging and interrupted
+upload recovery. The sandbox had no published predecessor, so its
+upgrade/downgrade portion was explicitly skipped; native RPM ordering has
+fixture coverage. The sandbox release remains unpublished.
+
+Repeat an isolated rehearsal when changing this flow. Keep owner approval,
+exact-commit signing and manual publication intact. Do not use a dummy
+production release for these tests.
 
 ## Retrying release preparation
 
@@ -303,6 +318,13 @@ are downloaded and checked against `release-source.json` (tag, signed tag object
 and exact commit) and `SHA256SUMS`, then the package checks run again on those
 same bytes. The manifest is uploaded first. A draft with no assets, or only a
 matching manifest, can resume building. No upload overwrites an existing asset.
+
+Retries look up the release directly by tag through GitHub's GraphQL API, then
+read its state by release ID. New draft creation and asset uploads use the
+release identity returned by GitHub's creation response. A successful
+creation must not fail merely because the new draft is absent from that list.
+If creation itself fails, the run stops without retrying the write; rerun the
+workflow to discover any draft that GitHub already created.
 
 A partial upload, missing provenance for an older draft, mismatched checksum or
 conflicting bytes stops preparation. Inspect the failed run and draft before
@@ -363,9 +385,14 @@ published version to correct it: use a new version.
    cmp open-mpv-fedora44-x86_64.rpm latest.rpm
    ```
 
-Publication verification remains pending until the next authorized release.
-Do not publish a dummy production release for this check. Retain the successful
-verification output with that release's validation record.
+On 10 September 2026, published **v0.1.3** was verified immutable with
+`gh release verify`; downloaded RPM and `SHA256SUMS` both passed
+`gh release verify-asset`. The stable latest-download URL returned identical
+RPM bytes, with SHA-256
+`5add2c4e4e9b14b3b52db619628085a95e5d3793dfccd71b92a528c656845cbf`.
+This verifies publication integrity, not human desktop or source-migration
+testing. Repeat the checklist for each release; do not publish a dummy
+production release for verification.
 
 ## First-release gate
 
