@@ -90,7 +90,9 @@ pub(crate) fn with_player(test: impl FnOnce(Player, TestPipeline)) {
 #[test]
 fn refused_pause_and_resume_do_not_commit_state() {
     with_player(|player, pipeline| {
-        player.play(Path::new("/tmp/open-mpv-test.mp4")).unwrap();
+        player
+            .play(Path::new("/tmp/open-mpv-test.mp4"), None)
+            .unwrap();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::PlayingToPaused);
         assert!(player.toggle_pause().is_err());
         assert!(player.is_playing());
@@ -107,16 +109,16 @@ fn refused_pause_and_resume_do_not_commit_state() {
 #[test]
 fn failed_teardown_does_not_replace_uri_and_stop_reports_failure() {
     with_player(|player, pipeline| {
-        player.play(Path::new("/tmp/old.mp4")).unwrap();
+        player.play(Path::new("/tmp/old.mp4"), None).unwrap();
         let uri = pipeline.uri();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::ReadyToNull);
-        assert!(player.play(Path::new("/tmp/new.mp4")).is_err());
+        assert!(player.play(Path::new("/tmp/new.mp4"), None).is_err());
         assert_eq!(pipeline.uri(), uri);
         assert!(!player.is_playing());
         assert!(player.stop().is_err());
         assert!(player.playback.borrow().current_video().is_none());
         *pipeline.imp().refuse.lock().unwrap() = None;
-        player.play(Path::new("/tmp/new.mp4")).unwrap();
+        player.play(Path::new("/tmp/new.mp4"), None).unwrap();
         assert_ne!(pipeline.uri(), uri);
         player.stop().unwrap();
         assert!(!player.is_playing());
@@ -126,7 +128,7 @@ fn failed_teardown_does_not_replace_uri_and_stop_reports_failure() {
 #[test]
 fn refused_rewind_seek_and_resume_never_report_playing() {
     with_player(|player, pipeline| {
-        player.play(Path::new("/tmp/movie.mp4")).unwrap();
+        player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
         pipeline.imp().refuse_seek.store(true, Ordering::Relaxed);
         assert!(matches!(player.rewind(), Err(PlayerError::SeekRefused)));
         assert!(!player.is_playing());
@@ -145,12 +147,12 @@ fn refused_rewind_seek_and_resume_never_report_playing() {
 fn subtitle_attach_and_recovery_require_completed_teardown() {
     with_player(|player, pipeline| {
         let subtitle = tempfile::Builder::new().suffix(".srt").tempfile().unwrap();
-        player.play(Path::new("/tmp/movie.mp4")).unwrap();
+        player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::ReadyToNull);
         assert!(player.attach_subtitle(subtitle.path()).is_err());
         assert!(pipeline.suburi().is_none());
         *pipeline.imp().refuse.lock().unwrap() = None;
-        player.play(Path::new("/tmp/movie.mp4")).unwrap();
+        player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
         player.attach_subtitle(subtitle.path()).unwrap();
         let suburi = pipeline.suburi();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::ReadyToNull);
@@ -165,7 +167,7 @@ fn subtitle_attach_and_recovery_require_completed_teardown() {
 fn failed_subtitle_restart_and_recovery_clear_pending_resume() {
     with_player(|player, pipeline| {
         let subtitle = tempfile::Builder::new().suffix(".srt").tempfile().unwrap();
-        player.play(Path::new("/tmp/movie.mp4")).unwrap();
+        player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::PausedToPlaying);
         assert!(player.attach_subtitle(subtitle.path()).is_err());
         assert!(!player.is_playing());
@@ -181,7 +183,7 @@ fn failed_subtitle_restart_and_recovery_clear_pending_resume() {
 #[test]
 fn drop_attempts_cleanup_even_after_a_failure() {
     with_player(|player, pipeline| {
-        player.play(Path::new("/tmp/movie.mp4")).unwrap();
+        player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::ReadyToNull);
         assert!(player.stop().is_err());
         *pipeline.imp().refuse.lock().unwrap() = None;
@@ -198,7 +200,7 @@ fn both_subtitle_completion_paths_report_refusal_and_reject_stale_errors() {
         for playing in [false, true] {
             for supersede in [false, true] {
                 with_player(|player, pipeline| {
-                    player.play(Path::new("/tmp/movie.mp4")).unwrap();
+                    player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
                     if playing {
                         pipeline.set_state(gst::State::Paused).unwrap();
                     }
@@ -252,4 +254,17 @@ fn both_subtitle_completion_paths_report_refusal_and_reject_stale_errors() {
             }
         }
     }
+}
+
+#[test]
+fn play_attaches_explicit_subtitle() {
+    with_player(|player, _pipeline| {
+        let video = Path::new("/tmp/movie.mp4");
+        let subtitle = PathBuf::from("/tmp/movie.srt");
+        player.play(video, Some(subtitle.clone())).unwrap();
+        assert_eq!(
+            player.playback.borrow().external_subtitle(),
+            Some(subtitle.as_path())
+        );
+    });
 }

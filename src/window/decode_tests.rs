@@ -73,3 +73,59 @@ fn sustained_real_decodes() {
     app.shutdown();
     context.block_on(glib::timeout_future(Duration::from_millis(250)));
 }
+
+/// Exercise actual folder workers and stale open delivery on the GTK context.
+#[test]
+#[ignore = "requires a GNOME/Wayland session; run separately with --ignored --exact"]
+fn large_folder_open_stays_responsive_and_latest_request_wins() {
+    gtk::init().unwrap();
+    let gtk_app = gtk::Application::builder()
+        .application_id("io.github.TheRealShek.OpenMpv.OpenTest")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    gtk_app.register(gio::Cancellable::NONE).unwrap();
+    let mut cfg = Config::default();
+    cfg.sort.order = config::SortOrder::Date;
+    let app = App::new(&gtk_app, cfg);
+    let large = tempfile::tempdir().unwrap();
+    for i in 0..20_000 {
+        std::fs::write(large.path().join(format!("{i:05}.png")), []).unwrap();
+    }
+    let latest = tempfile::tempdir().unwrap();
+    let decode_gate = gio::Cancellable::new();
+    loader::SLOW_TEST.with(|paths| *paths.borrow_mut() = Some((Vec::new(), decode_gate.clone())));
+    let context = glib::MainContext::default();
+    app.open_path(large.path());
+    context.block_on(async {
+        let start = std::time::Instant::now();
+        let mut last = start;
+        let mut max_gap = Duration::ZERO;
+        let mut ticks = 0;
+        while app.navigation.borrow().directory() != Some(large.path()) {
+            glib::timeout_future(Duration::from_millis(1)).await;
+            let now = std::time::Instant::now();
+            max_gap = max_gap.max(now.duration_since(last));
+            last = now;
+            ticks += 1;
+            assert!(start.elapsed() < Duration::from_secs(30));
+        }
+        eprintln!(
+            "20,000 date-sorted media entries: {:?}, {ticks} GTK ticks, max gap {max_gap:?}",
+            start.elapsed()
+        );
+        assert!(ticks > 1);
+        app.open_path(large.path());
+        for _ in 0..100 {
+            app.open_path(latest.path());
+        }
+        while app.navigation.borrow().directory() != Some(latest.path()) {
+            glib::timeout_future(Duration::from_millis(1)).await;
+            assert!(start.elapsed() < Duration::from_secs(30));
+        }
+        assert!(matches!(*app.media.borrow(), MediaState::Error(_)));
+        app.shutdown();
+        loader::SLOW_TEST.with(|paths| paths.borrow_mut().take());
+        decode_gate.cancel();
+        glib::timeout_future(Duration::from_millis(100)).await;
+    });
+}

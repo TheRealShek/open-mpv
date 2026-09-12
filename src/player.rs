@@ -39,8 +39,10 @@ pub use playback::PlaybackRateError;
 use playback::{FocusedPlayback, ResumeAction, SeekRequest, issue_seek, same_rate};
 #[allow(unused_imports)]
 pub use tracks::AudioTrack;
-use tracks::matching_sidecar;
-pub use tracks::{AudioChoice, AudioSnapshot, SubtitleChoice, SubtitleSnapshot, SubtitleTrack};
+pub use tracks::{
+    AudioChoice, AudioSnapshot, SubtitleChoice, SubtitleSnapshot, SubtitleTrack,
+    matching_sidecar_cancellable,
+};
 
 const VOLUME_MAX: f64 = 1.5;
 pub const PLAYBACK_RATES: &[f64] = &[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
@@ -379,14 +381,10 @@ impl Player {
         self.playback.borrow().has_external_subtitle()
     }
 
-    pub fn path_has_sidecar(path: &Path) -> bool {
-        matching_sidecar(path).is_some()
-    }
-
     /// Start playing `path` from the beginning, replacing any current
-    /// video. The pipeline object is reused; only its state cycles.
-    pub fn play(&self, path: &Path) -> Result<(), PlayerError> {
-        let subtitle = matching_sidecar(path);
+    /// video, using the sidecar already discovered off GTK. The pipeline
+    /// object is reused; only its state cycles.
+    pub fn play(&self, path: &Path, subtitle: Option<PathBuf>) -> Result<(), PlayerError> {
         if let Some(subtitle) = subtitle.as_ref() {
             crate::applog!("player: matched subtitle {}", subtitle.display());
         }
