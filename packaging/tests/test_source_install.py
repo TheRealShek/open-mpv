@@ -102,6 +102,30 @@ if [ "$1" = -qa ]; then exit "${RPM_BROKEN:-0}"; fi
         self.invoke('install.sh', '--no-build', success=False)
         self.assertFalse(self.prefix.exists())
 
+    def test_staged_symlink_cannot_write_to_owned_live_file(self):
+        live = self.root / 'live'
+        live.mkdir()
+        binary = live / 'open-mpv'
+        binary.write_text('packaged binary')
+        stage = self.root / 'stage'
+        (stage / 'usr/bin').mkdir(parents=True)
+        (stage / 'usr/bin/open-mpv').symlink_to(binary)
+        self.env['RPM_OWNED'] = str(binary)
+        self.invoke('install.sh', '--no-build', '--prefix', '/usr', '--destdir', str(stage), success=False)
+        self.assertEqual(binary.read_text(), 'packaged binary')
+        self.assertFalse((stage / 'usr/share').exists())
+
+    def test_owned_desktop_cache_stops_install_and_uninstall(self):
+        self.invoke('install.sh', '--no-build')
+        binary = self.prefix / 'bin/open-mpv'
+        binary.write_text('existing build')
+        for name in ('applications/mimeinfo.cache', 'icons/hicolor/icon-theme.cache'):
+            with self.subTest(cache=name):
+                self.env['RPM_OWNED'] = str(self.prefix / 'share' / name)
+                self.invoke('install.sh', '--no-build', success=False)
+                self.invoke('uninstall.sh', success=False)
+                self.assertEqual(binary.read_text(), 'existing build')
+
 
 if __name__ == '__main__':
     unittest.main()
