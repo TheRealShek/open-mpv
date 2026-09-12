@@ -246,7 +246,7 @@ impl Cache {
         }
     }
 
-    /// Drop a path after the file changed on disk (rotate-save).
+    /// Drop a path after an application-owned or externally observed file change.
     pub fn invalidate(&self, path: &Path) {
         let mut entries = self.entries.borrow_mut();
         if let Some(pos) = entries.iter().position(|e| e.path == path) {

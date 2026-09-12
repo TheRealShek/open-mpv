@@ -123,6 +123,7 @@ pub struct App {
     navigation: RefCell<Navigation>,
     monitor: RefCell<Option<gio::FileMonitor>>,
     fs_queries: RefCell<FsQueryVersions>,
+    fs_refresh_timer: TimerSlot,
     open_scans: RefCell<ScanQueue<PathBuf>>,
     sidecar_scans: RefCell<ScanQueue<Destination>>,
     media: RefCell<MediaState>,
@@ -369,6 +370,7 @@ impl App {
     }
 
     fn install_folder(self: &Rc<Self>, folder: Folder) {
+        self.fs_refresh_timer.cancel();
         self.sidecar_scans.borrow_mut().cancel_all();
         self.decodes.borrow_mut().cancel_all();
         let len = folder.len();
@@ -429,6 +431,7 @@ impl App {
     }
 
     fn show_destination(self: &Rc<Self>, destination: Destination, arrival: Arrival) {
+        self.fs_refresh_timer.cancel();
         self.stop_animation();
         if self.view.cancel_markup() {
             self.update_cursor();
@@ -666,6 +669,7 @@ impl App {
         self.stop_animation();
         self.monitor.borrow_mut().take();
         self.fs_queries.borrow_mut().cancel_all();
+        self.fs_refresh_timer.cancel();
         self.chrome_timer.cancel();
         self.indicator_timer.cancel();
         self.toast_timer.cancel();
@@ -1436,46 +1440,52 @@ impl App {
             glib::spawn_future_local(async move {
                 let result = loader::decode(&job.path, &job.cancellable).await;
                 let Some(app) = weak.upgrade() else { return };
-                let interest = app.decodes.borrow_mut().finish(&job.path);
-                match interest {
-                    Some(loader::Interest::Foreground((generation, arrival)))
-                        if app.navigation.borrow().is_current_generation(generation) =>
-                    {
-                        match result {
-                            Ok((decoded, mime)) => {
-                                app.cache.put_foreground(
-                                    job.path.clone(),
-                                    decoded.clone(),
-                                    mime.clone(),
-                                );
-                                app.apply_decoded(job.path, decoded, mime, generation);
-                            }
-                            Err(e) => {
-                                eprintln!("open-mpv: decode {}: {e}", job.path.display());
-                                app.on_decode_failed(
-                                    &job.path,
-                                    &error::message(&e, "Could not open the image."),
-                                    arrival,
-                                );
-                            }
-                        }
-                    }
-                    Some(loader::Interest::Neighbor) => {
-                        if let Ok((decoded, mime)) = result {
-                            app.cache.put_neighbor(job.path, decoded, mime);
-                        }
-                    }
-                    _ => {}
-                }
-                app.start_decodes();
+                app.on_decode_completed(job.path, result);
             });
         }
+    }
+
+    fn on_decode_completed(
+        self: &Rc<Self>,
+        path: PathBuf,
+        result: Result<(Rc<Decoded>, String), loader::DecodeError>,
+    ) {
+        let interest = self.decodes.borrow_mut().finish(&path);
+        match interest {
+            Some(loader::Interest::Foreground((generation, arrival)))
+                if self.navigation.borrow().is_current_generation(generation) =>
+            {
+                match result {
+                    Ok((decoded, mime)) => {
+                        self.cache
+                            .put_foreground(path.clone(), decoded.clone(), mime.clone());
+                        self.apply_decoded(path, decoded, mime, generation);
+                    }
+                    Err(error) => {
+                        eprintln!("open-mpv: decode {}: {error}", path.display());
+                        self.on_decode_failed(
+                            &path,
+                            &error::message(&error, "Could not open the image."),
+                            arrival,
+                        );
+                    }
+                }
+            }
+            Some(loader::Interest::Neighbor) => {
+                if let Ok((decoded, mime)) = result {
+                    self.cache.put_neighbor(path, decoded, mime);
+                }
+            }
+            _ => {}
+        }
+        self.start_decodes();
     }
 
     /// Take down whatever is on screen: silence any video, drop the
     /// decoded image, and bump the generation so async work already in
     /// flight knows it has been superseded.
     fn clear_media(&self) {
+        self.fs_refresh_timer.cancel();
         self.sidecar_scans.borrow_mut().cancel_all();
         self.pending_media_size.set(None);
         self.navigation.borrow_mut().supersede();

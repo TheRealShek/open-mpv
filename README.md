@@ -64,6 +64,9 @@ Opening a file lets you browse the other supported photos and videos in the
 same folder. Opening a folder starts with its first supported file.
 Folder and automatic subtitle discovery run in the background so an already
 open window stays responsive while storage is busy. The latest open request wins.
+Edits made by another application refresh the current image after file-change
+notifications settle. Cached neighbors are invalidated too. Refreshing resets
+the image view and clears any transient Quick Markup.
 The window starts at a size that fits your display and keeps that size as
 you browse. Rapid navigation keeps image-loading work bounded and gives the
 current photo priority over preloading neighbors.

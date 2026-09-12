@@ -16,7 +16,14 @@ use crate::folder::{
     SnapshotKind,
 };
 
-use super::{App, Arrival};
+use super::{App, Arrival, MediaState, reset_timer};
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SNAPSHOT_TEST_GATE: std::cell::RefCell<Option<gio::Cancellable>> = const { std::cell::RefCell::new(None) };
+}
+
+const CONTENT_REFRESH_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FsPresentation {
@@ -27,7 +34,10 @@ enum FsPresentation {
 
 #[derive(Debug)]
 enum FsChange {
-    Insert(FileSnapshot),
+    PendingRename {
+        old: PathBuf,
+        new: PathBuf,
+    },
     Remove(PathBuf),
     Rename {
         old: PathBuf,
@@ -126,15 +136,17 @@ impl App {
         }
         use gio::FileMonitorEvent as E;
         match event {
+            E::Changed | E::ChangesDoneHint => {
+                if let Some(path) = file.path() {
+                    self.on_content_changed(set, &path);
+                }
+            }
             E::Created | E::MovedIn => {
                 let Some(path) = file.path().filter(|path| config::is_supported(path)) else {
                     return;
                 };
-                self.query_fs_snapshot(set, file.clone(), vec![path], move |app, snapshot| {
-                    if let Some(snapshot) = snapshot {
-                        app.apply_fs_change(set, FsChange::Insert(snapshot), event);
-                    }
-                });
+                self.on_content_changed(set, &path);
+                self.query_fs_snapshot(set, file.clone(), event);
             }
             E::Deleted | E::MovedOut => {
                 let Some(path) = file.path() else {
@@ -153,38 +165,93 @@ impl App {
                 }) else {
                     return;
                 };
-                let paths = vec![old.clone(), new.clone()];
+                self.fs_queries
+                    .borrow_mut()
+                    .supersede(&[old.clone(), new.clone()]);
+                self.apply_fs_change(
+                    set,
+                    FsChange::PendingRename {
+                        old,
+                        new: new.clone(),
+                    },
+                    event,
+                );
                 if config::is_supported(&new) {
-                    self.query_fs_snapshot(set, new_file, paths, move |app, snapshot| {
-                        app.apply_fs_change(set, FsChange::Rename { old, new, snapshot }, event);
-                    });
-                } else {
-                    self.fs_queries.borrow_mut().supersede(&paths);
-                    self.apply_fs_change(
-                        set,
-                        FsChange::Rename {
-                            old,
-                            new,
-                            snapshot: None,
-                        },
-                        event,
-                    );
+                    self.query_fs_snapshot(set, new_file, event);
                 }
             }
             _ => {}
         }
     }
 
+    /// Invalidate immediately, but wait for a short quiet period before
+    /// decoding the current image. One timer coalesces Changed/ChangesDoneHint
+    /// bursts; there is no per-path history or timer growth for neighbor edits.
+    fn on_content_changed(self: &Rc<Self>, set: NavigationSetId, path: &Path) {
+        if !self.invalidate_image(path) {
+            return;
+        }
+        let path = path.to_path_buf();
+        let weak = Rc::downgrade(self);
+        reset_timer(&self.fs_refresh_timer, CONTENT_REFRESH_DELAY, move || {
+            let Some(app) = weak.upgrade() else { return };
+            let index = {
+                let navigation = app.navigation.borrow();
+                if app.shutting_down.get()
+                    || navigation.set_id() != Some(set)
+                    || navigation.current_path() != Some(path.as_path())
+                {
+                    return;
+                }
+                navigation.current_index()
+            };
+            if let Some(index) = index {
+                app.show_index(index, Arrival::Direct);
+            }
+        });
+    }
+
+    /// Stop work for old contents without choosing a reload destination.
+    /// Rename completion owns that choice; content edits reload the same path.
+    fn invalidate_image(self: &Rc<Self>, path: &Path) -> bool {
+        if !config::is_supported(path) || config::is_video(path) {
+            return false;
+        }
+        self.cache.invalidate(path);
+        self.decodes.borrow_mut().invalidate(path);
+        let index = {
+            let mut navigation = self.navigation.borrow_mut();
+            if navigation.current_path() != Some(path) {
+                return false;
+            }
+            navigation.supersede();
+            navigation.current_index()
+        };
+        let Some(index) = index else { return false };
+        // Invalidate animation/SVG presentation as well as first-frame work.
+        // Keep the last texture visible while the replacement is prepared.
+        self.fs_refresh_timer.cancel();
+        self.stop_animation();
+        self.svg_timer.cancel();
+        if self.view.cancel_markup() {
+            self.update_cursor();
+        }
+        *self.media.borrow_mut() = MediaState::Loading(path.to_path_buf());
+        self.update_control_mode();
+        self.schedule_decodes(index, None);
+        true
+    }
+
     fn query_fs_snapshot(
         self: &Rc<Self>,
         set: NavigationSetId,
         file: gio::File,
-        paths: Vec<PathBuf>,
-        apply: impl FnOnce(&Rc<Self>, Option<FileSnapshot>) + 'static,
+        event: gio::FileMonitorEvent,
     ) {
         let Some(snapshot_path) = file.path() else {
             return;
         };
+        let paths = vec![snapshot_path.clone()];
         let (version, cancellable) = self.fs_queries.borrow_mut().start(&paths);
         file.query_info_async(
             "standard::type,time::modified,time::modified-nsec",
@@ -195,23 +262,56 @@ impl App {
                 #[strong(rename_to = app)]
                 self,
                 move |result| {
-                    let current = app.fs_queries.borrow_mut().finish(&paths, version);
-                    let same_set = app.navigation.borrow().set_id() == Some(set);
-                    let snapshot = match snapshot_from_query(snapshot_path.clone(), result) {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            if !error.matches(gio::IOErrorEnum::Cancelled) {
-                                eprintln!(
-                                    "open-mpv: cannot query changed file {}: {error}",
-                                    snapshot_path.display()
-                                );
+                    let complete = move || {
+                        let current = app.fs_queries.borrow_mut().finish(&paths, version);
+                        let same_set = app.navigation.borrow().set_id() == Some(set);
+                        let snapshot = match snapshot_from_query(snapshot_path.clone(), result) {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                if !error.matches(gio::IOErrorEnum::Cancelled) {
+                                    eprintln!(
+                                        "open-mpv: cannot query changed file {}: {error}",
+                                        snapshot_path.display()
+                                    );
+                                }
+                                if current && same_set && !app.shutting_down.get() {
+                                    let loading = match &*app.media.borrow() {
+                                        MediaState::Loading(path) if paths.contains(path) => {
+                                            Some(path.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(path) = loading {
+                                        app.show_error(
+                                            &path,
+                                            &format!("Could not read the changed file: {error}"),
+                                        );
+                                    }
+                                }
+                                return;
                             }
-                            return;
+                        };
+                        if current && same_set && !app.shutting_down.get() {
+                            app.apply_fs_change(
+                                set,
+                                FsChange::Rename {
+                                    old: snapshot_path.clone(),
+                                    new: snapshot_path,
+                                    snapshot,
+                                },
+                                event,
+                            );
                         }
                     };
-                    if current && same_set && !app.shutting_down.get() {
-                        apply(&app, snapshot);
+                    #[cfg(test)]
+                    if let Some(gate) = SNAPSHOT_TEST_GATE.with(|gate| gate.borrow().clone()) {
+                        glib::spawn_future_local(async move {
+                            gate.future().await;
+                            complete();
+                        });
+                        return;
                     }
+                    complete();
                 }
             ),
         );
@@ -224,17 +324,23 @@ impl App {
         event: gio::FileMonitorEvent,
     ) {
         let (path, removal) = match &change {
-            FsChange::Insert(snapshot) => (snapshot.path(), false),
             FsChange::Remove(path) => (path.as_path(), true),
-            FsChange::Rename { old, .. } => (old.as_path(), false),
+            FsChange::Rename { old, .. } | FsChange::PendingRename { old, .. } => {
+                (old.as_path(), false)
+            }
         };
         let path = path.to_path_buf();
         // Invalidate both sides of a rename before a new destination can use
         // a cached result or join an in-flight decode of replaced contents.
         let invalidated = match &change {
             FsChange::Remove(path) => vec![path.clone()],
-            FsChange::Rename { old, new, .. } => vec![old.clone(), new.clone()],
-            FsChange::Insert(_) => Vec::new(),
+            FsChange::Rename { old, new, .. } | FsChange::PendingRename { old, new } => {
+                vec![old.clone(), new.clone()]
+            }
+        };
+        let pending_target = match &change {
+            FsChange::PendingRename { new, .. } => Some(new.clone()),
+            _ => None,
         };
         let (before_generation, presentation) = {
             let mut navigation = self.navigation.borrow_mut();
@@ -260,7 +366,19 @@ impl App {
         );
         match presentation {
             FsPresentation::Show(destination) => {
-                self.show_destination(destination, Arrival::Direct)
+                if pending_target.as_deref() == Some(destination.path.as_path()) {
+                    self.fs_refresh_timer.cancel();
+                    self.stop_animation();
+                    self.svg_timer.cancel();
+                    self.stop_video();
+                    if !self.invalidate_image(&destination.path) {
+                        *self.media.borrow_mut() = MediaState::Loading(destination.path.clone());
+                        self.update_control_mode();
+                    }
+                    self.set_current_name(Some(&destination.path));
+                } else {
+                    self.show_destination(destination, Arrival::Direct);
+                }
             }
             FsPresentation::Empty => self.empty_state("No media left in this folder"),
             FsPresentation::Unchanged => {}
@@ -298,9 +416,8 @@ fn file_snapshot_from_info(path: PathBuf, info: &gio::FileInfo) -> Option<FileSn
 /// return only the presentation work the window adapter must perform.
 fn apply_fs_change(navigation: &mut Navigation, change: FsChange) -> FsPresentation {
     match change {
-        FsChange::Insert(snapshot) => {
-            navigation.insert(snapshot);
-            FsPresentation::Unchanged
+        FsChange::PendingRename { old, new } => {
+            rename_presentation(navigation.rename_pending(&old, &new))
         }
         FsChange::Remove(path) => match navigation.remove(&path) {
             RemovalOutcome::CurrentRemoved(Some(destination)) => FsPresentation::Show(destination),
@@ -309,13 +426,19 @@ fn apply_fs_change(navigation: &mut Navigation, change: FsChange) -> FsPresentat
                 FsPresentation::Unchanged
             }
         },
-        FsChange::Rename { old, new, snapshot } => match navigation.rename(&old, &new, snapshot) {
-            RenameOutcome::Renamed(destination) | RenameOutcome::Removed(Some(destination)) => {
-                FsPresentation::Show(destination)
-            }
-            RenameOutcome::Removed(None) => FsPresentation::Empty,
-            RenameOutcome::Preserved => FsPresentation::Unchanged,
-        },
+        FsChange::Rename { old, new, snapshot } => {
+            rename_presentation(navigation.rename(&old, &new, snapshot))
+        }
+    }
+}
+
+fn rename_presentation(outcome: RenameOutcome) -> FsPresentation {
+    match outcome {
+        RenameOutcome::Renamed(destination) | RenameOutcome::Removed(Some(destination)) => {
+            FsPresentation::Show(destination)
+        }
+        RenameOutcome::Removed(None) => FsPresentation::Empty,
+        RenameOutcome::Preserved => FsPresentation::Unchanged,
     }
 }
 
