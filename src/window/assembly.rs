@@ -379,6 +379,7 @@ impl App {
             navigation: RefCell::new(Navigation::default()),
             monitor: RefCell::new(None),
             fs_queries: RefCell::new(FsQueryVersions::default()),
+            fs_refresh_timer: TimerSlot::default(),
             open_scans: RefCell::new(open::ScanQueue::default()),
             sidecar_scans: RefCell::new(open::ScanQueue::default()),
             media: RefCell::new(MediaState::Empty),

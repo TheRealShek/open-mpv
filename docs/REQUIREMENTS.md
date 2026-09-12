@@ -54,6 +54,22 @@ new product decisions rather than incidental implementation.
 - **FR-3.4 / FR-3.5** Folder additions, removals and renames update the set while preserving the
   logical current item. Removing the current item lands on its nearest
   remaining position rather than the first item.
+- **FR-3.5** External image content changes, additions/replacements, removals and
+  renames invalidate affected cached images and pending decodes as soon as
+  their monitor events arrive, before asynchronous metadata queries complete.
+  Superseded decode successes cannot repopulate the cache. In-place change and
+  completed-change notifications coalesce through one 100 ms quiet-period timer
+  for the current image; neighbor edits invalidate without moving the selection.
+  Refresh reloads the current image with the normal view reset and clears
+  transient Quick Markup. Animation and SVG work for the old contents is rejected.
+  Navigation, folder replacement, clearing and shutdown cancel deferred refresh.
+  Content notifications do not restart video playback. Existing removal and
+  rename navigation behavior still applies, including delete/recreate races.
+  A reported rename moves known entries to their new logical path immediately,
+  retaining provisional metadata until the destination query completes. Reload
+  waits for validation. Later deletion, another rename, source recreation or
+  destination replacement supersedes the appropriate destination query without
+  losing the logical selection.
 - **FR-2.5** Directly opened broken media shows its error; navigation may skip broken
   items with bounded work and must never loop forever.
 

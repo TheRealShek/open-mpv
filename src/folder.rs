@@ -390,6 +390,21 @@ impl Navigation {
         }
     }
 
+    /// Record the monitor's move immediately so subsequent events address the
+    /// new logical path. Existing metadata is provisional until the adapter
+    /// validates the destination; this does not read from the filesystem.
+    pub fn rename_pending(&mut self, old: &Path, new: &Path) -> RenameOutcome {
+        let snapshot = self.folder.as_ref().and_then(|folder| {
+            let index = folder.index_of(old).or_else(|| folder.index_of(new))?;
+            Some(FileSnapshot::new(
+                new.to_path_buf(),
+                folder.entries[index].mtime,
+                SnapshotKind::Regular,
+            ))
+        });
+        self.rename(old, new, snapshot)
+    }
+
     pub fn rename(
         &mut self,
         old: &Path,
@@ -904,6 +919,41 @@ mod tests {
         assert_eq!(navigation.current_index(), Some(1));
         assert_eq!(navigation.current_path(), Some(dir.join("c.jpg").as_path()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pending_rename_updates_identity_before_metadata_without_io() {
+        let (dir, mut navigation) = navigation_of("pending-rename", &["a.jpg", "z.jpg"]);
+        navigation.select(0).unwrap();
+        let a = dir.join("a.jpg");
+        let b = dir.join("b.jpg");
+        let c = dir.join("c.jpg");
+        // The model must work from its known entries, even without a directory.
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(
+            navigation.rename_pending(&a, &b),
+            RenameOutcome::Renamed(_)
+        ));
+        assert_eq!(navigation.current_path(), Some(b.as_path()));
+        assert!(navigation.index_of(&a).is_none());
+        navigation.insert(FileSnapshot::new(
+            a.clone(),
+            SystemTime::UNIX_EPOCH,
+            SnapshotKind::Regular,
+        ));
+        assert!(matches!(
+            navigation.rename_pending(&b, &c),
+            RenameOutcome::Renamed(_)
+        ));
+        assert_eq!(navigation.current_path(), Some(c.as_path()));
+        assert!(navigation.index_of(&a).is_some());
+        assert!(navigation.index_of(&b).is_none());
+        let invalid = FileSnapshot::new(c.clone(), SystemTime::UNIX_EPOCH, SnapshotKind::Other);
+        assert!(matches!(
+            navigation.rename(&c, &c, Some(invalid)),
+            RenameOutcome::Removed(Some(_))
+        ));
+        assert_eq!(navigation.current_path(), Some(dir.join("z.jpg").as_path()));
     }
 
     #[test]
