@@ -5,6 +5,7 @@
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::SystemTime;
 
 use crate::config::{Sort, SortOrder, is_supported};
@@ -94,24 +95,75 @@ pub enum RenameOutcome {
     Removed(Option<Destination>),
 }
 
+/// The outcome of scanning a target path that may be a directory or file.
+#[derive(Debug)]
+pub enum TargetOutcome {
+    Cancelled,
+    NoParent {
+        path: PathBuf,
+    },
+    Folder {
+        dir: PathBuf,
+        folder: Folder,
+    },
+    File {
+        path: PathBuf,
+        folder: Folder,
+    },
+    Error {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+}
+
 impl Folder {
     /// Scan `dir` for supported media. Unreadable entries are skipped.
+    #[cfg(test)]
     pub fn scan(dir: &Path, sort: Sort) -> std::io::Result<Folder> {
+        Self::scan_cancellable(dir, sort, &AtomicBool::new(false))
+    }
+
+    /// Scan `dir` for supported media with cancellation support.
+    pub fn scan_cancellable(
+        dir: &Path,
+        sort: Sort,
+        cancelled: &AtomicBool,
+    ) -> std::io::Result<Folder> {
+        if cancelled.load(AtomicOrdering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "folder scan cancelled",
+            ));
+        }
         let mut entries = Vec::new();
         for res in std::fs::read_dir(dir)? {
+            if cancelled.load(AtomicOrdering::Relaxed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "folder scan cancelled",
+                ));
+            }
             let Ok(de) = res else { continue };
+            let file_name = de.file_name();
+            // Extension first: it is pure string work on OsStr, and it rejects most
+            // of a mixed directory before anything touches the filesystem or allocates.
+            if !is_supported(Path::new(&file_name)) {
+                continue;
+            }
             let path = de.path();
-            // Extension first: it is pure string work, and it rejects most
-            // of a mixed directory before anything touches the filesystem.
-            // `Path::is_file` was doing that work for every entry, stat
-            // included, only to discard the answer a moment later.
-            if !is_supported(&path) || !is_regular_file(&de, &path) {
+            if !is_regular_file(&de, &path) {
                 continue;
             }
             entries.push(Entry {
                 mtime: mtime_of(&de, sort),
                 path,
             });
+        }
+        if cancelled.load(AtomicOrdering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "folder scan cancelled",
+            ));
         }
         let mut folder = Folder {
             directory: dir.to_path_buf(),
@@ -120,6 +172,32 @@ impl Folder {
         };
         folder.entries.sort_by(|a, b| folder_cmp(a, b, sort));
         Ok(folder)
+    }
+
+    /// Scan a target path that could be a folder or a media file.
+    pub fn scan_target(requested: &Path, sort: Sort, cancelled: &AtomicBool) -> TargetOutcome {
+        if cancelled.load(AtomicOrdering::Relaxed) {
+            return TargetOutcome::Cancelled;
+        }
+        let path = requested
+            .canonicalize()
+            .unwrap_or_else(|_| requested.to_path_buf());
+        if path.is_dir() {
+            match Self::scan_cancellable(&path, sort, cancelled) {
+                Ok(folder) => TargetOutcome::Folder { dir: path, folder },
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => TargetOutcome::Cancelled,
+                Err(error) => TargetOutcome::Error { path, error },
+            }
+        } else {
+            let Some(dir) = path.parent().map(Path::to_path_buf) else {
+                return TargetOutcome::NoParent { path };
+            };
+            match Self::scan_cancellable(&dir, sort, cancelled) {
+                Ok(folder) => TargetOutcome::File { path, folder },
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => TargetOutcome::Cancelled,
+                Err(error) => TargetOutcome::Error { path, error },
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -546,6 +624,67 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["a.png", "b2.jpg", "b10.jpg", "z.gif"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scan_target_handles_file_folder_and_cancellation() {
+        let dir = tempdir("scan-target");
+        let file = dir.join("image.png");
+        File::create(&file).unwrap();
+
+        let cancelled = AtomicBool::new(true);
+        let res_cancel = Folder::scan_target(&dir, by_name(), &cancelled);
+        assert!(matches!(res_cancel, TargetOutcome::Cancelled));
+
+        let not_cancelled = AtomicBool::new(false);
+        let res_dir = Folder::scan_target(&dir, by_name(), &not_cancelled);
+        assert!(matches!(res_dir, TargetOutcome::Folder { ref folder, .. } if folder.len() == 1));
+
+        let res_file = Folder::scan_target(&file, by_name(), &not_cancelled);
+        assert!(matches!(res_file, TargetOutcome::File { ref folder, .. } if folder.len() == 1));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scan_cancellable_stops_on_flag() {
+        let dir = tempdir("cancel-scan");
+        for i in 0..10 {
+            File::create(dir.join(format!("{i}.jpg"))).unwrap();
+        }
+        let cancelled = AtomicBool::new(true);
+        let err = Folder::scan_cancellable(&dir, by_name(), &cancelled).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scan_large_mixed_directory() {
+        let dir = tempdir("large-dir-perf");
+        // Create 2000 non-supported files and 5 supported images
+        for i in 0..2000 {
+            File::create(dir.join(format!("{i}.tmp"))).unwrap();
+        }
+        for i in 0..5 {
+            File::create(dir.join(format!("img_{i}.jpg"))).unwrap();
+        }
+        let folder = Folder::scan(&dir, by_name()).unwrap();
+        assert_eq!(folder.len(), 5);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scan_skips_unsupported_entries_cheaply() {
+        let dir = tempdir("cheap-filter");
+        for i in 0..100 {
+            File::create(dir.join(format!("{i}.txt"))).unwrap();
+            File::create(dir.join(format!("{i}.log"))).unwrap();
+        }
+        File::create(dir.join("photo.jpg")).unwrap();
+        let folder = Folder::scan(&dir, by_name()).unwrap();
+        assert_eq!(folder.len(), 1);
+        assert_eq!(names(&folder), ["photo.jpg"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

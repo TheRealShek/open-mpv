@@ -255,6 +255,14 @@ new product decisions rather than incidental implementation.
   navigation within 100 ms.
 - **NFR-1.3** Decode, folder enumeration, metadata and file operations never block GTK's
   main loop. Input, resize and quit remain responsive for huge or broken media.
+- **NFR-1.3** Viewer folder scans (including target resolution and date-sort metadata)
+  and automatic subtitle discovery run off GTK. Each has at most one active
+  worker, including cancelled work, and one pending request replaced by the
+  newest request. Superseded results are rejected; shutdown cancels both queues.
+  Subtitle results also belong to the current navigation generation and are
+  reused for pipeline replacement and playback. Cheap filename filters precede
+  metadata queries. Cancellation cannot interrupt an operating-system call
+  already waiting on storage; its worker slot stays occupied until it returns.
 - **NFR-2.1 / NFR-2.1a** The displayed image may exceed a cache budget, but all additional decoded
   media is bounded by checked byte and count limits. A zero neighbor budget
   retains no neighbors.

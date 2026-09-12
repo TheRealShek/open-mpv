@@ -37,9 +37,12 @@ mod animation;
 mod assembly;
 mod error;
 mod monitor;
+mod open;
 mod operation;
+use crate::folder::TargetOutcome as OpenOutcome;
 use action::{Action, Command, Media, WorkspaceState};
 use monitor::FsQueryVersions;
+use open::ScanQueue;
 use operation::{Coordinator as OperationCoordinator, UndoDisposition, UndoEffect, UndoId};
 
 const SEEK_STEP_SECONDS: f64 = 10.0;
@@ -120,6 +123,8 @@ pub struct App {
     navigation: RefCell<Navigation>,
     monitor: RefCell<Option<gio::FileMonitor>>,
     fs_queries: RefCell<FsQueryVersions>,
+    open_scans: RefCell<ScanQueue<PathBuf>>,
+    sidecar_scans: RefCell<ScanQueue<Destination>>,
     media: RefCell<MediaState>,
     animation: RefCell<Option<Rc<animation::Playback>>>,
     animation_btn: gtk::Button,
@@ -224,25 +229,71 @@ impl App {
     /// Entry point for CLI, desktop launch, single-instance forwards and
     /// drag-and-drop (FR-1).
     pub fn open_path(self: &Rc<Self>, path: &Path) {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         crate::applog!("open: {}", path.display());
-        if path.is_dir() {
-            self.open_folder(&path);
-        } else {
-            let Some(dir) = path.parent().map(Path::to_path_buf) else {
-                self.show_error(&path, "path has no parent directory");
-                return;
-            };
-            match Folder::scan(&dir, self.cfg.sort) {
-                Ok(folder) => {
-                    self.install_folder(folder);
-                    let idx = self.navigation.borrow().index_of(&path);
-                    match idx {
-                        Some(idx) => self.show_index(idx, Arrival::Direct),
-                        None => self.show_error(&path, &excluded_path_message(&path)),
+        if self.shutting_down.get() {
+            return;
+        }
+        let Some(job) = self.open_scans.borrow_mut().request(path.to_path_buf()) else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        let sort = self.cfg.sort;
+        glib::spawn_future_local(async move {
+            let mut job = job;
+            loop {
+                let requested_path = job.request.clone();
+                let result = gio::spawn_blocking(move || {
+                    Folder::scan_target(&job.request, sort, &job.cancelled)
+                })
+                .await;
+                let Some(app) = weak.upgrade() else { return };
+                let (current, next) = app.open_scans.borrow_mut().finish();
+                if app.shutting_down.get() {
+                    return;
+                }
+                if current {
+                    match result {
+                        Ok(outcome) => app.apply_open_outcome(outcome),
+                        Err(error) => {
+                            eprintln!("open-mpv: folder scan worker panicked: {error:?}");
+                            app.show_error(
+                                &requested_path,
+                                "Could not read the folder. Try opening it again.",
+                            );
+                        }
                     }
                 }
-                Err(e) => self.show_error(&path, &format!("cannot read directory: {e}")),
+                let Some(next) = next else { break };
+                job = next;
+            }
+        });
+    }
+
+    fn apply_open_outcome(self: &Rc<Self>, outcome: OpenOutcome) {
+        match outcome {
+            OpenOutcome::Cancelled => {}
+            OpenOutcome::NoParent { path } => {
+                self.show_error(&path, "path has no parent directory");
+            }
+            OpenOutcome::Error { path, error } => {
+                self.show_error(&path, &format!("cannot read directory: {error}"));
+            }
+            OpenOutcome::Folder { dir, folder } => {
+                if !folder.is_empty() {
+                    self.install_folder(folder);
+                    self.show_index(0, Arrival::Direct);
+                } else {
+                    self.install_folder(folder);
+                    self.show_error(&dir, "no supported media in this folder");
+                }
+            }
+            OpenOutcome::File { path, folder } => {
+                self.install_folder(folder);
+                let idx = self.navigation.borrow().index_of(&path);
+                match idx {
+                    Some(idx) => self.show_index(idx, Arrival::Direct),
+                    None => self.show_error(&path, &excluded_path_message(&path)),
+                }
             }
         }
     }
@@ -317,21 +368,8 @@ impl App {
         dialog_initial_folder_path(current.as_deref()).map(gio::File::for_path)
     }
 
-    fn open_folder(self: &Rc<Self>, dir: &Path) {
-        match Folder::scan(dir, self.cfg.sort) {
-            Ok(folder) if !folder.is_empty() => {
-                self.install_folder(folder);
-                self.show_index(0, Arrival::Direct);
-            }
-            Ok(folder) => {
-                self.install_folder(folder);
-                self.show_error(dir, "no supported media in this folder");
-            }
-            Err(e) => self.show_error(dir, &format!("cannot read directory: {e}")),
-        }
-    }
-
     fn install_folder(self: &Rc<Self>, folder: Folder) {
+        self.sidecar_scans.borrow_mut().cancel_all();
         self.decodes.borrow_mut().cancel_all();
         let len = folder.len();
         self.fs_queries.borrow_mut().cancel_all();
@@ -395,23 +433,23 @@ impl App {
         if self.view.cancel_markup() {
             self.update_cursor();
         }
-        let Destination {
-            index: idx,
-            path,
-            generation,
-        } = destination;
+        let idx = destination.index;
+        let path = destination.path.clone();
+        let generation = destination.generation;
         *self.media.borrow_mut() = MediaState::Loading(path.clone());
         self.update_control_mode();
         self.cache.pin(&path);
         self.set_current_name(Some(&path));
         self.update_pos_label();
+        // Stop any active video playback immediately so sound and frames
+        // do not continue while loading or discovering sidecars.
+        self.stop_video();
         if config::is_video(&path) {
-            self.show_video(&path);
+            self.schedule_video(destination);
             self.schedule_decodes(idx, None);
             return;
         }
-        // Leaving a video for an image: silence and free the decoder.
-        self.stop_video();
+        self.sidecar_scans.borrow_mut().cancel_all();
 
         let foreground = if let Some((decoded, mime)) = self.cache.get(&path) {
             crate::applog!("show: {} (cache hit)", path.display());
@@ -479,16 +517,59 @@ impl App {
         }
     }
 
-    fn show_video(self: &Rc<Self>, path: &Path) {
+    fn schedule_video(self: &Rc<Self>, destination: Destination) {
+        let Some(job) = self.sidecar_scans.borrow_mut().request(destination) else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let mut job = job;
+            loop {
+                let destination = job.request.clone();
+                let result = gio::spawn_blocking(move || {
+                    player::matching_sidecar_cancellable(&job.request.path, &job.cancelled)
+                })
+                .await;
+                let Some(app) = weak.upgrade() else { return };
+                let (current, next) = app.sidecar_scans.borrow_mut().finish();
+                if app.shutting_down.get() {
+                    return;
+                }
+                if current
+                    && app
+                        .navigation
+                        .borrow()
+                        .is_current_generation(destination.generation)
+                {
+                    let subtitle = match result {
+                        Ok(subtitle) => subtitle,
+                        Err(error) => {
+                            eprintln!("open-mpv: subtitle scan worker panicked: {error:?}");
+                            app.show_toast(
+                                "Could not look for local subtitles. You can add them manually.",
+                            );
+                            None
+                        }
+                    };
+                    app.show_video(&destination.path, subtitle);
+                }
+                let Some(next) = next else { break };
+                job = next;
+            }
+        });
+    }
+
+    fn show_video(self: &Rc<Self>, path: &Path, subtitle: Option<PathBuf>) {
         // Reuse the shared pipeline for ordinary video navigation. External
         // text pads are the exception: playbin3 can retain their playsink
         // ownership across Null and intermittently connect the next text pad
         // before video. A fresh pipeline keeps FR-10.7 deterministic without
         // moving GStreamer initialization onto image startup.
-        let replace_player =
-            self.player.borrow().as_ref().is_some_and(|player| {
-                player.has_external_subtitle() || Player::path_has_sidecar(path)
-            });
+        let replace_player = self
+            .player
+            .borrow()
+            .as_ref()
+            .is_some_and(|player| player.has_external_subtitle() || subtitle.is_some());
         if replace_player
             && let Some(player) = self.player.borrow_mut().take()
             && let Err(error) = player.stop()
@@ -505,7 +586,7 @@ impl App {
         };
         self.hide_status();
         self.view.show_live_paintable(player.paintable());
-        if let Err(e) = player.play(path) {
+        if let Err(e) = player.play(path, subtitle) {
             eprintln!("open-mpv: play {}: {e}", path.display());
             self.show_error(path, &error::message(&e, "Could not play the video."));
             return;
@@ -578,6 +659,8 @@ impl App {
         // Invalidate every outstanding media result before releasing its
         // sources, then prevent monitors and timers from scheduling more UI
         // work while the close request proceeds.
+        self.open_scans.borrow_mut().cancel_all();
+        self.sidecar_scans.borrow_mut().cancel_all();
         self.navigation.borrow_mut().supersede();
         self.decodes.borrow_mut().cancel_all();
         self.stop_animation();
@@ -1393,6 +1476,7 @@ impl App {
     /// decoded image, and bump the generation so async work already in
     /// flight knows it has been superseded.
     fn clear_media(&self) {
+        self.sidecar_scans.borrow_mut().cancel_all();
         self.pending_media_size.set(None);
         self.navigation.borrow_mut().supersede();
         self.decodes.borrow_mut().cancel_all();
@@ -2723,7 +2807,7 @@ mod tests {
             crate::player::tests::with_player(|player, pipeline| {
                 let app = App::new(&gtk_app, Config::default());
                 let video = PathBuf::from("/tmp/open-mpv-failure-test.mp4");
-                player.play(&video).unwrap();
+                player.play(&video, None).unwrap();
                 *app.media.borrow_mut() = MediaState::Video(video);
                 *app.player.borrow_mut() = Some(Rc::new(player));
                 app.set_idle_inhibited(true);
