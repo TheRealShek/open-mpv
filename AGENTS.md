@@ -233,6 +233,9 @@ Some promises require more than automated tests:
   disabled and software-fallback paths.
 - Packaging changes include install, update, removal and desktop integration.
 
+Preserve single-instance behavior: later launches forward requests to the running
+process and exit. Close the existing instance before testing a newly built binary.
+
 Do not install a build by default. When human testing is needed, first finish
 the automated checks, prepare the relevant build, and report its path, run
 command and a short manual checklist. Install only when the task requires it
