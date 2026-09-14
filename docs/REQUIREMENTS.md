@@ -165,7 +165,8 @@ new product decisions rather than incidental implementation.
 - **FR-8.2** Supported settings include background, sort, reverse, wrap, initial fit,
   overlay delay, pointer hiding, video looping, volume, fullscreen, subtitles,
   video previews, cache policy and typed keybindings. `none` removes a default
-  binding.
+  binding. Handoff actions are listed in [Configuration](CONFIGURATION.md#available-actions)
+  and generated help.
 - **FR-8.3** Unknown or malformed content warns on stderr and never prevents startup.
   A missing config uses defaults quietly; other read failures report their cause
   and use defaults. Overlay delay must be finite and fit the GLib timer range
@@ -258,9 +259,20 @@ new product decisions rather than incidental implementation.
 - **FR-13.1** A deliberately opened read-only Info panel shows relevant facts already
   available from the filesystem or media pipeline and gathers expensive
   metadata lazily. It is not permanent chrome or a raw metadata dump.
-- **FR-13.2** Contextual actions reveal the current item in the desktop file manager or
-  ask another installed application to open it. Cancellation is silent and
-  errors are non-modal.
+- **FR-13.2** Viewer More/right-click actions Show in Files and Open With reveal
+  the current source file in its containing folder or always ask which installed
+  application should open it. Open With requests writable access within existing
+  permissions; it never changes permissions or saves pending view rotation.
+  Handoff leaves navigation, media, video and animation playback unchanged.
+  Both actions use the typed command policy, are rebindable and appear in help.
+  They are disabled during Quick Markup and while the one allowed handoff request
+  is pending, but remain available for existing files that fail decoding.
+  The source path is captured at invocation; navigation cannot retarget a pending
+  request. Target checks and launch are asynchronous. Missing targets and launcher
+  failures produce non-modal messages identifying the original target; cancellation
+  is silent and shutdown cancels pending work. Selecting open-mpv itself follows
+  ordinary single-instance activation. External editor saves use FR-3.5 image
+  refresh; handoff adds no video reload or playback restoration behavior.
 
 ## Non-functional requirements
 

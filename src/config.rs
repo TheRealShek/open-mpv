@@ -278,6 +278,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn documented_handoff_bindings_parse() {
+        let cfg = Config::parse(
+            "bind = <Control><Alt>f show-in-files\nbind = <Control><Alt>o open-with\n",
+            "test",
+        );
+        for (key, name) in [
+            ("<Control><Alt>f", "show-in-files"),
+            ("<Control><Alt>o", "open-with"),
+        ] {
+            assert_eq!(cfg.binds.get(key).map(String::as_str), Some(name));
+        }
+    }
+
+    #[test]
     fn overlay_timeout_rejects_values_outside_the_timer_range() {
         for value in ["inf", "-inf", "1e100", "NaN", "-1", "4294967.296"] {
             let cfg = Config::parse(&format!("overlay-timeout={value}"), "test");
