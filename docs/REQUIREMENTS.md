@@ -293,6 +293,10 @@ new product decisions rather than incidental implementation.
   navigation within 100 ms.
 - **NFR-1.3** Decode, folder enumeration, metadata and file operations never block GTK's
   main loop. Input, resize and quit remain responsive for huge or broken media.
+- **NFR-1.3** Video sink initialization runs on GTK before streaming begins, including
+  pipeline reuse and subtitle recovery, so transport controls cannot deadlock
+  against sink setup waiting for GTK. Stopping or failed startup releases the
+  prepared sink as well as the pipeline.
 - **NFR-1.3** Viewer folder scans (including target resolution and date-sort metadata)
   and automatic subtitle discovery run off GTK. Each has at most one active
   worker, including cancelled work, and one pending request replaced by the

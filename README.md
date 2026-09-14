@@ -70,7 +70,8 @@ the image view and clears any transient Quick Markup.
 The window starts at a size that fits your display and keeps that size as
 you browse. Rapid navigation keeps image-loading work bounded and gives the
 current photo priority over preloading neighbors. Opening another folder releases
-cached images from the previous folder.
+cached images from the previous folder. Switching between photos and videos
+keeps playback controls responsive.
 
 If you prefer the terminal:
 

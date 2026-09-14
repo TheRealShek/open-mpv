@@ -156,7 +156,11 @@ fn subtitle_attach_and_recovery_require_completed_teardown() {
         player.attach_subtitle(subtitle.path()).unwrap();
         let suburi = pipeline.suburi();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::ReadyToNull);
-        assert!(!recover_without_external(&player.playbin, &player.playback));
+        assert!(!recover_without_external(
+            &player.playbin,
+            &player.seek_target,
+            &player.playback
+        ));
         assert_eq!(pipeline.suburi(), suburi);
         assert!(!player.is_playing());
         *pipeline.imp().refuse.lock().unwrap() = None;
@@ -267,4 +271,97 @@ fn play_attaches_explicit_subtitle() {
             Some(subtitle.as_path())
         );
     });
+}
+
+#[test]
+fn detached_sink_is_released_after_failed_start_and_stop() {
+    for refuse_sink in [true, false] {
+        with_player(|mut player, pipeline| {
+            let sink: TestPipeline = glib::Object::new();
+            player.seek_target = sink.clone().upcast();
+            if refuse_sink {
+                sink.refuse_transition(Some(gst::StateChange::NullToReady));
+            } else {
+                pipeline.refuse_transition(Some(gst::StateChange::ReadyToPaused));
+            }
+            assert!(player.play(Path::new("/tmp/movie.mp4"), None).is_err());
+            assert!(!player.is_playing());
+            assert_eq!(pipeline.current_state(), gst::State::Null);
+            assert_eq!(sink.current_state(), gst::State::Null);
+            sink.refuse_transition(None);
+            pipeline.refuse_transition(None);
+            player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
+            assert_eq!(sink.current_state(), gst::State::Ready);
+            player.stop().unwrap();
+            assert_eq!(sink.current_state(), gst::State::Null);
+        });
+    }
+}
+
+#[test]
+#[ignore = "requires GNOME/Wayland and OPEN_MPV_TRANSITION_VIDEO; run separately under timeout"]
+fn gtk_sink_survives_subtitle_rebuild_and_recovery() {
+    gtk4::init().unwrap();
+    let video = PathBuf::from(
+        std::env::var_os("OPEN_MPV_TRANSITION_VIDEO").expect("provide a local test video"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let subtitle = dir.path().join("valid.srt");
+    let broken = dir.path().join("broken.srt");
+    fs::write(
+        &subtitle,
+        "1\n00:00:00,000 --> 00:00:10,000\nTest subtitle\n",
+    )
+    .unwrap();
+    fs::write(&broken, "This is not a subtitle file").unwrap();
+    let recovered = Rc::new(Cell::new(0));
+    let recovered_event = recovered.clone();
+    let player = Player::new(move |event| match event {
+        Event::SubtitleError(_) => recovered_event.set(recovered_event.get() + 1),
+        Event::Error(error) => panic!("unexpected fatal playback error: {error}"),
+        _ => {}
+    })
+    .unwrap();
+    glib::MainContext::default().block_on(async {
+        for _ in 0..3 {
+            player.play(&video, None).unwrap();
+            wait_for_playback(&player).await;
+            player.attach_subtitle(&subtitle).unwrap();
+            wait_for_playback(&player).await;
+            let before = recovered.get();
+            player.attach_subtitle(&broken).unwrap();
+            let start = std::time::Instant::now();
+            while player.has_external_subtitle() || recovered.get() == before {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(5),
+                    "subtitle recovery stalled"
+                );
+                glib::timeout_future(std::time::Duration::from_millis(10)).await;
+                player.is_muted();
+            }
+            wait_for_playback(&player).await;
+            player.stop().unwrap();
+            assert_eq!(player.seek_target.current_state(), gst::State::Null);
+        }
+    });
+}
+
+async fn wait_for_playback(player: &Player) {
+    let start = std::time::Instant::now();
+    loop {
+        glib::timeout_future(std::time::Duration::from_millis(10)).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "playback stalled"
+        );
+        player.is_muted();
+        if player.playbin.current_state() == gst::State::Playing
+            && player
+                .playbin
+                .query_position::<gst::ClockTime>()
+                .is_some_and(|position| position.seconds_f64() > 0.1)
+        {
+            break;
+        }
+    }
 }

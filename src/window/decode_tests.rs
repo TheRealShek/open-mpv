@@ -532,3 +532,170 @@ fn folder_cleanup_rejects_late_decodes_and_preserves_operations() {
     }
     app.shutdown();
 }
+
+/// Exercise pipeline reuse with transport polling on the actual GTK frame clock.
+/// Run under an external timeout as a lock inversion can stop GLib timers too.
+#[test]
+#[ignore = "requires GNOME/Wayland and OPEN_MPV_TRANSITION_VIDEO; run separately under timeout"]
+fn repeated_image_video_transitions_keep_gtk_responsive() {
+    let app = edit_test_app();
+    let video = PathBuf::from(
+        std::env::var_os("OPEN_MPV_TRANSITION_VIDEO").expect("provide a local test video"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("image.png");
+    write_test_image(&image, 3);
+    let broken_video = dir.path().join("broken.webm");
+    std::fs::write(&broken_video, "not a video").unwrap();
+    glib::MainContext::default().block_on(async {
+        for cycle in 0..10 {
+            app.open_path(&video);
+            let start = std::time::Instant::now();
+            loop {
+                glib::timeout_future(Duration::from_millis(10)).await;
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "video did not start in cycle {cycle}"
+                );
+                if app
+                    .player
+                    .borrow()
+                    .as_ref()
+                    .and_then(|p| p.progress())
+                    .is_some_and(|(position, _)| position > 0.1)
+                {
+                    break;
+                }
+            }
+            app.update_transport();
+            app.open_path(&image);
+            wait_for_image(&app, &image, 3).await;
+            glib::timeout_future(Duration::from_millis(50)).await;
+            if cycle % 3 == 0 {
+                app.open_path(&broken_video);
+                let start = std::time::Instant::now();
+                while !matches!(&*app.media.borrow(), MediaState::Error(path) if path == &broken_video) {
+                    assert!(start.elapsed() < Duration::from_secs(5), "broken video did not report an error");
+                    glib::timeout_future(Duration::from_millis(10)).await;
+                }
+                assert!(!app.player.borrow().as_ref().unwrap().has_video());
+                assert!(!app.cache.contains(&image));
+            }
+        }
+        app.shutdown();
+    });
+}
+
+/// Measures the typed navigation action through compositor presentation feedback,
+/// rather than stopping the timer when the decoded cache lookup returns.
+#[test]
+#[ignore = "requires GNOME/Wayland and OPEN_MPV_TRANSITION_IMAGES with three images"]
+fn cached_navigation_presentation_latency() {
+    let app = edit_test_app();
+    let directory = PathBuf::from(
+        std::env::var_os("OPEN_MPV_TRANSITION_IMAGES").expect("provide an image fixture folder"),
+    );
+    app.install_folder(Folder::scan(&directory, app.cfg.sort).unwrap());
+    assert_eq!(app.navigation.borrow().len(), 3);
+    let paths: Vec<_> = (0..3)
+        .map(|i| app.navigation.borrow().get(i).unwrap().to_path_buf())
+        .collect();
+    app.show_index(1, Arrival::Direct);
+    glib::MainContext::default().block_on(async {
+        let start = std::time::Instant::now();
+        while !paths.iter().all(|path| app.cache.contains(path)) || !app.win.is_mapped() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "fixtures did not load"
+            );
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        glib::timeout_future(Duration::from_millis(250)).await;
+        let clock = app.win.frame_clock().unwrap();
+        let mut latencies = Vec::new();
+        for i in 0..20 {
+            let frame = Rc::new(Cell::new(None));
+            let painted = frame.clone();
+            let handler = clock.connect_after_paint(move |clock| {
+                if painted.get().is_none() {
+                    painted.set(Some(clock.frame_counter()));
+                }
+            });
+            let started = glib::monotonic_time();
+            app.dispatch_action(if i % 2 == 0 {
+                Action::Next
+            } else {
+                Action::Previous
+            });
+            let expected = if i % 2 == 0 { &paths[2] } else { &paths[1] };
+            assert_eq!(
+                app.navigation.borrow().current_path(),
+                Some(expected.as_path())
+            );
+            while frame.get().is_none() {
+                assert!(
+                    glib::monotonic_time() - started < 2_000_000,
+                    "frame was not painted"
+                );
+                glib::timeout_future(Duration::from_millis(1)).await;
+            }
+            clock.disconnect(handler);
+            let timings = clock.timings(frame.get().unwrap()).unwrap();
+            while !timings.is_complete() {
+                assert!(
+                    glib::monotonic_time() - started < 2_000_000,
+                    "no compositor feedback"
+                );
+                glib::timeout_future(Duration::from_millis(1)).await;
+            }
+            let presented = timings.presentation_time();
+            assert!(
+                presented >= started,
+                "compositor did not provide a presentation timestamp"
+            );
+            latencies.push((presented - started) as f64 / 1000.0);
+        }
+        eprintln!("cached navigation action-to-presentation ms: {latencies:?}");
+        assert!(
+            latencies.iter().all(|latency| *latency < 100.0),
+            "cached navigation exceeded NFR-1.2"
+        );
+        app.shutdown();
+    });
+}
+
+#[test]
+#[ignore = "requires GNOME/Wayland, a user trash, and ImageMagick; run separately"]
+fn rotate_save_and_trash_undo_reload_after_cache_cleanup() {
+    let app = edit_test_app();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.png");
+    write_test_image(&path, 3);
+    app.open_path(&path);
+    glib::MainContext::default().block_on(async {
+        wait_for_image(&app, &path, 3).await;
+        let set = app.navigation.borrow().set_id();
+        app.dispatch_action(Action::RotateClockwise);
+        app.dispatch_action(Action::Save);
+        wait_for_image(&app, &path, 1).await;
+        app.dispatch_action(Action::Trash);
+        let start = std::time::Instant::now();
+        while !matches!(*app.media.borrow(), MediaState::Empty)
+            || !app.operations.borrow().has_undo()
+        {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "trash did not reach the empty state"
+            );
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        assert!(!path.exists());
+        assert!(!app.cache.contains(&path));
+        assert_eq!(app.navigation.borrow().set_id(), set);
+        app.dispatch_action(Action::Undo);
+        wait_for_image(&app, &path, 1).await;
+        assert!(path.is_file());
+        assert_eq!(app.navigation.borrow().set_id(), set);
+        app.shutdown();
+    });
+}
