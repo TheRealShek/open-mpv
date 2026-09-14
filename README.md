@@ -93,6 +93,7 @@ again. Window borders still resize, and Quick Markup uses left-drag to draw.
 | Key or gesture | What it does |
 | --- | --- |
 | `Ctrl+O` / `Ctrl+Shift+O` | Open a file / folder |
+| `Ctrl+Alt+F` / `Ctrl+Alt+O` | Show in Files / Open With… |
 | `Right` / `Left` | Next / previous file; move around the image when zoomed in |
 | Scroll / pinch | Zoom in or out |
 | Left-drag | Pan overflowing media; draw in Quick Markup |
@@ -107,6 +108,15 @@ again. Window borders still resize, and Quick Markup uses left-drag to draw.
 | `A` | Start or cancel Quick Markup |
 | `F` / `F11` / double-click | Enter or leave fullscreen |
 | `Escape` | Cancel the current mode, leave fullscreen or quit |
+
+The More/right-click menu also offers **Show in Files** and **Open With…**.
+Show in Files reveals the source file in its folder. Open With always asks for
+an application and requests writable access where your permissions allow it.
+It sends the original file, without saving pending view rotation or changing
+video or animation playback. Both actions are unavailable during Quick Markup
+or while a handoff request is pending, but work for existing files that cannot
+be decoded. Cancellation is silent; launch failures appear as a brief message.
+To assign shortcuts, see [Custom key bindings](docs/CONFIGURATION.md#custom-key-bindings).
 
 ## File formats
 

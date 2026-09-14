@@ -138,6 +138,7 @@ applied.
 | Subtitles | `subtitle-open`, `subtitle-toggle`, `subtitle-cycle` |
 | View | `zoom-in`, `zoom-out`, `zoom-fit`, `zoom-actual`, `zoom-toggle`, `rotate-cw`, `rotate-ccw`, `fullscreen` |
 | Quick Markup | `markup`, `markup-box`, `markup-arrow`, `markup-copy`, `markup-clear` |
+| External handoff | `show-in-files`, `open-with` |
 | File and session | `save`, `trash`, `undo`, `help`, `close`, `escape` |
 
 The contextual arrow actions preserve open-mpv's normal behavior: horizontal
@@ -149,6 +150,16 @@ Other actions whose names may not be self-explanatory:
 
 - `play-pause` pauses or resumes video or animated images; on a still image it opens the next file.
 - `subtitle-open` lets you attach a local subtitle file to the current video.
+- `show-in-files` reveals the original file in Files; `open-with` always asks
+  which application should open it. Their defaults are `Ctrl+Alt+F` and
+  `Ctrl+Alt+O`. Both appear in More/right-click and help, and are disabled during
+  Quick Markup or a pending handoff. The equivalent configuration is:
+
+  ```ini
+  bind = <Control><Alt>f show-in-files
+  bind = <Control><Alt>o open-with
+  ```
+
 - `save` writes a supported image rotation back to the source file.
 - `undo` undoes the latest Quick Markup shape or the latest offered trash
   action, depending on the current context.

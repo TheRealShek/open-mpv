@@ -209,6 +209,7 @@ impl App {
         let more_menu = gio::Menu::new();
         let open_menu = open_menu_model();
         more_menu.append_section(None, &open_menu);
+        more_menu.append_section(None, &handoff_menu_model());
         more_menu.append(
             Some("Fit to Window"),
             Some(&Action::ZoomFit.detailed_name()),
@@ -379,6 +380,7 @@ impl App {
             navigation: RefCell::new(Navigation::default()),
             monitor: RefCell::new(None),
             fs_queries: RefCell::new(FsQueryVersions::default()),
+            handoff: RefCell::new(None),
             fs_refresh_timer: TimerSlot::default(),
             open_scans: RefCell::new(open::ScanQueue::default()),
             sidecar_scans: RefCell::new(open::ScanQueue::default()),
@@ -1158,6 +1160,16 @@ fn apply_css(background: &str) {
     }
 }
 
+fn handoff_menu_model() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(
+        Some("Show in Files"),
+        Some(&Action::ShowInFiles.detailed_name()),
+    );
+    menu.append(Some("Open With…"), Some(&Action::OpenWith.detailed_name()));
+    menu
+}
+
 fn open_menu_model() -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(Some("Open File…"), Some(&Action::OpenFile.detailed_name()));
@@ -1172,6 +1184,22 @@ fn open_menu_model() -> gio::Menu {
 mod tests {
     use super::*;
     use gtk4::prelude::MenuModelExt;
+
+    #[test]
+    fn handoff_menu_uses_configurable_typed_actions() {
+        let menu = handoff_menu_model();
+        assert_eq!(menu.n_items(), 2);
+        for (index, action) in [Action::ShowInFiles, Action::OpenWith]
+            .into_iter()
+            .enumerate()
+        {
+            let name = menu
+                .item_attribute_value(index as i32, "action", Some(gtk4::glib::VariantTy::STRING))
+                .unwrap();
+            assert_eq!(name.str(), Some(action.detailed_name().as_str()));
+            assert_eq!(Action::parse(action.name()), Some(action));
+        }
+    }
 
     #[test]
     fn both_open_actions_share_the_more_and_context_menu_model() {

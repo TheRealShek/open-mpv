@@ -36,6 +36,7 @@ mod action;
 mod animation;
 mod assembly;
 mod error;
+mod handoff;
 mod monitor;
 mod open;
 mod operation;
@@ -123,6 +124,7 @@ pub struct App {
     navigation: RefCell<Navigation>,
     monitor: RefCell<Option<gio::FileMonitor>>,
     fs_queries: RefCell<FsQueryVersions>,
+    handoff: RefCell<Option<gio::Cancellable>>,
     fs_refresh_timer: TimerSlot,
     open_scans: RefCell<ScanQueue<PathBuf>>,
     sidecar_scans: RefCell<ScanQueue<Destination>>,
@@ -669,6 +671,9 @@ impl App {
         self.stop_animation();
         self.monitor.borrow_mut().take();
         self.fs_queries.borrow_mut().cancel_all();
+        if let Some(handoff) = self.handoff.borrow().as_ref() {
+            handoff.cancel();
+        }
         self.fs_refresh_timer.cancel();
         self.chrome_timer.cancel();
         self.indicator_timer.cancel();
@@ -2145,6 +2150,9 @@ impl App {
         WorkspaceState {
             media,
             has_navigation: !self.navigation.borrow().is_empty(),
+            can_handoff: self.media.borrow().path().is_some()
+                && self.handoff.borrow().is_none()
+                && !self.shutting_down.get(),
             pannable: self.view.is_pannable(),
             marking: self.view.is_marking_up(),
             markup_draft: self.view.markup_has_draft(),
@@ -2203,6 +2211,8 @@ impl App {
         match command {
             Command::OpenFile => self.choose_media_file(),
             Command::OpenFolder => self.choose_folder(),
+            Command::ShowInFiles => self.start_handoff(handoff::Handoff::ShowInFiles),
+            Command::OpenWith => self.start_handoff(handoff::Handoff::OpenWith),
             Command::Pan(direction) => {
                 let (dx, dy) = direction.delta();
                 self.view

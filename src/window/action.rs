@@ -12,6 +12,8 @@ use crate::player::{AudioChoice, SubtitleChoice};
 pub(super) enum Action {
     OpenFile,
     OpenFolder,
+    ShowInFiles,
+    OpenWith,
     Right,
     Left,
     Up,
@@ -70,6 +72,7 @@ pub(super) enum Media {
 pub(super) struct WorkspaceState {
     pub media: Media,
     pub has_navigation: bool,
+    pub can_handoff: bool,
     pub pannable: bool,
     pub marking: bool,
     pub markup_draft: bool,
@@ -150,6 +153,8 @@ impl PlaybackRate {
 pub(super) enum Command {
     OpenFile,
     OpenFolder,
+    ShowInFiles,
+    OpenWith,
     Pan(PanDirection),
     Next,
     Previous,
@@ -196,6 +201,11 @@ impl Action {
     pub const CONFIGURABLE: &'static [(Action, &'static str)] = &[
         (Self::OpenFile, "Open a file"),
         (Self::OpenFolder, "Open a folder"),
+        (Self::ShowInFiles, "Show the source file in Files"),
+        (
+            Self::OpenWith,
+            "Open the source file with another application",
+        ),
         (Self::Right, "Next image, or pan when zoomed in"),
         (Self::Left, "Previous image, or pan when zoomed in"),
         (Self::Up, "Volume up, or pan when zoomed in"),
@@ -243,6 +253,8 @@ impl Action {
     pub const DEFAULT_BINDS: &'static [(&'static str, Action)] = &[
         ("<Control>o", Self::OpenFile),
         ("<Control><Shift>o", Self::OpenFolder),
+        ("<Control><Alt>f", Self::ShowInFiles),
+        ("<Control><Alt>o", Self::OpenWith),
         ("Right", Self::Right),
         ("Left", Self::Left),
         ("Up", Self::Up),
@@ -298,6 +310,8 @@ impl Action {
         match self {
             Self::OpenFile => "open-file",
             Self::OpenFolder => "open-folder",
+            Self::ShowInFiles => "show-in-files",
+            Self::OpenWith => "open-with",
             Self::Right => "right",
             Self::Left => "left",
             Self::Up => "up",
@@ -374,6 +388,8 @@ impl Action {
         Some(match self {
             A::OpenFile if normal => C::OpenFile,
             A::OpenFolder if normal => C::OpenFolder,
+            A::ShowInFiles if normal && state.can_handoff => C::ShowInFiles,
+            A::OpenWith if normal && state.can_handoff => C::OpenWith,
             A::Right if state.pannable => C::Pan(PanDirection::Right),
             A::Left if state.pannable => C::Pan(PanDirection::Left),
             A::Up if state.pannable => C::Pan(PanDirection::Up),
@@ -480,6 +496,7 @@ mod tests {
         WorkspaceState {
             media,
             has_navigation: false,
+            can_handoff: false,
             pannable: false,
             marking: false,
             markup_draft: false,
@@ -490,6 +507,38 @@ mod tests {
             can_undo_trash: false,
             help_visible: false,
             fullscreen: false,
+        }
+    }
+
+    #[test]
+    fn handoff_requires_a_target_and_idle_request_outside_markup() {
+        for media in [
+            Media::Empty,
+            Media::Loading,
+            Media::Image {
+                markup_available: true,
+            },
+            Media::AnimatedImage,
+            Media::Video,
+            Media::Error,
+        ] {
+            let mut current = state(media);
+            for (action, command) in [
+                (Action::ShowInFiles, Command::ShowInFiles),
+                (Action::OpenWith, Command::OpenWith),
+            ] {
+                assert!(!action.enabled(current));
+                current.can_handoff = true;
+                assert_eq!(action.resolve(current), Some(command));
+                assert!(action.enabled(current));
+                current.marking = true;
+                assert!(!action.enabled(current));
+                assert_eq!(action.resolve(current), None);
+                current.marking = false;
+                assert!(action.enabled(current));
+                current.can_handoff = false;
+                assert_eq!(action.resolve(current), None);
+            }
         }
     }
 
