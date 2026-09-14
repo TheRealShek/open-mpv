@@ -206,45 +206,15 @@ impl App {
 
         // Less frequent commands remain discoverable without making the
         // primary strip permanent or wide (FR-6.5, NFR-5.2).
-        let more_menu = gio::Menu::new();
-        let open_menu = open_menu_model();
-        more_menu.append_section(None, &open_menu);
-        more_menu.append_section(None, &handoff_menu_model());
-        more_menu.append(
-            Some("Fit to Window"),
-            Some(&Action::ZoomFit.detailed_name()),
-        );
-        more_menu.append(
-            Some("Actual Size"),
-            Some(&Action::ZoomActual.detailed_name()),
-        );
-        more_menu.append(
-            Some("Rotate Left"),
-            Some(&Action::RotateCounterclockwise.detailed_name()),
-        );
-        more_menu.append(
-            Some("Rotate Right"),
-            Some(&Action::RotateClockwise.detailed_name()),
-        );
-        more_menu.append(Some("First File"), Some(&Action::First.detailed_name()));
-        more_menu.append(Some("Last File"), Some(&Action::Last.detailed_name()));
-        // Filled only for decoded static raster images (FR-11.1). A disabled
-        // editing item on video or animation would imply future support.
+        // Context sections retain their existing media availability rules.
         let markup_context_menu = gio::Menu::new();
-        more_menu.append_section(None, &markup_context_menu);
-        // Audio-track selection is contextual and appears only when the
-        // current video exposes multiple tracks (FR-10.8).
         let audio_menu = gio::Menu::new();
         let audio_context_menu = gio::Menu::new();
-        more_menu.append_section(None, &audio_context_menu);
-        // Filled only while a video is active. The same subtitle model is
-        // shared with the CC button, so right-click and the transport never
-        // disagree about available tracks (FR-10.7).
         let subtitle_context_menu = gio::Menu::new();
-        more_menu.append_section(None, &subtitle_context_menu);
-        more_menu.append(
-            Some("Keyboard Shortcuts"),
-            Some(&Action::Help.detailed_name()),
+        let (more_menu, context_model) = viewer_menu_models(
+            &markup_context_menu,
+            &audio_context_menu,
+            &subtitle_context_menu,
         );
         let more_btn = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
@@ -303,10 +273,10 @@ impl App {
         markup_controls.set_visible(false);
         bar.append(&markup_controls);
 
-        // The same commands are also a contextual menu on the medium.
+        // Right-click also offers the photo commands from the hidden toolbar.
         // It is parented to the view so its pointing rectangle uses the
         // secondary-click coordinates directly.
-        let context_menu = gtk::PopoverMenu::from_model(Some(&more_menu));
+        let context_menu = gtk::PopoverMenu::from_model(Some(&context_model));
         context_menu.set_parent(&view);
         bar.set_visible(false);
         overlay.add_overlay(&bar);
@@ -1160,6 +1130,66 @@ fn apply_css(background: &str) {
     }
 }
 
+/// Both menus share command models and dynamic sections, while right-click
+/// retains direct photo controls for use when the toolbar is hidden.
+fn viewer_menu_models(
+    markup: &gio::Menu,
+    audio: &gio::Menu,
+    subtitles: &gio::Menu,
+) -> (gio::Menu, gio::Menu) {
+    let open = open_menu_model();
+    let file = handoff_menu_model();
+    let view = gio::Menu::new();
+    view.append(
+        Some("Fit to Window"),
+        Some(&Action::ZoomFit.detailed_name()),
+    );
+    view.append(
+        Some("Actual Size"),
+        Some(&Action::ZoomActual.detailed_name()),
+    );
+    let navigate = gio::Menu::new();
+    navigate.append(Some("First File"), Some(&Action::First.detailed_name()));
+    navigate.append(Some("Last File"), Some(&Action::Last.detailed_name()));
+    let help = gio::Menu::new();
+    help.append(
+        Some("Keyboard Shortcuts"),
+        Some(&Action::Help.detailed_name()),
+    );
+
+    let more = gio::Menu::new();
+    more.append_section(None, &open);
+    let groups = gio::Menu::new();
+    groups.append_submenu(Some("File"), &file);
+    groups.append_submenu(Some("View"), &view);
+    groups.append_submenu(Some("Navigate"), &navigate);
+    more.append_section(None, &groups);
+
+    let context = gio::Menu::new();
+    context.append_section(None, &open);
+    context.append_section(None, &file);
+    context.append_section(None, &view);
+    let rotation = gio::Menu::new();
+    rotation.append(
+        Some("Rotate Left"),
+        Some(&Action::RotateCounterclockwise.detailed_name()),
+    );
+    rotation.append(
+        Some("Rotate Right"),
+        Some(&Action::RotateClockwise.detailed_name()),
+    );
+    context.append_section(None, &rotation);
+    context.append_section(None, &navigate);
+    context.append_section(None, markup);
+
+    for menu in [&more, &context] {
+        menu.append_section(None, audio);
+        menu.append_section(None, subtitles);
+        menu.append_section(None, &help);
+    }
+    (more, context)
+}
+
 fn handoff_menu_model() -> gio::Menu {
     let menu = gio::Menu::new();
     menu.append(
@@ -1184,6 +1214,133 @@ fn open_menu_model() -> gio::Menu {
 mod tests {
     use super::*;
     use gtk4::prelude::MenuModelExt;
+
+    // Sections add separators, not rows or submenu depth.
+    fn menu_rows(model: &gio::MenuModel) -> Vec<(String, Option<String>, Option<gio::MenuModel>)> {
+        let mut rows = Vec::new();
+        for index in 0..model.n_items() {
+            if let Some(section) = model.item_link(index, gio::MENU_LINK_SECTION.as_str()) {
+                rows.extend(menu_rows(&section));
+                continue;
+            }
+            let attribute = |name| {
+                model
+                    .item_attribute_value(index, name, Some(glib::VariantTy::STRING))
+                    .and_then(|value| value.str().map(str::to_owned))
+            };
+            // GTK resolves accelerators from the configured application actions.
+            assert!(model.item_attribute_value(index, "accel", None).is_none());
+            rows.push((
+                attribute("label").expect("menu row has a label"),
+                attribute("action"),
+                model.item_link(index, gio::MENU_LINK_SUBMENU.as_str()),
+            ));
+        }
+        rows
+    }
+
+    fn menu_actions(model: &gio::MenuModel) -> Vec<String> {
+        menu_rows(model)
+            .into_iter()
+            .flat_map(|(_, action, submenu)| {
+                if let Some(submenu) = submenu {
+                    menu_actions(&submenu)
+                } else {
+                    action.into_iter().collect()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn still_image_more_menu_has_six_rows_and_one_level_of_typed_groups() {
+        let markup = gio::Menu::new();
+        rebuild_markup_context(&markup, true);
+        let (more, context) = viewer_menu_models(&markup, &gio::Menu::new(), &gio::Menu::new());
+        let rows = menu_rows(more.upcast_ref());
+        assert_eq!(
+            rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+            [
+                "Open File…",
+                "Open Folder…",
+                "File",
+                "View",
+                "Navigate",
+                "Keyboard Shortcuts"
+            ]
+        );
+        for (index, actions) in [
+            (2, [Action::ShowInFiles, Action::OpenWith]),
+            (3, [Action::ZoomFit, Action::ZoomActual]),
+            (4, [Action::First, Action::Last]),
+        ] {
+            let children = menu_rows(rows[index].2.as_ref().unwrap());
+            assert_eq!(children.len(), 2);
+            for (child, action) in children.iter().zip(actions) {
+                assert_eq!(child.1.as_deref(), Some(action.detailed_name().as_str()));
+                assert!(child.2.is_none());
+            }
+        }
+        for (index, action) in [
+            (0, Action::OpenFile),
+            (1, Action::OpenFolder),
+            (5, Action::Help),
+        ] {
+            assert_eq!(
+                rows[index].1.as_deref(),
+                Some(action.detailed_name().as_str())
+            );
+        }
+        let more_actions = menu_actions(more.upcast_ref());
+        let context_actions = menu_actions(context.upcast_ref());
+        let mut expected_context = more_actions.clone();
+        for action in [
+            Action::RotateCounterclockwise,
+            Action::RotateClockwise,
+            Action::Markup,
+        ] {
+            assert!(!more_actions.contains(&action.detailed_name()));
+            expected_context.push(action.detailed_name());
+        }
+        expected_context.sort();
+        let mut actual_context = context_actions;
+        actual_context.sort();
+        assert_eq!(actual_context, expected_context);
+    }
+
+    #[test]
+    fn both_menus_follow_shared_context_sections_across_media_changes() {
+        let markup = gio::Menu::new();
+        let audio_context = gio::Menu::new();
+        let subtitle_context = gio::Menu::new();
+        let (more, context) = viewer_menu_models(&markup, &audio_context, &subtitle_context);
+        let audio = gio::Menu::new();
+        let subtitles = gio::Menu::new();
+        for (video, tracks, marking) in [
+            (false, 0, true),
+            (true, 1, false),
+            (true, 2, false),
+            (false, 0, false),
+            (false, 0, true),
+        ] {
+            rebuild_markup_context(&markup, marking);
+            rebuild_audio_context(&audio_context, &audio, video, tracks);
+            rebuild_subtitle_context(&subtitle_context, &subtitles, video);
+            for menu in [&more, &context] {
+                let rows = menu_rows(menu.upcast_ref());
+                assert_eq!(
+                    rows.iter().any(|row| row.0 == "Audio Track"),
+                    video && tracks > 1
+                );
+                assert_eq!(rows.iter().any(|row| row.0 == "Subtitles"), video);
+            }
+            assert!(!menu_actions(more.upcast_ref()).contains(&Action::Markup.detailed_name()));
+            assert_eq!(
+                menu_actions(context.upcast_ref()).contains(&Action::Markup.detailed_name()),
+                marking
+            );
+        }
+    }
 
     #[test]
     fn handoff_menu_uses_configurable_typed_actions() {

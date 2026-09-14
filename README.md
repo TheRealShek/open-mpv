@@ -109,7 +109,15 @@ again. Window borders still resize, and Quick Markup uses left-drag to draw.
 | `F` / `F11` / double-click | Enter or leave fullscreen |
 | `Escape` | Cancel the current mode, leave fullscreen or quit |
 
-The More/right-click menu also offers **Show in Files** and **Open With…**.
+The three-dot **More** menu keeps **Open File…**, **Open Folder…**, and
+**Keyboard Shortcuts** directly accessible. **File** contains **Show in Files**
+and **Open With…**; **View** contains **Fit to Window** and **Actual Size**;
+**Navigate** contains **First File** and **Last File**. Rotation and **Quick
+Markup** stay in the bottom toolbar and right-click menu. Quick Markup appears
+only for supported decoded static raster images. Video audio-track and subtitle
+options remain contextual in both menus.
+
+The More menu's **File** submenu and the right-click menu offer file handoff.
 Show in Files reveals the source file in its folder. Open With always asks for
 an application and requests writable access where your permissions allow it.
 It sends the original file, without saving pending view rotation or changing

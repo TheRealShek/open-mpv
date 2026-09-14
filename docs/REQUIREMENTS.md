@@ -135,6 +135,16 @@ new product decisions rather than incidental implementation.
   after the configured delay. Keyboard use does not reveal it.
 - **FR-6.2 / FR-6.5** Viewer, Explorer and future Edit mode use Progressive disclosure rather than
   permanent advanced toolbars.
+- **FR-6.5** The still-image More menu has six top-level rows: Open File,
+  Open Folder; File, View, Navigate; Keyboard Shortcuts, with separators between
+  those groups. File contains Show in Files and Open With; View contains Fit to
+  Window and Actual Size; Navigate contains First File and Last File. Submenus
+  are at most one level deep. Rotate Left, Rotate Right and Quick Markup remain
+  in the existing toolbar and right-click menu, without More-menu duplicates
+  or a wider toolbar. Quick Markup retains its static-raster availability rule.
+  Contextual video Audio Track and Subtitles entries remain available under
+  FR-10.7/FR-10.8. Both menus use the same typed actions, availability rules and
+  configured shortcut display.
 - **FR-6.5 / NFR-6.2** Every command is keyboard reachable, rebindable and routed through the typed
   action layer. Direct manipulation gestures may manipulate the view directly;
   command-equivalent clicks use the action layer.
