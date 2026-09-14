@@ -445,3 +445,90 @@ fn pending_rename_survives_deletion_and_a_second_rename() {
         app.shutdown();
     });
 }
+
+#[test]
+#[ignore = "requires a GNOME/Wayland session; run separately with --ignored --exact"]
+fn folder_replacement_releases_cached_images() {
+    let app = edit_test_app();
+    let old = tempfile::tempdir().unwrap();
+    let new = tempfile::tempdir().unwrap();
+    let path = old.path().join("a.png");
+    write_test_image(&path, 3);
+    app.install_folder(Folder::scan(old.path(), app.cfg.sort).unwrap());
+    let decoded = test_image(3);
+    let weak = Rc::downgrade(&decoded);
+    app.cache
+        .put_foreground(path.clone(), decoded, "image/png".into());
+    app.install_folder(Folder::scan(old.path(), app.cfg.sort).unwrap());
+    assert!(
+        app.cache.contains(&path),
+        "same-folder opens retain cache hits"
+    );
+    app.install_folder(Folder::scan(new.path(), app.cfg.sort).unwrap());
+    assert!(
+        weak.upgrade().is_none(),
+        "old decoded storage remains cached"
+    );
+    app.shutdown();
+}
+
+#[test]
+#[ignore = "requires a GNOME/Wayland session; run separately with --ignored --exact"]
+fn folder_cleanup_rejects_late_decodes_and_preserves_operations() {
+    let app = edit_test_app();
+    let old = tempfile::tempdir().unwrap();
+    let new = tempfile::tempdir().unwrap();
+    let path = old.path().join("a.png");
+    write_test_image(&path, 3);
+    for foreground in [true, false] {
+        app.install_folder(Folder::scan(old.path(), app.cfg.sort).unwrap());
+        let destination = app.navigation.borrow_mut().select(0).unwrap();
+        app.decodes.borrow_mut().replace(
+            foreground.then(|| (path.clone(), (destination.generation, Arrival::Direct))),
+            (!foreground).then(|| path.clone()),
+        );
+        let job = app.decodes.borrow_mut().start().unwrap();
+        app.install_folder(Folder::scan(new.path(), app.cfg.sort).unwrap());
+        assert!(job.cancellable.is_cancelled());
+        // Even an immediate return must not revive cancelled work.
+        app.install_folder(Folder::scan(old.path(), app.cfg.sort).unwrap());
+        app.on_decode_completed(path.clone(), Ok((test_image(2), "image/png".into())));
+        assert!(!app.cache.contains(&path));
+    }
+    app.navigation.borrow_mut().select(0).unwrap();
+    let save = app
+        .operations
+        .borrow_mut()
+        .start_save(&app.navigation.borrow(), &path)
+        .unwrap();
+    app.install_folder(Folder::scan(new.path(), app.cfg.sort).unwrap());
+    assert!(
+        app.operations
+            .borrow_mut()
+            .finish_save(&save, &app.navigation.borrow())
+            .is_none()
+    );
+
+    app.install_folder(Folder::scan(old.path(), app.cfg.sort).unwrap());
+    app.navigation.borrow_mut().select(0).unwrap();
+    let trash = app
+        .operations
+        .borrow_mut()
+        .start_trash(&app.navigation.borrow(), &path)
+        .unwrap();
+    app.operations.borrow_mut().finish_trash(trash);
+    for error in [false, true] {
+        app.cache
+            .put_foreground(path.clone(), test_image(3), "image/png".into());
+        let set = app.navigation.borrow().set_id();
+        if error {
+            app.show_error(&path, "test error");
+        } else {
+            app.empty_state("test empty");
+        }
+        assert!(!app.cache.contains(&path));
+        assert_eq!(app.navigation.borrow().set_id(), set);
+        assert!(app.operations.borrow().has_undo());
+    }
+    app.shutdown();
+}

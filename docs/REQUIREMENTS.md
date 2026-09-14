@@ -303,7 +303,11 @@ new product decisions rather than incidental implementation.
   already waiting on storage; its worker slot stays occupied until it returns.
 - **NFR-2.1 / NFR-2.1a** The displayed image may exceed a cache budget, but all additional decoded
   media is bounded by checked byte and count limits. A zero neighbor budget
-  retains no neighbors.
+  retains no neighbors. Installing a folder releases cached images outside that
+  directory, including the previous foreground entry; same-folder opens retain
+  useful cache hits. Empty and error presentation releases all cached images
+  without discarding the Navigation set or Trash Undo state. Cancelled decode
+  completions cannot restore released entries.
 - **NFR-1.3 / NFR-2.1b** Viewer first-frame decoding has at most two active jobs,
   including jobs awaiting cancellation, and at most three queued requests
   (the current image and two neighbors). Requests for the same path share

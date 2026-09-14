@@ -246,6 +246,20 @@ impl Cache {
         }
     }
 
+    /// Keep only direct children of the selected folder. `None` releases all
+    /// cached storage when the Viewer has no displayed media. Callers must
+    /// cancel obsolete decode demand before pruning its completed results.
+    pub fn retain_folder(&self, directory: Option<&Path>) {
+        let belongs = |path: &Path| directory.is_some() && path.parent() == directory;
+        self.entries
+            .borrow_mut()
+            .retain(|entry| belongs(&entry.path));
+        let mut pinned = self.pinned.borrow_mut();
+        if pinned.as_deref().is_some_and(|path| !belongs(path)) {
+            *pinned = None;
+        }
+    }
+
     /// Drop a path after an application-owned or externally observed file change.
     pub fn invalidate(&self, path: &Path) {
         let mut entries = self.entries.borrow_mut();
@@ -272,6 +286,26 @@ mod tests {
 
     fn put(cache: &Cache, name: &str, w: i32, h: i32) {
         cache.put_neighbor(PathBuf::from(name), decoded(w, h), "image/png".into());
+    }
+
+    #[test]
+    fn folder_retention_releases_foreground_and_excludes_subdirectories() {
+        let cache = Cache::new(4, usize::MAX);
+        cache.put_foreground("old/a".into(), decoded(2, 2), "image/png".into());
+        put(&cache, "new/b", 2, 2);
+        put(&cache, "new/sub/c", 2, 2);
+        let kept = cache.get(Path::new("new/b")).unwrap().0;
+        cache.retain_folder(Some(Path::new("new")));
+        assert!(!cache.contains(Path::new("old/a")));
+        assert!(!cache.contains(Path::new("new/sub/c")));
+        assert!(cache.pinned.borrow().is_none());
+        assert!(Rc::ptr_eq(&kept, &cache.get(Path::new("new/b")).unwrap().0));
+        cache.pin(Path::new("new/b"));
+        cache.retain_folder(Some(Path::new("new")));
+        assert_eq!(cache.pinned.borrow().as_deref(), Some(Path::new("new/b")));
+        cache.retain_folder(None);
+        assert!(cache.entries.borrow().is_empty());
+        assert!(cache.pinned.borrow().is_none());
     }
 
     #[test]
