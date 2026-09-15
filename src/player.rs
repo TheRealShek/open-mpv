@@ -7,7 +7,8 @@
 //! copies. GStreamer is initialized lazily on the first video so
 //! image-only sessions keep their cold-start and footprint (NFR-1.1,
 //! NFR-2.1). The pipeline is reused across videos; `stop` drops it to
-//! `Null`, freeing decoder state while an image is shown.
+//! `Null`, freeing decoder state while an image is shown. Each startup prepares
+//! the GTK sink in Ready on the main thread before playbin starts streaming.
 //!
 //! Private child modules own decoder policy, the focused playback model, and
 //! window-facing track values. `FocusedPlayback` owns the complete active
@@ -274,6 +275,7 @@ impl Player {
                             };
                             let error = e.error();
                             let playbin = playbin.clone();
+                            let seek_target = seek_target.clone();
                             let playback = playback.clone();
                             let on_event = on_event.clone();
                             // Returning from the bus watch before changing
@@ -288,7 +290,8 @@ impl Player {
                                     playback.borrow_mut().finish_error(&error_context);
                                     return;
                                 }
-                                let recovered = recover_without_external(&playbin, &playback);
+                                let recovered =
+                                    recover_without_external(&playbin, &seek_target, &playback);
                                 playback.borrow_mut().finish_error(&error_context);
                                 if recovered {
                                     on_event(Event::SubtitleError(error.to_string()));
@@ -396,15 +399,13 @@ impl Player {
             .borrow_mut()
             .start_video(path, subtitle, self.subtitles_default_on.get());
         configure_uris(&self.playbin, &uri, suburi.as_deref());
-        self.playbin
-            .set_state(gst::State::Playing)
-            .map_err(|source| {
-                lock_decoder_fallback(&self.decoder_fallback).restore();
-                PlayerError::Playback {
-                    path: path.to_path_buf(),
-                    source,
-                }
-            })?;
+        start_pipeline(&self.playbin, &self.seek_target).map_err(|source| {
+            lock_decoder_fallback(&self.decoder_fallback).restore();
+            PlayerError::Playback {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
         self.playback.borrow_mut().playback_started();
         Ok(())
     }
@@ -422,7 +423,7 @@ impl Player {
     }
 
     fn teardown(&self) -> Result<(), PlayerError> {
-        teardown_pipeline(&self.playbin).map_err(|source| {
+        teardown_pipeline(&self.playbin, &self.seek_target).map_err(|source| {
             self.forget_stream();
             PlayerError::State {
                 operation: "stop the previous video",
@@ -509,9 +510,9 @@ impl Player {
         );
         configure_uris(&self.playbin, &uri, Some(&suburi));
         crate::applog!("player: attached subtitle {}", path.display());
-        if let Err(source) = self.playbin.set_state(gst::State::Playing) {
+        if let Err(source) = start_pipeline(&self.playbin, &self.seek_target) {
             self.playback.borrow_mut().cancel_resume();
-            if !recover_without_external(&self.playbin, &self.playback)
+            if !recover_without_external(&self.playbin, &self.seek_target, &self.playback)
                 && let Err(error) = self.stop()
             {
                 eprintln!("open-mpv: subtitle recovery cleanup: {error}");
@@ -845,11 +846,34 @@ fn send_stream_selection(playbin: &gst::Element, selected: &[String]) -> bool {
     playbin.send_event(event)
 }
 
+/// Run the GTK sink's Null → Ready setup on GTK before playbin can do it
+/// from a streaming thread holding the playsink lock. Otherwise transport
+/// queries on GTK can wait for that lock while the sink waits for GTK.
+/// Every start after teardown, including subtitle recovery, uses this boundary.
+fn start_pipeline(
+    playbin: &gst::Element,
+    sink: &gst::Element,
+) -> Result<(), gst::StateChangeError> {
+    let result = sink
+        .set_state(gst::State::Ready)
+        .and_then(|_| playbin.set_state(gst::State::Playing));
+    if let Err(source) = result {
+        if let Err(error) = teardown_pipeline(playbin, sink) {
+            eprintln!("open-mpv: failed playback startup cleanup: {error}");
+        }
+        return Err(source);
+    }
+    Ok(())
+}
+
 /// Wait for the downward transition before reusing `uri`/`suburi`. Although
 /// `set_state(Null)` usually completes synchronously, playbin3 can still be
 /// removing its old text/video pads; immediately setting the same pair again
 /// then intermittently connects text to playsink before video (FR-10.7).
-fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError> {
+fn teardown_pipeline(
+    playbin: &gst::Element,
+    sink: &gst::Element,
+) -> Result<(), gst::StateChangeError> {
     // GstPipeline flushes its bus while entering Null, so ordinary bus
     // observations from the outgoing URI cannot cross this completed
     // boundary. The error callbacks explicitly deferred to GLib idle carry a
@@ -858,6 +882,8 @@ fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError
     let (transition, current, pending) = playbin.state(gst::ClockTime::from_seconds(1));
     transition?;
     if current == gst::State::Null && pending == gst::State::VoidPending {
+        // Startup can fail before playbin adopts its explicitly prepared sink.
+        sink.set_state(gst::State::Null)?;
         Ok(())
     } else {
         eprintln!(
@@ -871,7 +897,11 @@ fn teardown_pipeline(playbin: &gst::Element) -> Result<(), gst::StateChangeError
 /// only that auxiliary URI and asynchronously restore the video. The external
 /// marker is cleared before retrying, so a genuine video failure on the retry
 /// follows the normal fatal path instead of looping (FR-10.7).
-fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPlayback>) -> bool {
+fn recover_without_external(
+    playbin: &gst::Element,
+    sink: &gst::Element,
+    playback: &RefCell<FocusedPlayback>,
+) -> bool {
     if !playback.borrow().has_external_subtitle() {
         return false;
     }
@@ -892,7 +922,7 @@ fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPl
     let (position, rate, play_after_seek) = playback.borrow().resume_point();
 
     crate::applog!("player: subtitle recovery tearing pipeline down");
-    if let Err(error) = teardown_pipeline(playbin) {
+    if let Err(error) = teardown_pipeline(playbin, sink) {
         playback.borrow_mut().reset(true);
         eprintln!(
             "open-mpv: subtitle recovery for {} could not reach null: {error}",
@@ -904,7 +934,7 @@ fn recover_without_external(playbin: &gst::Element, playback: &RefCell<FocusedPl
         .borrow_mut()
         .prepare_subtitle_rebuild(position, rate, play_after_seek, None);
     configure_uris(playbin, &uri, None);
-    if let Err(error) = playbin.set_state(gst::State::Playing) {
+    if let Err(error) = start_pipeline(playbin, sink) {
         playback.borrow_mut().cancel_resume();
         playback.borrow_mut().set_playing(false);
         eprintln!(

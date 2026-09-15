@@ -293,6 +293,10 @@ new product decisions rather than incidental implementation.
   navigation within 100 ms.
 - **NFR-1.3** Decode, folder enumeration, metadata and file operations never block GTK's
   main loop. Input, resize and quit remain responsive for huge or broken media.
+- **NFR-1.3** Video sink initialization runs on GTK before streaming begins, including
+  pipeline reuse and subtitle recovery, so transport controls cannot deadlock
+  against sink setup waiting for GTK. Stopping or failed startup releases the
+  prepared sink as well as the pipeline.
 - **NFR-1.3** Viewer folder scans (including target resolution and date-sort metadata)
   and automatic subtitle discovery run off GTK. Each has at most one active
   worker, including cancelled work, and one pending request replaced by the
@@ -303,7 +307,11 @@ new product decisions rather than incidental implementation.
   already waiting on storage; its worker slot stays occupied until it returns.
 - **NFR-2.1 / NFR-2.1a** The displayed image may exceed a cache budget, but all additional decoded
   media is bounded by checked byte and count limits. A zero neighbor budget
-  retains no neighbors.
+  retains no neighbors. Installing a folder releases cached images outside that
+  directory, including the previous foreground entry; same-folder opens retain
+  useful cache hits. Empty and error presentation releases all cached images
+  without discarding the Navigation set or Trash Undo state. Cancelled decode
+  completions cannot restore released entries.
 - **NFR-1.3 / NFR-2.1b** Viewer first-frame decoding has at most two active jobs,
   including jobs awaiting cancellation, and at most three queued requests
   (the current image and two neighbors). Requests for the same path share

@@ -385,6 +385,7 @@ impl App {
                 navigation.set_id(),
             )
         };
+        self.cache.retain_folder(directory.as_deref());
         let (Some(directory), Some(set)) = (directory, set) else {
             return;
         };
@@ -1499,6 +1500,7 @@ impl App {
         self.stop_video();
         self.view.clear();
         *self.media.borrow_mut() = MediaState::Empty;
+        self.cache.retain_folder(None);
         self.update_control_mode();
     }
 
