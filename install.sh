@@ -123,7 +123,7 @@ if [ "$SET_DEFAULT" = true ]; then
         image/bmp image/gif image/svg+xml image/svg+xml-compressed \
         image/heif image/jxl image/tiff image/jp2 image/x-jp2-codestream \
         image/vnd.microsoft.icon image/x-win-bitmap image/x-tga image/qoi \
-        image/x-exr image/x-dds image/x-portable-anymap \
+        image/x-exr image/x-dds image/vnd.ms-dds image/x-portable-anymap \
         image/x-portable-bitmap image/x-portable-graymap \
         image/x-portable-pixmap image/x-xbitmap image/x-xpixmap \
         video/mp4 video/x-matroska video/webm video/quicktime \

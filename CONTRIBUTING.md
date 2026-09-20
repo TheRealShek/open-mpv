@@ -27,6 +27,19 @@ To switch an existing source installation to the packaged release, follow the
 [source-to-RPM migration guide](docs/DISTRIBUTION.md#migrate-a-source-installation-to-rpm).
 Source scripts refuse package-owned destinations; use DNF for RPM installations.
 
+For experimental Arch/Omarchy packaging, follow the
+[native Arch package guide](docs/DISTRIBUTION.md#arch-linux-and-omarchy).
+It builds a pinned release rather than local source changes. Fedora remains
+the reference for full platform verification.
+
+On Arch, once the package guide's build and runtime dependencies are installed,
+use `cargo run --locked -- <file-or-folder>` from this checkout to test local
+changes. Run the Cargo checks below against the checkout as well: `makepkg`
+tests the pinned release with its packaging patch, not your working tree.
+Validate recipe changes with `shellcheck packaging/arch/PKGBUILD` and
+`bash -n packaging/arch/PKGBUILD`, then rebuild and test the package lifecycle
+as described in the distribution guide. Fedora CI remains required.
+
 ## Check a change
 
 Start with the smallest test that covers the behavior you changed. Before

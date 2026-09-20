@@ -1,0 +1,68 @@
+# shellcheck shell=bash disable=SC2034,SC2154
+# Local native package for Arch/Omarchy. Fedora remains the reference platform.
+pkgname=open-mpv
+pkgver=0.1.4
+pkgrel=1
+pkgdesc='Minimal local photo and video viewer for Wayland'
+arch=('x86_64')
+url='https://github.com/TheRealShek/open-mpv'
+license=('MIT' 'Apache-2.0' 'Apache-2.0 WITH LLVM-exception' 'ISC' 'MPL-2.0' 'Unicode-3.0')
+depends=('gtk4>=4.22' 'glycin>=2.1' 'libheif' 'gstreamer' 'gst-plugin-gtk4'
+         'gst-plugins-base' 'gst-plugins-good' 'gst-libav' 'libseccomp'
+         'lcms2' 'fontconfig' 'glib2' 'glibc' 'libgcc')
+makedepends=('cargo' 'pkgconf')
+checkdepends=('imagemagick')
+optdepends=('gst-plugins-bad: additional codecs and hardware decoding'
+            'gst-plugins-ugly: additional codecs'
+            'xdg-desktop-portal: desktop file chooser and Open With integration'
+            'xdg-desktop-portal-gtk: GTK portal fallback on Hyprland')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        'mime-aliases.patch')
+sha256sums=('f864cafef5ba199735864f4fe38b625c3b8950580bd7720745b091651cff671d'
+            'bd59584f4bebc8e3409d9eb910e8e9c45656bb003ff7c0d70ac0f1309b109d07')
+
+prepare() {
+    cd "$pkgname-$pkgver" || return
+    patch -Np1 -i "$srcdir/mime-aliases.patch"
+    mkdir -p .cargo
+    cargo vendor --locked vendor > .cargo/config.toml
+}
+
+build() {
+    cd "$pkgname-$pkgver" || return
+    cargo build --release --frozen
+}
+
+check() {
+    cd "$pkgname-$pkgver" || return
+    cargo test --frozen
+}
+
+package() {
+    cd "$pkgname-$pkgver" || return
+    local app_id=io.github.TheRealShek.OpenMpv
+    # Pacman owns these files. The source installer guards RPM destinations
+    # and is deliberately not used for this native package.
+    install -Dm755 target/release/open-mpv "$pkgdir/usr/bin/open-mpv"
+    install -Dm644 "data/$app_id.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/$app_id.svg"
+    install -Dm644 "data/$app_id.metainfo.xml" \
+        "$pkgdir/usr/share/metainfo/$app_id.metainfo.xml"
+    install -Dm644 "data/$app_id.desktop" \
+        "$pkgdir/usr/share/applications/$app_id.desktop"
+    sed -i 's|@BINDIR@|/usr/bin|g' "$pkgdir/usr/share/applications/$app_id.desktop"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    local crate_dir license_file
+    for crate_dir in vendor/*; do
+        for license_file in "$crate_dir"/LICENSE* "$crate_dir"/COPYING* \
+            "$crate_dir"/NOTICE* "$crate_dir"/UNLICENSE*; do
+            [[ -f "$license_file" ]] || continue
+            # Match the RPM's MPL choice for dual MPL/LGPL dependencies.
+            [[ ${license_file##*/} == *LGPL* ]] && continue
+            install -Dm644 "$license_file" \
+                "$pkgdir/usr/share/licenses/$pkgname/dependencies/${crate_dir##*/}/${license_file##*/}"
+        done
+    done
+}

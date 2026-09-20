@@ -32,7 +32,9 @@ when you choose to save a rotation, move them to trash or restore them.
 ## Install
 
 Currently supported on **Fedora 44 Workstation, GNOME, Wayland and x86-64**.
-Other distributions and desktops are not supported yet.
+For Arch Linux / Omarchy on Hyprland, see the experimental
+[native Arch package instructions](docs/DISTRIBUTION.md#arch-linux-and-omarchy).
+Other environments have not completed the full support checklist.
 
 Previously installed from source? Follow the [source-to-RPM migration guide](docs/DISTRIBUTION.md#migrate-a-source-installation-to-rpm) first so an old binary or desktop launcher does not hide the RPM.
 

@@ -1,0 +1,56 @@
+diff --git i/data/io.github.TheRealShek.OpenMpv.desktop w/data/io.github.TheRealShek.OpenMpv.desktop
+index 972407e..a5be762 100644
+--- i/data/io.github.TheRealShek.OpenMpv.desktop
++++ w/data/io.github.TheRealShek.OpenMpv.desktop
+@@ -7,6 +7,6 @@ Exec=@BINDIR@/open-mpv %f
+ Icon=io.github.TheRealShek.OpenMpv
+ Terminal=false
+ Categories=Graphics;Viewer;GTK;
+-MimeType=image/jpeg;image/png;image/apng;image/webp;image/avif;image/bmp;image/gif;image/svg+xml;image/svg+xml-compressed;image/heif;image/jxl;image/tiff;image/jp2;image/x-jp2-codestream;image/vnd.microsoft.icon;image/x-win-bitmap;image/x-tga;image/qoi;image/x-exr;image/x-dds;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;image/x-xbitmap;image/x-xpixmap;video/mp4;video/x-matroska;video/webm;video/quicktime;video/vnd.avi;video/x-msvideo;
++MimeType=image/jpeg;image/png;image/apng;image/webp;image/avif;image/bmp;image/gif;image/svg+xml;image/svg+xml-compressed;image/heif;image/jxl;image/tiff;image/jp2;image/x-jp2-codestream;image/vnd.microsoft.icon;image/x-win-bitmap;image/x-tga;image/qoi;image/x-exr;image/x-dds;image/vnd.ms-dds;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;image/x-xbitmap;image/x-xpixmap;video/mp4;video/x-matroska;video/webm;video/quicktime;video/vnd.avi;video/x-msvideo;
+ SingleMainWindow=true
+ StartupNotify=true
+diff --git i/install.sh w/install.sh
+index 25a020c..70e78f6 100755
+--- i/install.sh
++++ w/install.sh
+@@ -123,7 +123,7 @@ if [ "$SET_DEFAULT" = true ]; then
+         image/bmp image/gif image/svg+xml image/svg+xml-compressed \
+         image/heif image/jxl image/tiff image/jp2 image/x-jp2-codestream \
+         image/vnd.microsoft.icon image/x-win-bitmap image/x-tga image/qoi \
+-        image/x-exr image/x-dds image/x-portable-anymap \
++        image/x-exr image/x-dds image/vnd.ms-dds image/x-portable-anymap \
+         image/x-portable-bitmap image/x-portable-graymap \
+         image/x-portable-pixmap image/x-xbitmap image/x-xpixmap \
+         video/mp4 video/x-matroska video/webm video/quicktime \
+diff --git i/src/config.rs w/src/config.rs
+index a5a207b..00bacd2 100644
+--- i/src/config.rs
++++ w/src/config.rs
+@@ -482,7 +482,12 @@ mod tests {
+         let missing: Vec<String> = supported
+             .iter()
+             .map(|m| m.to_string())
+-            .filter(|m| !ours.contains(m) && !NO_GLOB.contains(&m.as_str()))
++            .filter(|m| {
++                !ours
++                    .iter()
++                    .any(|ours| gtk4::gio::content_type_equals(ours, m))
++                    && !NO_GLOB.contains(&m.as_str())
++            })
+             .collect();
+         assert!(
+             missing.is_empty(),
+@@ -517,7 +522,11 @@ mod tests {
+                     .0
+                     .to_string()
+             })
+-            .filter(|m| !registered.contains(m.as_str()))
++            .filter(|m| {
++                !registered
++                    .iter()
++                    .any(|registered| gtk4::gio::content_type_equals(registered, m))
++            })
+             .collect();
+         assert!(
+             unregistered.is_empty(),

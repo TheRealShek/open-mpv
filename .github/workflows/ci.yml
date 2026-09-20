@@ -122,6 +122,8 @@ jobs:
         run: |
           python3 -m unittest discover -s packaging/tests -v
           shellcheck -x install.sh uninstall.sh packaging/build-rpm.sh packaging/source-ownership.sh
+          shellcheck packaging/arch/PKGBUILD
+          bash -n packaging/arch/PKGBUILD
           sh -n install.sh uninstall.sh packaging/build-rpm.sh
           desktop-file-validate data/io.github.TheRealShek.OpenMpv.desktop
           appstreamcli validate --no-net data/io.github.TheRealShek.OpenMpv.metainfo.xml
