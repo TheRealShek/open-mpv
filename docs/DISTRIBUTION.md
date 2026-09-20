@@ -44,6 +44,7 @@ the local transaction and rollback behavior; GitHub hosts the RPM.
 | Standalone archive | Manual | Theoretical | Leaves dynamic-library compatibility to users | Debug builds only |
 | AppImage | Usually manual | Theoretical | Poor fit for system codecs and graphics drivers | Do not prioritize |
 | Build from source | Manual rebuild | Developers | Contributor workflow | Keep for contributors |
+| Local Arch package | Build with makepkg; install/remove with pacman | Arch/Omarchy x86-64 | Native system libraries and codecs | Experimental; see below |
 
 ### Why GitHub Releases first
 
@@ -82,6 +83,86 @@ At the last review on 20 August 2026, Flathub's requirements made this
 AI-assisted repository ineligible without a discretionary exception. Recheck
 the linked policy before any submission; absent eligibility or a confirmed
 exception, use a project-controlled Flatpak repository instead.
+
+## Arch Linux and Omarchy
+
+An experimental native Arch recipe lives in
+[`packaging/arch/PKGBUILD`](../packaging/arch/PKGBUILD). It builds the published
+0.1.4 source tag with a pinned SHA-256 checksum and a MIME-alias compatibility
+patch, not the current checkout. The patch recognizes equivalent DDS MIME names
+and registers both the legacy and current names for desktop integration.
+Use this package on Arch/Omarchy instead of converting the Fedora RPM.
+Pacman owns its files, dependencies and removal. No GNOME session is required
+by the recipe; GTK runs in the existing Wayland session.
+
+This is a local package, not an AUR submission or an Arch repository release.
+Fedora remains the Reference environment. Full Hyprland support still requires
+the desktop, hardware and performance evidence in FR-9.4.
+
+On an up-to-date Arch installation with a stable Rust toolchain, install the
+build tools and then build from a copy of the recipe, keeping generated files
+outside the checkout:
+
+```sh
+sudo pacman -S --needed base-devel
+mkdir -p ~/build/open-mpv
+cp packaging/arch/PKGBUILD packaging/arch/*.patch ~/build/open-mpv/
+cd ~/build/open-mpv
+makepkg --syncdeps
+sudo pacman -U ./open-mpv-0.1.4-1-x86_64.pkg.tar.zst
+```
+
+An existing rustup-managed stable Rust toolchain also works; do not replace it
+with the conflicting `rust` package. Run the build in your normal user session:
+the test suite uses GIO trash and ImageMagick. Do not use root for `makepkg` or
+skip failed checks. The recipe vendors locked Cargo dependencies and includes
+their license files. Internet access is needed to acquire sources; viewing
+media remains offline.
+
+The package requires `gst-plugin-gtk4` for video display, `gst-plugins-good`
+for common demuxers/audio and pitch-preserving playback speed, and `gst-libav`
+for software decoding. Arch's `glycin` includes the image loaders; `libheif`
+supplies HEIF/AVIF support. Additional codecs and hardware decoders are
+available through `gst-plugins-bad` and `gst-plugins-ugly`. Hardware acceleration
+must be verified on the actual GPU; software playback is the fallback.
+
+Omarchy normally supplies `xdg-desktop-portal`, `xdg-desktop-portal-hyprland`
+and `xdg-desktop-portal-gtk`. Keep Hyprland's portal selection; GTK provides
+the chooser fallback. Do not pretend the desktop is GNOME or replace the
+compositor configuration. Check video display support with:
+
+```sh
+gst-inspect-1.0 gtk4paintablesink
+```
+
+Close an existing open-mpv instance before testing the newly installed build.
+Launch `open-mpv /path/to/photo.jpg`, or choose open-mpv in your file manager's
+Open With menu. Installation does not change default applications. If an old
+source installation exists under `~/.local`, inspect its binary and desktop
+launcher first: it can shadow the package. The Fedora source uninstall script
+requires RPM tooling; do not use it to remove pacman-owned files.
+
+For updates, use the revised recipe for the next released tag and rebuild;
+`pacman -Syu` cannot discover updates to this local package. Remove it with
+`sudo pacman -R open-mpv`; configuration and media are retained.
+
+Before claiming this environment is supported, test launcher/Open With,
+single-instance forwarding, file/folder choosers and handoff, image/animation/SVG
+loading, video/audio/seeking, image/video transitions, fullscreen, fractional
+scale, zoom/pan, clipboard Quick Markup, Trash/Undo and rotate-save on disposable
+files. Also check idle inhibition during playback and release on pause/close;
+portal availability alone does not prove that Hyprland's idle behavior works.
+Verify install, reinstall/update and removal, software decoding and the actual
+hardware path, and measure the requirements' startup and PSS limits.
+
+On 20 September 2026, the patched 0.1.4 package passed all 192 default release
+tests on Omarchy x86-64 (GTK 4.22.4, Glycin 2.1.5 and GStreamer 1.28.6).
+Installation, same-version reinstallation, removal, desktop launch, native
+Wayland presentation and single-instance forwarding were checked. PNG, JPEG
+and DDS decoding and H.264 playback were exercised, including NVIDIA decoding
+and a separate forced-software run. The author also confirmed images and video
+work in normal use. This is partial platform evidence: the remaining human,
+idle-prevention, hardware-fallback and performance checks above still apply.
 
 ## Migrate a source installation to RPM
 
