@@ -482,7 +482,12 @@ mod tests {
         let missing: Vec<String> = supported
             .iter()
             .map(|m| m.to_string())
-            .filter(|m| !ours.contains(m) && !NO_GLOB.contains(&m.as_str()))
+            .filter(|m| {
+                !ours
+                    .iter()
+                    .any(|ours| gtk4::gio::content_type_equals(ours, m))
+                    && !NO_GLOB.contains(&m.as_str())
+            })
             .collect();
         assert!(
             missing.is_empty(),
@@ -517,7 +522,11 @@ mod tests {
                     .0
                     .to_string()
             })
-            .filter(|m| !registered.contains(m.as_str()))
+            .filter(|m| {
+                !registered
+                    .iter()
+                    .any(|registered| gtk4::gio::content_type_equals(registered, m))
+            })
             .collect();
         assert!(
             unregistered.is_empty(),
