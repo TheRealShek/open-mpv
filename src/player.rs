@@ -251,11 +251,19 @@ impl Player {
                     match msg.view() {
                         gst::MessageView::Eos(_) => {
                             let context = playback.borrow().context();
+                            let playbin = playbin.clone();
                             let playback = playback.clone();
                             let on_event = on_event.clone();
                             glib::idle_add_local_once(move || {
-                                if playback.borrow().error_is_current(&context) {
-                                    on_event(Event::EndOfStream);
+                                let current = playback.borrow().error_is_current(&context);
+                                if current {
+                                    match change_playing(&playbin, &playback, false) {
+                                        Ok(()) => {
+                                            playback.borrow_mut().mark_ended();
+                                            on_event(Event::EndOfStream);
+                                        }
+                                        Err(error) => on_event(Event::StateError(error)),
+                                    }
                                 }
                             });
                         }
@@ -584,6 +592,10 @@ impl Player {
 
     /// Toggle pause; only report the requested state after acceptance.
     pub fn toggle_pause(&self) -> Result<bool, PlayerError> {
+        if self.playback.borrow().is_ended() {
+            self.rewind()?;
+            return Ok(true);
+        }
         let playing = !self.is_playing();
         change_playing(&self.playbin, &self.playback, playing)?;
         Ok(playing)
@@ -594,8 +606,10 @@ impl Player {
     /// tracks the user instead of the pipeline's catch-up.
     pub fn progress(&self) -> Option<(f64, f64)> {
         let dur = self.duration()?;
-        let pos = match self.playback.borrow().pending_seek_position() {
+        let playback = self.playback.borrow();
+        let pos = match playback.pending_seek_position() {
             Some(position) => position,
+            None if playback.is_ended() => dur,
             None => self
                 .playbin
                 .query_position::<gst::ClockTime>()?

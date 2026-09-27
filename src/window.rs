@@ -37,6 +37,7 @@ mod animation;
 mod assembly;
 mod error;
 mod handoff;
+mod idle;
 mod monitor;
 mod open;
 mod operation;
@@ -196,6 +197,8 @@ pub struct App {
     pointer: Cell<(f64, f64)>,
     /// Session idle-inhibit cookie; `None` when nothing is held.
     inhibit_cookie: Cell<Option<NonZeroU32>>,
+    wayland_idle: RefCell<Option<idle::WaylandIdle>>,
+    idle_probe_running: Cell<bool>,
     /// Set before the window is allowed to close. GTK can retain this `App`
     /// through signal closures until process exit, so `Drop` is too late to
     /// own GStreamer shutdown (FR-6.7/NFR-2.2).
@@ -603,7 +606,7 @@ impl App {
         *self.media.borrow_mut() = MediaState::Video(path.to_path_buf());
         self.update_control_mode();
         crate::applog!("play: {}", path.display());
-        self.set_idle_inhibited(true);
+        self.start_idle_inhibition();
         self.update_save_enabled();
         self.fit_seek_bar();
         // Blank rather than carry the previous video's numbers over the
@@ -684,6 +687,7 @@ impl App {
         self.stop_transport_tick();
         self.operations.borrow_mut().clear();
         self.set_idle_inhibited(false);
+        self.wayland_idle.borrow_mut().take();
 
         // Taking the player also drops its bus-watch guard after stop reaches
         // Null, so no streaming callback can outlive process shutdown.
@@ -729,7 +733,11 @@ impl App {
                     self.update_subtitles(player.subtitle_snapshot());
                     self.update_audio(player.audio_snapshot());
                     self.update_playback_rate(player.playback_rate());
-                    self.set_idle_inhibited(player.is_playing());
+                    if player.is_playing() {
+                        self.start_idle_inhibition();
+                    } else {
+                        self.set_idle_inhibited(false);
+                    }
                     self.show_toast(&error::message(&error, "Could not add the subtitles."));
                 }
             }
@@ -1022,17 +1030,104 @@ impl App {
     }
 
     /// Hold off the session's idle blanker while a video actually plays.
-    /// Nothing else stops GNOME from blanking the screen mid-film; the
-    /// inhibit is dropped on pause and on leaving the video so a paused
-    /// or image-only session never holds it (NFR-2.2).
+    /// Prefer the Wayland surface protocol when available, with GTK's session
+    /// inhibit as a fallback. Pause and leaving the video release either one.
+    fn start_idle_inhibition(self: &Rc<Self>) {
+        self.set_idle_inhibited(true);
+        if self.idle_probe_running.get()
+            || !self.win.is_mapped()
+            || !self
+                .wayland_idle
+                .borrow()
+                .as_ref()
+                .is_some_and(|idle| !idle.is_active())
+        {
+            return;
+        }
+        self.idle_probe_running.set(true);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            for _ in 0..100 {
+                glib::timeout_future(std::time::Duration::from_millis(10)).await;
+                let Some(app) = weak.upgrade() else { return };
+                if app.shutting_down.get()
+                    || !app
+                        .player
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|player| player.is_playing())
+                {
+                    app.idle_probe_running.set(false);
+                    return;
+                }
+                app.set_idle_inhibited(true);
+                if app
+                    .wayland_idle
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(idle::WaylandIdle::is_active)
+                {
+                    app.idle_probe_running.set(false);
+                    return;
+                }
+            }
+            if let Some(app) = weak.upgrade() {
+                app.idle_probe_running.set(false);
+                crate::applog!(
+                    "idle inhibit: Wayland registry did not respond; GTK fallback remains"
+                );
+            }
+        });
+    }
+
     fn set_idle_inhibited(&self, inhibited: bool) {
-        if inhibited == self.inhibit_cookie.get().is_some() {
+        let wayland_active = self
+            .wayland_idle
+            .borrow()
+            .as_ref()
+            .is_some_and(idle::WaylandIdle::is_active);
+        if (inhibited && wayland_active)
+            || (!inhibited && !wayland_active && self.inhibit_cookie.get().is_none())
+        {
+            return;
+        }
+        if inhibited {
+            if self.wayland_idle.borrow().is_none() {
+                match idle::WaylandIdle::new(&self.win) {
+                    Ok(Some(idle)) => *self.wayland_idle.borrow_mut() = Some(idle),
+                    Ok(None) => {}
+                    Err(error) => crate::applog!("idle inhibit: Wayland unavailable: {error}"),
+                }
+            }
+            if let Some(idle) = self.wayland_idle.borrow_mut().as_mut() {
+                match idle.inhibit(&self.win) {
+                    Ok(true) => {
+                        if let Some(cookie) = self.inhibit_cookie.take()
+                            && let Some(gtk_app) = self.win.application()
+                        {
+                            gtk_app.uninhibit(cookie.get());
+                        }
+                        crate::applog!("idle inhibit: Wayland surface inhibitor taken");
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => crate::applog!("idle inhibit: Wayland failed: {error}"),
+                }
+            }
+        } else if let Some(idle) = self.wayland_idle.borrow_mut().as_mut()
+            && idle.is_active()
+        {
+            idle.release();
+            crate::applog!("idle inhibit: Wayland surface inhibitor released");
             return;
         }
         let Some(gtk_app) = self.win.application() else {
             return;
         };
         if inhibited {
+            if self.inhibit_cookie.get().is_some() {
+                return;
+            }
             let cookie = gtk_app.inhibit(
                 Some(&self.win),
                 gtk::ApplicationInhibitFlags::IDLE,
@@ -1194,6 +1289,9 @@ impl App {
                     && let Some(Err(error)) = self.with_video(Player::rewind)
                 {
                     self.on_player_event(player::Event::StateError(error));
+                } else if self.is_video_showing() && !self.cfg.loop_video {
+                    self.set_idle_inhibited(false);
+                    self.update_transport();
                 }
             }
             player::Event::StateError(error) => {
@@ -2233,7 +2331,7 @@ impl App {
             }
             Command::TogglePlayback => match self.with_video(Player::toggle_pause) {
                 Some(Ok(true)) => {
-                    self.set_idle_inhibited(true);
+                    self.start_idle_inhibition();
                     self.flash("Play");
                 }
                 Some(Ok(false)) => {

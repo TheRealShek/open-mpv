@@ -24,7 +24,8 @@ the local transaction and rollback behavior; GitHub hosts the RPM.
 - The packaged platform today is Fedora 44 Workstation on x86-64 with GNOME
   and Wayland.
 - The code currently requires GTK 4.22, glycin and its matching loader
-  protocol, GStreamer, and `gtk4paintablesink`.
+  protocol, GStreamer, `gtk4paintablesink`, and Wayland client development
+  files for native video idle inhibition.
 - A package must satisfy [REQUIREMENTS.md](REQUIREMENTS.md), including glycin
   isolation, the video decoding path, file operations, desktop integration and
   the performance budgets.
@@ -125,6 +126,9 @@ for software decoding. Arch's `glycin` includes the image loaders; `libheif`
 supplies HEIF/AVIF support. Additional codecs and hardware decoders are
 available through `gst-plugins-bad` and `gst-plugins-ugly`. Hardware acceleration
 must be verified on the actual GPU; software playback is the fallback.
+The native Wayland client library is needed to inhibit compositor idle while
+video plays. GTK's session inhibit remains the fallback if the compositor does
+not expose the Wayland idle-inhibit protocol.
 
 Omarchy normally supplies `xdg-desktop-portal`, `xdg-desktop-portal-hyprland`
 and `xdg-desktop-portal-gtk`. Keep Hyprland's portal selection; GTK provides
@@ -154,6 +158,22 @@ files. Also check idle inhibition during playback and release on pause/close;
 portal availability alone does not prove that Hyprland's idle behavior works.
 Verify install, reinstall/update and removal, software decoding and the actual
 hardware path, and measure the requirements' startup and PSS limits.
+
+After building this checkout, run the targeted idle check in a Hyprland session
+with no other open-mpv instance. It uses `ffmpeg`, `hyprctl` and `wtype`, creates
+a temporary local video and isolated `loop=no` configuration, and checks that
+playback inhibits idle while pause, natural end and exit release it. Seeking
+after natural end keeps the video paused until playback is requested again,
+and looping playback stays inhibited:
+
+```sh
+python3 packaging/arch/check-idle.py target/release/open-mpv
+```
+
+The current local package recipe still builds the published 0.1.4 tag. These
+source changes enter that recipe when the next release is tagged and its version
+and checksum are updated. A checkout build and an installed 0.1.4 package are
+different binaries; close the installed instance before testing the checkout.
 
 On 20 September 2026, the patched 0.1.4 package passed all 192 default release
 tests on Omarchy x86-64 (GTK 4.22.4, Glycin 2.1.5 and GStreamer 1.28.6).

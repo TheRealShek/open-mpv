@@ -119,6 +119,7 @@ pub(super) struct FocusedPlayback {
     generation: u64,
     current_video: Option<PathBuf>,
     playing: bool,
+    ended: bool,
     /// Last rate accepted by the pipeline. A queued seek may advertise a
     /// newer requested rate without changing this until GStreamer accepts it.
     playback_rate: f64,
@@ -144,6 +145,7 @@ impl Default for FocusedPlayback {
             generation: 0,
             current_video: None,
             playing: false,
+            ended: false,
             playback_rate: 1.0,
             duration: None,
             seek: SeekState::default(),
@@ -194,6 +196,7 @@ impl FocusedPlayback {
 
     pub(super) fn playback_started(&mut self) {
         self.playing = true;
+        self.ended = false;
     }
 
     pub(super) fn forget_timing(&mut self) {
@@ -219,6 +222,15 @@ impl FocusedPlayback {
 
     pub(super) fn accept_seek(&mut self, request: SeekRequest) {
         self.playback_rate = request.rate;
+        if self.ended
+            && self
+                .duration
+                .is_some_and(|duration| request.position < duration)
+        {
+            // A successful position seek after EOS is paused at its target.
+            // A refused or still-queued seek must leave the end state intact.
+            self.ended = false;
+        }
     }
 
     pub(super) fn seek_refused(&mut self) {
@@ -282,10 +294,22 @@ impl FocusedPlayback {
 
     pub(super) fn set_playing(&mut self, playing: bool) {
         self.playing = playing;
+        if playing {
+            self.ended = false;
+        }
     }
 
     pub(super) fn is_playing(&self) -> bool {
         self.playing
+    }
+
+    pub(super) fn mark_ended(&mut self) {
+        self.playing = false;
+        self.ended = true;
+    }
+
+    pub(super) fn is_ended(&self) -> bool {
+        self.ended
     }
 
     pub(super) fn invalidate_duration(&mut self) {
@@ -763,6 +787,42 @@ pub(super) fn issue_seek(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn natural_end_stops_playback_and_a_new_start_clears_it() {
+        let mut playback = FocusedPlayback::default();
+        playback.start_video(Path::new("movie.mkv"), None, true);
+        playback.playback_started();
+        playback.mark_ended();
+        assert!(!playback.is_playing());
+        assert!(playback.is_ended());
+
+        playback.set_playing(true);
+        assert!(playback.is_playing());
+        assert!(!playback.is_ended());
+
+        playback.mark_ended();
+        playback.start_video(Path::new("next.mkv"), None, true);
+        assert!(!playback.is_ended());
+
+        playback.mark_ended();
+        playback.cache_duration(12.0);
+        playback.accept_seek(request(2.0, 1.0));
+        assert!(!playback.is_ended());
+        assert!(!playback.is_playing());
+
+        playback.mark_ended();
+        playback.accept_seek(request(12.0, 1.0));
+        assert!(playback.is_ended());
+
+        playback.begin_seek(request(10.0, 1.0));
+        assert!(!playback.request_seek(request(2.0, 1.0)));
+        assert!(playback.is_ended());
+        playback.seek_refused();
+        assert!(playback.is_ended());
+        playback.accept_seek(request(2.0, 1.0));
+        assert!(!playback.is_ended());
+    }
 
     /// Stand-in for what `issue_seek` records on the pipeline's behalf.
     fn request(position: f64, rate: f64) -> SeekRequest {

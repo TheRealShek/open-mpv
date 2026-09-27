@@ -12,7 +12,7 @@ Install the development dependencies:
 ```sh
 sudo dnf install ImageMagick cargo desktop-file-utils gcc git glycin-devel \
   glycin-loaders gstreamer1-devel gstreamer1-plugin-gtk4 \
-  gstreamer1-plugins-base gstreamer1-plugins-good gtk4-devel rust xdg-utils
+  gstreamer1-plugins-base gstreamer1-plugins-good gtk4-devel rust wayland-devel xdg-utils
 ```
 
 Clone and run the project:
