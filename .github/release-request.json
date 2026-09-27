@@ -1,6 +1,6 @@
 {
-  "base": "c40dd5a0e9f72a08a878b91332ce657ead4b75bb",
-  "version": "0.1.4",
-  "description": "UI and Performance Improvements",
-  "date": "2026-09-14"
+  "base": "ca4b9c5d496456313952f1cfe4e9062fe3397180",
+  "version": "0.1.5",
+  "description": "Improve Viewer stability and add experimental Arch packaging",
+  "date": "2026-09-27"
 }
