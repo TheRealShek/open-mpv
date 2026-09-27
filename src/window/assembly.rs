@@ -402,6 +402,8 @@ impl App {
             menu_open: Cell::new(false),
             pointer: Cell::new((0.0, 0.0)),
             inhibit_cookie: Cell::new(None),
+            wayland_idle: RefCell::new(None),
+            idle_probe_running: Cell::new(false),
             shutting_down: Cell::new(false),
             sized_from_media: Cell::new(false),
             pending_media_size: Cell::new(None),
@@ -538,6 +540,23 @@ impl App {
                     app,
                     move |toplevel, size| app.compute_initial_size(toplevel, size)
                 ));
+            }
+        ));
+
+        // A command-line video can start before GTK maps its window. Retry
+        // with the native surface once the compositor can see it.
+        app.win.connect_map(clone!(
+            #[weak]
+            app,
+            move |_| {
+                if app
+                    .player
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|player| player.is_playing())
+                {
+                    app.start_idle_inhibition();
+                }
             }
         ));
 

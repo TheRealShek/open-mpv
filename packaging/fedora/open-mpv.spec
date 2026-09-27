@@ -20,6 +20,7 @@ BuildRequires:  glycin-devel >= 2.1
 BuildRequires:  gstreamer1-devel
 BuildRequires:  gtk4-devel >= 4.22
 BuildRequires:  rust
+BuildRequires:  wayland-devel
 Requires:       glycin-loaders >= 2.1
 Requires:       gstreamer1-plugin-gtk4
 Requires:       gstreamer1-plugins-base

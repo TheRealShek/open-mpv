@@ -32,9 +32,11 @@ when you choose to save a rotation, move them to trash or restore them.
 ## Install
 
 Currently supported on **Fedora 44 Workstation, GNOME, Wayland and x86-64**.
-For Arch Linux / Omarchy on Hyprland, see the experimental
+For Arch Linux and Omarchy on Hyprland, use the experimental
 [native Arch package instructions](docs/DISTRIBUTION.md#arch-linux-and-omarchy).
 Other environments have not completed the full support checklist.
+
+### Fedora
 
 Previously installed from source? Follow the [source-to-RPM migration guide](docs/DISTRIBUTION.md#migrate-a-source-installation-to-rpm) first so an old binary or desktop launcher does not hide the RPM.
 
@@ -148,9 +150,10 @@ keyboard shortcuts, follow the [configuration guide](docs/CONFIGURATION.md).
 
 ## Having trouble?
 
-If images do not open, check that `glycin-loaders` is installed. If a video
-will not play, you may need additional codecs. The optional
-`gstreamer1-plugin-libav` package adds software decoding for more video formats.
+If images do not open, check that Fedora's `glycin-loaders` or Arch's `glycin`
+package is installed. If a video will not play, you may need additional codecs.
+Fedora's `gstreamer1-plugin-libav` and Arch's `gst-libav` add software decoding
+for more video formats.
 
 The [troubleshooting guide](docs/TROUBLESHOOTING.md) explains how to check
 video support, understand configuration failures, and capture crash backtraces. If you opened the app from

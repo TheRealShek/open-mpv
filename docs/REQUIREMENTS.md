@@ -223,6 +223,10 @@ new product decisions rather than incidental implementation.
   plain language.
 - **FR-10.9** Frame stepping, playlists, network playback, subtitle downloading and video
   editing are outside the current direction.
+- **FR-10.10** Playing video inhibits compositor idle blanking and locking where
+  the desktop supports it. Pause, natural end, navigation away, playback failure
+  and close release that inhibition. A session API reporting success is
+  insufficient if the compositor does not honor the request.
 
 ### FR-11 — Quick Markup
 

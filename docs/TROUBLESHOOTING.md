@@ -2,8 +2,9 @@
 
 ## Images do not open
 
-Check that `glycin-loaders` is installed. open-mpv uses the image loaders
-available through glycin, so a missing loader can leave a format unavailable.
+Check that Fedora's `glycin-loaders` or Arch's `glycin` is installed. open-mpv
+uses the image loaders available through glycin, so a missing loader can leave
+a format unavailable.
 
 ## A video does not play
 
@@ -12,6 +13,8 @@ codecs. On Fedora, `gstreamer1-plugins-bad-free` supplies hardware-decoder
 plugins. The optional `gstreamer1-plugin-libav` package supplies software
 fallbacks for more formats, and pitch-preserving playback speed needs
 `gstreamer1-plugins-good`.
+On Arch, the corresponding software-decoder and common playback packages are
+`gst-libav` and `gst-plugins-good`.
 
 The Reference environment is verified with Intel QSV. Other systems may expose
 VA-API or NVIDIA NVDEC, but those paths are not currently supported claims.
