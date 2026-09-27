@@ -31,6 +31,9 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="1.0.0" date="2026-09-27">
+      <description><p>Viewer stability fixes and experimental Arch packaging</p></description>
+    </release>
     <release version="0.1.4" date="2026-09-14">
       <description><p>UI and Performance Improvements</p></description>
     </release>
