@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/TheRealShek/OpenMpv/icons/scalable/actions">
+    <file alias="open-mpv-go-previous-symbolic.svg">icons/open-mpv-go-previous-symbolic.svg</file>
+    <file alias="open-mpv-go-next-symbolic.svg">icons/open-mpv-go-next-symbolic.svg</file>
+    <file alias="open-mpv-view-fullscreen-symbolic.svg">icons/open-mpv-view-fullscreen-symbolic.svg</file>
+    <file alias="open-mpv-window-close-symbolic.svg">icons/open-mpv-window-close-symbolic.svg</file>
+    <file alias="open-mpv-media-playback-pause-symbolic.svg">icons/open-mpv-media-playback-pause-symbolic.svg</file>
+    <file alias="open-mpv-media-playback-start-symbolic.svg">icons/open-mpv-media-playback-start-symbolic.svg</file>
+    <file alias="open-mpv-audio-volume-high-symbolic.svg">icons/open-mpv-audio-volume-high-symbolic.svg</file>
+    <file alias="open-mpv-audio-volume-muted-symbolic.svg">icons/open-mpv-audio-volume-muted-symbolic.svg</file>
+    <file alias="open-mpv-media-view-subtitles-symbolic.svg">icons/open-mpv-media-view-subtitles-symbolic.svg</file>
+    <file alias="open-mpv-object-rotate-left-symbolic.svg">icons/open-mpv-object-rotate-left-symbolic.svg</file>
+    <file alias="open-mpv-object-rotate-right-symbolic.svg">icons/open-mpv-object-rotate-right-symbolic.svg</file>
+    <file alias="open-mpv-document-edit-symbolic.svg">icons/open-mpv-document-edit-symbolic.svg</file>
+    <file alias="open-mpv-document-save-symbolic.svg">icons/open-mpv-document-save-symbolic.svg</file>
+    <file alias="open-mpv-user-trash-symbolic.svg">icons/open-mpv-user-trash-symbolic.svg</file>
+    <file alias="open-mpv-view-more-symbolic.svg">icons/open-mpv-view-more-symbolic.svg</file>
+    <file alias="open-mpv-edit-undo-symbolic.svg">icons/open-mpv-edit-undo-symbolic.svg</file>
+    <file alias="open-mpv-edit-clear-all-symbolic.svg">icons/open-mpv-edit-clear-all-symbolic.svg</file>
+    <file alias="open-mpv-edit-copy-symbolic.svg">icons/open-mpv-edit-copy-symbolic.svg</file>
+  </gresource>
+</gresources>

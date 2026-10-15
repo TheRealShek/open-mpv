@@ -931,17 +931,17 @@ impl App {
             set_icon(
                 &self.play_btn,
                 if p.is_playing() {
-                    "media-playback-pause-symbolic"
+                    "open-mpv-media-playback-pause-symbolic"
                 } else {
-                    "media-playback-start-symbolic"
+                    "open-mpv-media-playback-start-symbolic"
                 },
             );
             set_icon(
                 &self.mute_btn,
                 if p.is_muted() {
-                    "audio-volume-muted-symbolic"
+                    "open-mpv-audio-volume-muted-symbolic"
                 } else {
-                    "audio-volume-high-symbolic"
+                    "open-mpv-audio-volume-high-symbolic"
                 },
             );
             self.update_playback_rate(p.playback_rate());
@@ -1183,9 +1183,9 @@ impl App {
             .set_visible(animation.is_some() && !marking);
         if let Some(playback) = animation.as_ref() {
             self.animation_btn.set_icon_name(if playback.paused() {
-                "media-playback-start-symbolic"
+                "open-mpv-media-playback-start-symbolic"
             } else {
-                "media-playback-pause-symbolic"
+                "open-mpv-media-playback-pause-symbolic"
             });
             self.animation_btn
                 .set_tooltip_text(Some(if playback.paused() {
