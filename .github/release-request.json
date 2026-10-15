@@ -1,6 +1,6 @@
 {
-  "base": "ca4b9c5d496456313952f1cfe4e9062fe3397180",
-  "version": "1.0.0",
-  "description": "Viewer stability fixes and experimental Arch packaging",
-  "date": "2026-09-27"
+  "base": "eb2d08ab41f1a8792a1372e8e07c47050fe869ed",
+  "version": "1.0.1",
+  "description": "Consistent monochrome Lucide controls across desktop themes",
+  "date": "2026-10-15"
 }
