@@ -58,10 +58,13 @@ if [ "$1" = -qa ]; then exit "${RPM_BROKEN:-0}"; fi
         self.invoke('install.sh', '--no-build')
         launcher = self.prefix / f'share/applications/{APP}.desktop'
         self.assertIn(str(self.prefix / 'bin'), launcher.read_text())
+        icon_license = self.prefix / 'share/licenses/open-mpv/LICENSE.lucide'
+        self.assertEqual(icon_license.read_bytes(), (ROOT / 'data/icons/LICENSE.lucide').read_bytes())
         self.invoke('uninstall.sh')
         self.invoke('uninstall.sh')
         self.assertFalse(launcher.exists())
         self.assertFalse((self.prefix / 'bin/open-mpv').exists())
+        self.assertFalse(icon_license.exists())
         self.assertEqual(config.read_text(), 'user settings')
         self.assertEqual(associations.read_text(), 'user defaults')
 
@@ -69,12 +72,14 @@ if [ "$1" = -qa ]; then exit "${RPM_BROKEN:-0}"; fi
         self.invoke('install.sh', '--no-build')
         binary = self.prefix / 'bin/open-mpv'
         binary.write_text('old build')
-        self.env['RPM_OWNED'] = str(self.prefix / 'share/licenses/open-mpv/LICENSE')
-        result = self.invoke('install.sh', '--no-build', success=False)
-        self.assertIn('DNF', result.stderr)
-        self.invoke('uninstall.sh', success=False)
-        self.assertEqual(binary.read_text(), 'old build')
-        self.assertTrue((self.prefix / f'share/applications/{APP}.desktop').exists())
+        for name in ('LICENSE', 'LICENSE.lucide'):
+            with self.subTest(license=name):
+                self.env['RPM_OWNED'] = str(self.prefix / 'share/licenses/open-mpv' / name)
+                result = self.invoke('install.sh', '--no-build', success=False)
+                self.assertIn('DNF', result.stderr)
+                self.invoke('uninstall.sh', success=False)
+                self.assertEqual(binary.read_text(), 'old build')
+                self.assertTrue((self.prefix / f'share/applications/{APP}.desktop').exists())
 
     def test_custom_prefix_and_staging_ignore_live_ownership(self):
         prefix = self.root / 'custom'
@@ -84,6 +89,7 @@ if [ "$1" = -qa ]; then exit "${RPM_BROKEN:-0}"; fi
         stage = self.root / 'stage'
         self.invoke('install.sh', '--no-build', '--prefix', '/usr', '--destdir', str(stage))
         self.assertTrue((stage / 'usr/bin/open-mpv').exists())
+        self.assertTrue((stage / 'usr/share/licenses/open-mpv/LICENSE.lucide').exists())
         self.env['RPM_OWNED'] = str(stage / 'usr/bin/open-mpv')
         self.invoke('install.sh', '--no-build', '--prefix', '/usr', '--destdir', str(stage), success=False)
 

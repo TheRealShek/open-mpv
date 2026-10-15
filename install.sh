@@ -103,6 +103,7 @@ install -m 644 "${SRC_DIR}/data/${APP_ID}.svg" "${ICON_DIR}/${APP_ID}.svg"
 install -m 644 "${SRC_DIR}/data/${APP_ID}.metainfo.xml" \
     "${METAINFO_DIR}/${APP_ID}.metainfo.xml"
 install -m 644 "${SRC_DIR}/LICENSE" "${LICENSE_DIR}/LICENSE"
+install -m 644 "${SRC_DIR}/data/icons/LICENSE.lucide" "${LICENSE_DIR}/LICENSE.lucide"
 sed "s|@BINDIR@|${INSTALL_BIN_DIR}|" "${SRC_DIR}/data/${APP_ID}.desktop" \
     > "${APP_DIR}/${APP_ID}.desktop"
 chmod 644 "${APP_DIR}/${APP_ID}.desktop"

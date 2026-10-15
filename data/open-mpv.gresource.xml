@@ -20,4 +20,7 @@
     <file alias="open-mpv-edit-clear-all-symbolic.svg">icons/open-mpv-edit-clear-all-symbolic.svg</file>
     <file alias="open-mpv-edit-copy-symbolic.svg">icons/open-mpv-edit-copy-symbolic.svg</file>
   </gresource>
+  <gresource prefix="/io/github/TheRealShek/OpenMpv/licenses">
+    <file alias="Lucide">icons/LICENSE.lucide</file>
+  </gresource>
 </gresources>
