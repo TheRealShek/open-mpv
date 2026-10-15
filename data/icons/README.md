@@ -7,7 +7,7 @@ The notice is embedded in the binary and installed with the source and RPM build
 The Arch recipe also installs it when the selected source release contains it.
 
 Keep Lucide's 24-unit grid, 2-unit stroke and original geometry. The Viewer renders
-these icons at 20 logical pixels. The only adaptations are app-specific filenames,
+these icons at 16 logical pixels. The only adaptations are app-specific filenames,
 explicit paint attributes and GTK symbolic classes on each shape, and conversion
 of SVG lines and polylines to equivalent paths. No JavaScript or runtime icon
 package is used.

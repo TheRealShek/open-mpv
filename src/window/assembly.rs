@@ -1131,7 +1131,7 @@ fn apply_css(background: &str) {
             color: #eeeeee; background-color: transparent;
             background-image: none; border: none; box-shadow: none; }}
         .window-controls image, .osd-bar image, .osd-btn image {{
-            -gtk-icon-size: 20px; }}
+            -gtk-icon-size: 16px; }}
         .window-controls button:hover, .osd-bar button:hover,
         .osd-bar menubutton > button:hover {{
             background-color: rgba(255, 255, 255, 0.14); }}
@@ -1281,7 +1281,7 @@ mod tests {
             theme.add_resource_path("/io/github/TheRealShek/OpenMpv/icons");
             for file in &files {
                 let name = file.strip_suffix(".svg").expect("SVG icon");
-                for (logical_size, scale) in [(20, 1), (30, 1), (20, 2)] {
+                for (logical_size, scale) in [(16, 1), (24, 1), (16, 2)] {
                     let icon = theme.lookup_icon(
                         name,
                         &[],
