@@ -358,7 +358,11 @@ new product decisions rather than incidental implementation.
   compositor move/resize, clipboard and desktop portals work without X11
   assumptions.
 - **NFR-4.2** Chrome remains readable dark translucent OSD independently of desktop theme;
-  the canvas uses the configured background.
+  viewer controls use a bundled, consistent monochrome icon set, including a
+  plain close symbol. Icon shapes and colors do not depend on the desktop icon
+  theme. Icons remain clear at normal, HiDPI and fractional scales, with visible
+  hover, keyboard focus and disabled states. The canvas uses the configured
+  background.
 - **NFR-4.3** Viewing works offline, from read-only locations and without source write
   permission. Unavailable writes fail non-modally when explicitly attempted.
 
