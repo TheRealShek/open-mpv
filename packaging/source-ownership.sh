@@ -18,6 +18,7 @@ check_source_ownership() {
         "$2/icons/hicolor/scalable/apps/dev.thakur.OpenMpv.svg" \
         "$2/metainfo/io.github.TheRealShek.OpenMpv.metainfo.xml" \
         "$2/licenses/open-mpv/LICENSE" \
+        "$2/licenses/open-mpv/LICENSE.lucide" \
         "$2/licenses/open-mpv" \
         "$2/applications/mimeinfo.cache" \
         "$2/icons/hicolor/icon-theme.cache"; do

@@ -11,6 +11,7 @@ impl App {
             .build();
 
         apply_css(&cfg.background);
+        register_icons(&WidgetExt::display(&win));
 
         let view = ImageView::default();
         view.set_default_fit_actual(cfg.fit == FitMode::Actual);
@@ -43,7 +44,7 @@ impl App {
 
         // Navigation arrows (FR-3.1).
         let prev_btn = osd_button(
-            "go-previous-symbolic",
+            "open-mpv-go-previous-symbolic",
             &Action::Previous.detailed_name(),
             "Previous image",
         );
@@ -51,7 +52,7 @@ impl App {
         prev_btn.set_valign(gtk::Align::Center);
         overlay.add_overlay(&prev_btn);
         let next_btn = osd_button(
-            "go-next-symbolic",
+            "open-mpv-go-next-symbolic",
             &Action::Next.detailed_name(),
             "Next image",
         );
@@ -84,15 +85,17 @@ impl App {
         window_controls.set_halign(gtk::Align::End);
         window_controls.set_valign(gtk::Align::Start);
         let fullscreen_btn = bar_button(
-            "view-fullscreen-symbolic",
+            "open-mpv-view-fullscreen-symbolic",
             &Action::Fullscreen.detailed_name(),
             "Fullscreen",
         );
         window_controls.append(&fullscreen_btn);
         // Close button (FR-6.7).
-        // Ask for the regular icon: some third-party themes ship a white
-        // `-symbolic` source that GTK recolours to transparent.
-        let close_btn = bar_button("window-close", &Action::Close.detailed_name(), "Close");
+        let close_btn = bar_button(
+            "open-mpv-window-close-symbolic",
+            &Action::Close.detailed_name(),
+            "Close",
+        );
         window_controls.append(&close_btn);
         overlay.add_overlay(&window_controls);
 
@@ -123,19 +126,19 @@ impl App {
         // overlay: pausing was keyboard-only (FR-6.5). Icons track the
         // pipeline in update_transport.
         let play_btn = bar_button(
-            "media-playback-pause-symbolic",
+            "open-mpv-media-playback-pause-symbolic",
             &Action::PlayPause.detailed_name(),
             "Play / pause",
         );
         let animation_btn = bar_button(
-            "media-playback-pause-symbolic",
+            "open-mpv-media-playback-pause-symbolic",
             &Action::PlayPause.detailed_name(),
             "Pause animation",
         );
         animation_btn.set_visible(false);
         normal_controls.append(&animation_btn);
         let mute_btn = bar_button(
-            "audio-volume-high-symbolic",
+            "open-mpv-audio-volume-high-symbolic",
             &Action::Mute.detailed_name(),
             "Mute",
         );
@@ -149,7 +152,7 @@ impl App {
         speed_btn.add_css_class("flat");
         let subtitle_menu = gio::Menu::new();
         let subtitle_btn = gtk::MenuButton::builder()
-            .icon_name("media-view-subtitles-symbolic")
+            .icon_name("open-mpv-media-view-subtitles-symbolic")
             .menu_model(&subtitle_menu)
             .tooltip_text("Subtitles")
             .build();
@@ -167,19 +170,19 @@ impl App {
 
         let photo_controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let rotate_ccw = bar_button(
-            "object-rotate-left-symbolic",
+            "open-mpv-object-rotate-left-symbolic",
             &Action::RotateCounterclockwise.detailed_name(),
             "Rotate left",
         );
         let rotate_cw = bar_button(
-            "object-rotate-right-symbolic",
+            "open-mpv-object-rotate-right-symbolic",
             &Action::RotateClockwise.detailed_name(),
             "Rotate right",
         );
         photo_controls.append(&rotate_ccw);
         photo_controls.append(&rotate_cw);
         let markup_btn = bar_button(
-            "document-edit-symbolic",
+            "open-mpv-document-edit-symbolic",
             &Action::Markup.detailed_name(),
             "Quick Markup",
         );
@@ -187,7 +190,7 @@ impl App {
         // Save appears only once an editable image has a pending rotation;
         // an inert floppy icon reads as a broken control (FR-5.4).
         let save_btn = bar_button(
-            "document-save-symbolic",
+            "open-mpv-document-save-symbolic",
             &Action::Save.detailed_name(),
             "Save rotation to file",
         );
@@ -199,7 +202,7 @@ impl App {
         let separator = gtk::Separator::new(gtk::Orientation::Vertical);
         normal_controls.append(&separator);
         normal_controls.append(&bar_button(
-            "user-trash-symbolic",
+            "open-mpv-user-trash-symbolic",
             &Action::Trash.detailed_name(),
             "Move to trash",
         ));
@@ -217,7 +220,7 @@ impl App {
             &subtitle_context_menu,
         );
         let more_btn = gtk::MenuButton::builder()
-            .icon_name("view-more-symbolic")
+            .icon_name("open-mpv-view-more-symbolic")
             .menu_model(&more_menu)
             .tooltip_text("More controls")
             .build();
@@ -246,27 +249,27 @@ impl App {
         markup_tools.append(&markup_box_btn);
         markup_tools.append(&markup_arrow_btn);
         markup_tools.append(&bar_button(
-            "edit-undo-symbolic",
+            "open-mpv-edit-undo-symbolic",
             &Action::Undo.detailed_name(),
             "Undo last annotation (Ctrl+Z)",
         ));
         markup_decisions.append(&bar_button(
-            "edit-clear-all-symbolic",
+            "open-mpv-edit-clear-all-symbolic",
             &Action::MarkupClear.detailed_name(),
             "Clear all annotations; Ctrl+Z restores them (C)",
         ));
         markup_decisions.append(&bar_button(
-            "process-stop-symbolic",
+            "open-mpv-window-close-symbolic",
             &Action::Markup.detailed_name(),
             "Cancel Quick Markup (A or Escape)",
         ));
         let copy_markup_btn = bar_button(
-            "edit-copy-symbolic",
+            "open-mpv-edit-copy-symbolic",
             &Action::MarkupCopy.detailed_name(),
             "Copy annotated image (Ctrl+C)",
         );
         copy_markup_btn.remove_css_class("flat");
-        copy_markup_btn.add_css_class("suggested-action");
+        copy_markup_btn.add_css_class("markup-copy");
         markup_decisions.append(&copy_markup_btn);
         markup_controls.append(&markup_tools);
         markup_controls.append(&markup_decisions);
@@ -1055,6 +1058,16 @@ impl App {
         self.win.add_controller(single_file_drop);
     }
 }
+/// Register the embedded icon bundle once, including when tests construct a Workspace.
+fn register_icons(display: &gdk::Display) {
+    static RESOURCES: std::sync::Once = std::sync::Once::new();
+    RESOURCES.call_once(|| {
+        gio::resources_register_include!("open-mpv.gresource")
+            .expect("the embedded viewer icon resource is valid");
+    });
+    gtk::IconTheme::for_display(display).add_resource_path("/io/github/TheRealShek/OpenMpv/icons");
+}
+
 fn osd_button(icon: &str, action: &str, tooltip: &str) -> gtk::Button {
     let b = gtk::Button::from_icon_name(icon);
     b.set_action_name(Some(action));
@@ -1109,23 +1122,37 @@ fn apply_css(background: &str) {
         .chrome.invisible {{ opacity: 0; }}
         .osd-surface, .osd-btn {{ background-color: rgba(0, 0, 0, 0.62);
             color: #eeeeee; border-radius: 9px; }}
+        .osd-btn:hover {{ background-color: rgba(0, 0, 0, 0.78); }}
         .info-bar {{ padding: 7px 11px; margin: 12px; }}
         .info-bar .position {{ opacity: 0.68; }}
         .window-controls {{ padding: 2px; margin: 12px; }}
         .window-controls button, .osd-bar button, .osd-bar menubutton > button {{
-            min-width: 36px; min-height: 36px; padding: 0; border-radius: 7px; }}
-        .osd-bar menubutton > button {{ background-color: transparent;
+            min-width: 36px; min-height: 36px; padding: 0; border-radius: 7px;
+            color: #eeeeee; background-color: transparent;
             background-image: none; border: none; box-shadow: none; }}
+        .window-controls image, .osd-bar image, .osd-btn image {{
+            -gtk-icon-size: 16px; }}
         .window-controls button:hover, .osd-bar button:hover,
         .osd-bar menubutton > button:hover {{
             background-color: rgba(255, 255, 255, 0.14); }}
+        .window-controls button:active, .osd-bar button:active,
+        .osd-bar menubutton > button:active, .osd-btn:active {{
+            background-color: rgba(255, 255, 255, 0.24); }}
+        .window-controls button:focus-visible, .osd-bar button:focus-visible,
+        .osd-bar menubutton > button:focus-visible, .osd-btn:focus-visible {{
+            outline: 2px solid #eeeeee; outline-offset: -3px; }}
+        .window-controls button:disabled, .osd-bar button:disabled,
+        .osd-bar menubutton > button:disabled, .osd-btn:disabled {{
+            color: rgba(238, 238, 238, 0.38); }}
         .indicator {{ transition: opacity 200ms ease; opacity: 1;
             background-color: rgba(0, 0, 0, 0.55); color: #eeeeee;
             padding: 4px 12px; margin: 12px; border-radius: 6px; }}
         .indicator.invisible {{ opacity: 0; }}
-        .osd-btn {{ background-image: none; border: none; box-shadow: none; }}
+        .osd-btn {{ min-width: 36px; min-height: 36px; padding: 0;
+            background-image: none; border: none; box-shadow: none; }}
         .osd-bar {{ padding: 4px 6px; margin: 12px; }}
         .markup-controls button:checked {{ background-color: rgba(255, 255, 255, 0.22); }}
+        .osd-bar .markup-copy {{ background-color: rgba(255, 255, 255, 0.16); }}
         .osd-bar separator {{ min-width: 1px; margin: 5px 2px;
             background-color: rgba(255, 255, 255, 0.2); }}
         .toast {{ background-color: rgba(25, 25, 25, 0.92); color: #eeeeee;
@@ -1233,6 +1260,79 @@ fn open_menu_model() -> gio::Menu {
 mod tests {
     use super::*;
     use gtk4::prelude::MenuModelExt;
+
+    #[test]
+    #[ignore = "requires a Wayland session; run separately with --ignored --exact"]
+    fn bundled_icons_render_monochrome_across_themes_and_scales() {
+        gtk::init().expect("icon rendering test requires GTK");
+        let display = gdk::Display::default().expect("Wayland display");
+        register_icons(&display);
+        let renderer = gtk::gsk::CairoRenderer::new();
+        renderer
+            .realize_for_display(&display)
+            .expect("offscreen icon renderer");
+        let directory = "/io/github/TheRealShek/OpenMpv/icons/scalable/actions";
+        let files = gio::resources_enumerate_children(directory, gio::ResourceLookupFlags::NONE)
+            .expect("embedded viewer icons");
+
+        for theme_name in ["Adwaita", "Yaru", "hicolor"] {
+            let theme = gtk::IconTheme::new();
+            theme.set_theme_name(Some(theme_name));
+            theme.add_resource_path("/io/github/TheRealShek/OpenMpv/icons");
+            for file in &files {
+                let name = file.strip_suffix(".svg").expect("SVG icon");
+                for (logical_size, scale) in [(16, 1), (24, 1), (16, 2)] {
+                    let icon = theme.lookup_icon(
+                        name,
+                        &[],
+                        logical_size,
+                        scale,
+                        gtk::TextDirection::Ltr,
+                        gtk::IconLookupFlags::empty(),
+                    );
+                    assert_eq!(
+                        icon.file().expect("icon file").uri(),
+                        format!("resource://{directory}/{file}"),
+                        "{theme_name}: {name} must use the bundled artwork"
+                    );
+                    let size = logical_size * scale;
+                    let snapshot = gtk::Snapshot::new();
+                    icon.snapshot_symbolic(
+                        &snapshot,
+                        f64::from(size),
+                        f64::from(size),
+                        &[gdk::RGBA::WHITE; 4],
+                    );
+                    let node = snapshot.to_node().expect("visible icon");
+                    let bounds = gtk::graphene::Rect::new(0.0, 0.0, size as f32, size as f32);
+                    let texture = renderer.render_texture(&node, Some(&bounds));
+                    let mut downloader = gdk::TextureDownloader::new(&texture);
+                    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+                    let (pixels, stride) = downloader.download_bytes();
+                    let mut visible = 0;
+                    for row in pixels.chunks(stride) {
+                        for pixel in row[..size as usize * 4].as_chunks::<4>().0 {
+                            if pixel[3] > 0 {
+                                assert_eq!(pixel[0], pixel[1], "{name} contains color");
+                                assert_eq!(pixel[1], pixel[2], "{name} contains color");
+                                visible += 1;
+                            }
+                        }
+                    }
+                    assert!(visible > 10, "{theme_name}: {name} at {size}px is empty");
+                    if name.contains("object-rotate-") {
+                        let center = size as usize / 2;
+                        assert_eq!(
+                            pixels[center * stride + center * 4 + 3],
+                            0,
+                            "{name} must retain its open outline"
+                        );
+                    }
+                }
+            }
+        }
+        renderer.unrealize();
+    }
 
     // Sections add separators, not rows or submenu depth.
     fn menu_rows(model: &gio::MenuModel) -> Vec<(String, Option<String>, Option<gio::MenuModel>)> {

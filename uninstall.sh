@@ -54,7 +54,8 @@ rm -f "${PREFIX%/}/bin/open-mpv" \
     "${ICON_DIR}/${APP_ID}.svg" \
     "${ICON_DIR}/${LEGACY_APP_ID}.svg" \
     "${DATA_DIR}/metainfo/${APP_ID}.metainfo.xml" \
-    "${DATA_DIR}/licenses/open-mpv/LICENSE"
+    "${DATA_DIR}/licenses/open-mpv/LICENSE" \
+    "${DATA_DIR}/licenses/open-mpv/LICENSE.lucide"
 rmdir "${DATA_DIR}/licenses/open-mpv" 2>/dev/null || true
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
 gtk-update-icon-cache -f -t -q "${DATA_DIR}/icons/hicolor" 2>/dev/null || true

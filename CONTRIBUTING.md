@@ -40,6 +40,26 @@ Validate recipe changes with `shellcheck packaging/arch/PKGBUILD` and
 `bash -n packaging/arch/PKGBUILD`, then rebuild and test the package lifecycle
 as described in the distribution guide. Fedora CI remains required.
 
+The build embeds the viewer's SVG icons using `glib-compile-resources`, supplied
+by GLib with the development stack above. Viewer icons come from Lucide. See the
+[icon source and adaptation notes](data/icons/README.md) before adding or updating
+them. Use the `open-mpv-` icon names in widgets and state updates so desktop themes
+do not replace them.
+GTK's symbolic parser requires paint classes on each shape rather than inherited
+group styles. Outline shapes use `transparent-fill foreground-stroke`; solid
+shapes use `foreground-fill`. Keep the standard SVG paint attributes as well so
+the files also render in ordinary SVG tools.
+
+After changing icons, run the offscreen rendering check in a Wayland session:
+
+```sh
+G_DEBUG=fatal-criticals cargo test --locked window::assembly::tests::bundled_icons_render_monochrome_across_themes_and_scales -- --ignored --exact
+```
+
+It checks embedded icon resolution and monochrome rendering with Adwaita, Yaru
+and the hicolor fallback at normal, fractional and double icon sizes. This does
+not replace visual testing of the full Viewer at actual compositor scales.
+
 ## Check a change
 
 Start with the smallest test that covers the behavior you changed. Before
