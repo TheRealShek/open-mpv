@@ -41,10 +41,10 @@ Validate recipe changes with `shellcheck packaging/arch/PKGBUILD` and
 as described in the distribution guide. Fedora CI remains required.
 
 The build embeds the viewer's SVG icons using `glib-compile-resources`, supplied
-by GLib with the development stack above. The icons in `data/icons` are original
-project artwork under the repository's MIT license. Keep their 20-unit grid and
-consistent stroke weight when adding controls. Use the `open-mpv-` icon names in
-widgets and state updates so desktop themes do not replace them.
+by GLib with the development stack above. Viewer icons come from Lucide. See the
+[icon source and adaptation notes](data/icons/README.md) before adding or updating
+them. Use the `open-mpv-` icon names in widgets and state updates so desktop themes
+do not replace them.
 GTK's symbolic parser requires paint classes on each shape rather than inherited
 group styles. Outline shapes use `transparent-fill foreground-stroke`; solid
 shapes use `foreground-fill`. Keep the standard SVG paint attributes as well so

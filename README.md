@@ -89,7 +89,7 @@ open-mpv ~/Pictures
 
 Move the pointer to show the controls. Right-click the photo or video, or
 click the three-dot button, for more options. Press `?` for all shortcuts.
-Viewer controls use bundled monochrome icons, so their shapes and colors stay
+Viewer controls use bundled monochrome [Lucide icons](https://lucide.dev/), so their shapes and colors stay
 consistent across desktop icon themes.
 Hold the scroll-wheel (middle) button and drag to move the window at any
 zoom. A middle-click without dragging switches between fit and actual size.

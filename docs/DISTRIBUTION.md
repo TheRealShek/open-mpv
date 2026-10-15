@@ -34,6 +34,10 @@ the local transaction and rollback behavior; GitHub hosts the RPM.
   user who wants every supported association.
 - The project is licensed under the MIT License, allowing public
   redistribution.
+- Bundled Lucide icons retain their ISC and Feather MIT notices in
+  `data/icons/LICENSE.lucide`. Keep that notice embedded in the binary and in
+  the installed license directory. The icon source and adaptation details live
+  in [data/icons/README.md](../data/icons/README.md).
 
 ## Options
 
