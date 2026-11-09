@@ -139,6 +139,15 @@ pub struct Player {
     _bus_watch: gst::bus::BusWatchGuard,
 }
 
+/// Transient recovery point captured before releasing a video for Trash.
+#[derive(Clone, Debug)]
+pub struct PlaybackRecovery {
+    position: f64,
+    rate: f64,
+    playing: bool,
+    subtitle: Option<PathBuf>,
+}
+
 impl Player {
     /// Build the pipeline. `on_event` fires on the GTK main loop.
     pub fn new(on_event: impl Fn(Event) + 'static) -> Result<Player, PlayerError> {
@@ -395,6 +404,63 @@ impl Player {
     /// video, using the sidecar already discovered off GTK. The pipeline
     /// object is reused; only its state cycles.
     pub fn play(&self, path: &Path, subtitle: Option<PathBuf>) -> Result<(), PlayerError> {
+        self.play_from(path, subtitle, None)
+    }
+
+    pub fn recovery_point(&self) -> Option<PlaybackRecovery> {
+        let (resume_position, resuming, rate, playing, subtitle) = {
+            let playback = self.playback.borrow();
+            playback.current_video()?;
+            let (position, rate, playing) = playback.resume_point();
+            (
+                position,
+                playback.is_resuming(),
+                if playback.is_resuming() {
+                    rate
+                } else {
+                    playback.requested_rate()
+                },
+                if playback.is_resuming() {
+                    playing
+                } else {
+                    playback.is_playing()
+                },
+                playback.external_subtitle().map(Path::to_path_buf),
+            )
+        };
+        Some(PlaybackRecovery {
+            position: if resuming {
+                resume_position
+            } else {
+                self.progress().map_or_else(
+                    || {
+                        self.playbin
+                            .query_position::<gst::ClockTime>()
+                            .map_or(resume_position, gst::ClockTime::seconds_f64)
+                    },
+                    |(position, _)| position,
+                )
+            },
+            rate,
+            playing,
+            subtitle,
+        })
+    }
+
+    pub fn restore_playback(
+        &self,
+        path: &Path,
+        recovery: &PlaybackRecovery,
+    ) -> Result<(), PlayerError> {
+        self.play_from(path, recovery.subtitle.clone(), Some(recovery))
+    }
+
+    fn play_from(
+        &self,
+        path: &Path,
+        subtitle: Option<PathBuf>,
+        recovery: Option<&PlaybackRecovery>,
+    ) -> Result<(), PlayerError> {
         if let Some(subtitle) = subtitle.as_ref() {
             crate::applog!("player: matched subtitle {}", subtitle.display());
         }
@@ -402,18 +468,40 @@ impl Player {
         let suburi = subtitle.as_deref().map(file_uri).transpose()?;
         self.teardown()?;
         lock_decoder_fallback(&self.decoder_fallback).restore();
-        self.playback
-            .borrow_mut()
-            .start_video(path, subtitle, self.subtitles_default_on.get());
+        self.playback.borrow_mut().start_video(
+            path,
+            subtitle.clone(),
+            self.subtitles_default_on.get(),
+        );
+        if let Some(recovery) = recovery {
+            self.playback.borrow_mut().prepare_subtitle_rebuild(
+                recovery.position,
+                recovery.rate,
+                recovery.playing,
+                subtitle,
+            );
+            self.playback.borrow_mut().set_playing(recovery.playing);
+        }
         configure_uris(&self.playbin, &uri, suburi.as_deref());
-        start_pipeline(&self.playbin, &self.seek_target).map_err(|source| {
+        start_pipeline_in_state(
+            &self.playbin,
+            &self.seek_target,
+            if recovery.is_some() {
+                gst::State::Paused
+            } else {
+                gst::State::Playing
+            },
+        )
+        .map_err(|source| {
             lock_decoder_fallback(&self.decoder_fallback).restore();
             PlayerError::Playback {
                 path: path.to_path_buf(),
                 source,
             }
         })?;
-        self.playback.borrow_mut().playback_started();
+        if recovery.is_none() {
+            self.playback.borrow_mut().playback_started();
+        }
         Ok(())
     }
 
@@ -864,9 +952,17 @@ fn start_pipeline(
     playbin: &gst::Element,
     sink: &gst::Element,
 ) -> Result<(), gst::StateChangeError> {
+    start_pipeline_in_state(playbin, sink, gst::State::Playing)
+}
+
+fn start_pipeline_in_state(
+    playbin: &gst::Element,
+    sink: &gst::Element,
+    state: gst::State,
+) -> Result<(), gst::StateChangeError> {
     let result = sink
         .set_state(gst::State::Ready)
-        .and_then(|_| playbin.set_state(gst::State::Playing));
+        .and_then(|_| playbin.set_state(state));
     if let Err(source) = result {
         if let Err(error) = teardown_pipeline(playbin, sink) {
             eprintln!("open-mpv: failed playback startup cleanup: {error}");

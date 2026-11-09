@@ -121,6 +121,19 @@ new product decisions rather than incidental implementation.
   during this interval. Undo resolves mount-relative paths from both
   `.Trash/<uid>` and `.Trash-<uid>` against the mount root. Undo never overwrites a path recreated
   after deletion and never mutates an unrelated folder or media generation.
+  Retain the exact trash entry from the completed operation; never choose a
+  version by original path or deletion date, including equal timestamps.
+  Claim the payload into private staging on the trash filesystem and verify
+  its identity before moving it to the destination. Missing or replaced
+  entries fail safely without falling back to another version. Return a
+  claimed entry to Trash on failure without replacing concurrent entries. If
+  that rollback conflicts, preserve the staged payload and report its location.
+  If a successful move cannot identify its exact entry, report that Undo is
+  unavailable and direct the user to restore it using Files.
+  A failed video Trash restores the captured position, playback rate, playing
+  or paused state, and transport controls only while the originating media
+  generation remains current. Navigation, reopen, monitor-driven replacement
+  and shutdown prevent that recovery from changing newer media.
 - **FR-5.3 / FR-5.4 / FR-5.5** Explicit rotate-save supports only editable static images. JPEG remains
   lossless; every save path is atomic and preserves either the complete old or
   complete new file across interruption. Replacement preserves the source

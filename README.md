@@ -89,6 +89,13 @@ pending navigation, and Trash stays disabled until loading finishes.
 Opening another folder releases cached images from the previous folder. Switching between photos and videos
 keeps playback controls responsive.
 
+Trash Undo restores the exact file version moved by that operation, including
+when older versions from the same path are already in Trash. It never replaces
+a file recreated at the original path. If the exact trash entry cannot be
+identified, use Files to restore it. If moving a video to Trash fails, playback
+returns to its previous position and playing or paused state, unless you have
+already navigated or opened another session.
+
 If you prefer the terminal:
 
 ```sh

@@ -57,11 +57,16 @@ pub(super) struct UndoToken {
     path: PathBuf,
     set: NavigationSetId,
     return_generation: Option<u64>,
+    receipt: crate::fileops::TrashedFile,
 }
 
 impl UndoToken {
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(super) fn receipt(&self) -> &crate::fileops::TrashedFile {
+        &self.receipt
     }
 }
 
@@ -79,6 +84,7 @@ struct UndoOffer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UndoDisposition {
     Offered(UndoId),
+    Unavailable,
     NewerOfferPreserved,
     OperationSuperseded,
 }
@@ -173,23 +179,46 @@ impl Coordinator {
         }
     }
 
-    pub(super) fn finish_trash(&mut self, token: TrashToken) -> UndoDisposition {
+    #[cfg(test)]
+    pub(super) fn finish_test_trash(&mut self, token: TrashToken) -> UndoDisposition {
+        let receipt = crate::fileops::TrashedFile::test_receipt(token.path());
+        self.finish_trash(token, Some(receipt))
+    }
+
+    pub(super) fn trash_failure_applies(
+        &self,
+        token: &TrashToken,
+        navigation: &Navigation,
+    ) -> bool {
+        self.trash.contains_key(&token.0.id) && token.0.matches_media(navigation)
+    }
+
+    pub(super) fn finish_trash(
+        &mut self,
+        token: TrashToken,
+        receipt: Option<crate::fileops::TrashedFile>,
+    ) -> UndoDisposition {
         let Some(pending) = self.trash.remove(&token.0.id) else {
             return UndoDisposition::OperationSuperseded;
+        };
+        if self
+            .undo
+            .as_ref()
+            .is_some_and(|current| current.token.id > pending.context.id)
+        {
+            return UndoDisposition::NewerOfferPreserved;
+        }
+        let Some(receipt) = receipt else {
+            self.undo = None;
+            return UndoDisposition::Unavailable;
         };
         let undo = UndoToken {
             id: pending.context.id,
             path: pending.context.path,
             set: pending.context.set,
             return_generation: pending.return_generation,
+            receipt,
         };
-        if self
-            .undo
-            .as_ref()
-            .is_some_and(|current| current.token.id > undo.id)
-        {
-            return UndoDisposition::NewerOfferPreserved;
-        }
         let id = UndoId(undo.id);
         self.undo = Some(UndoOffer { token: undo });
         UndoDisposition::Offered(id)
