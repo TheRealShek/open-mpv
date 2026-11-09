@@ -206,7 +206,7 @@ impl App {
                 navigation.current_index()
             };
             if let Some(index) = index {
-                app.show_index(index, Arrival::Direct);
+                app.show_index(index, Arrival::Refresh);
             }
         });
     }
@@ -236,7 +236,11 @@ impl App {
         if self.view.cancel_markup() {
             self.update_cursor();
         }
-        *self.media.borrow_mut() = MediaState::Loading(path.to_path_buf());
+        let snapshot = self.media.borrow().static_snapshot(path);
+        *self.media.borrow_mut() = MediaState::Loading {
+            path: path.to_path_buf(),
+            snapshot,
+        };
         self.update_control_mode();
         self.schedule_decodes(index, None);
         true
@@ -276,7 +280,9 @@ impl App {
                                 }
                                 if current && same_set && !app.shutting_down.get() {
                                     let loading = match &*app.media.borrow() {
-                                        MediaState::Loading(path) if paths.contains(path) => {
+                                        MediaState::Loading { path, .. }
+                                            if paths.contains(path) =>
+                                        {
                                             Some(path.clone())
                                         }
                                         _ => None,
@@ -342,13 +348,27 @@ impl App {
             FsChange::PendingRename { new, .. } => Some(new.clone()),
             _ => None,
         };
-        let (before_generation, presentation) = {
+        // The model decides whether a rename's destination still belongs to
+        // this set, including failed validation and cross-folder moves.
+        let rename_target = match &change {
+            FsChange::Remove(_) => None,
+            FsChange::PendingRename { new, .. } | FsChange::Rename { new, .. } => Some(new.clone()),
+        };
+        let snapshot = if self.operations.borrow().is_trashing(&path) {
+            None
+        } else {
+            self.media.borrow().static_snapshot(&path)
+        };
+        let (before_generation, presentation, source_removed) = {
             let mut navigation = self.navigation.borrow_mut();
             let before = navigation.generation();
             let Some(presentation) = apply_fs_change_for_set(&mut navigation, set, change) else {
                 return;
             };
-            (before, presentation)
+            let source_removed = rename_target
+                .as_deref()
+                .is_none_or(|new| navigation.index_of(new).is_none());
+            (before, presentation, source_removed)
         };
         for path in invalidated {
             self.cache.invalidate(&path);
@@ -364,24 +384,57 @@ impl App {
                 ""
             }
         );
-        match presentation {
-            FsPresentation::Show(destination) => {
-                if pending_target.as_deref() == Some(destination.path.as_path()) {
-                    self.fs_refresh_timer.cancel();
-                    self.stop_animation();
-                    self.svg_timer.cancel();
-                    self.stop_video();
-                    if !self.invalidate_image(&destination.path) {
-                        *self.media.borrow_mut() = MediaState::Loading(destination.path.clone());
-                        self.update_control_mode();
-                    }
-                    self.set_current_name(Some(&destination.path));
-                } else {
-                    self.show_destination(destination, Arrival::Direct);
-                }
+        if let Some(snapshot) = snapshot.filter(|_| source_removed) {
+            if let Some(handoff) = self.handoff.borrow().as_ref() {
+                handoff.cancel();
             }
-            FsPresentation::Empty => self.empty_state("No media left in this folder"),
-            FsPresentation::Unchanged => {}
+            self.fs_refresh_timer.cancel();
+            self.svg_timer.cancel();
+            self.decodes.borrow_mut().cancel_all();
+            self.navigation.borrow_mut().clear_current();
+            self.cache.retain_folder(None);
+            *self.media.borrow_mut() = MediaState::Image {
+                path: path.clone(),
+                decoded: snapshot.decoded,
+                mime: snapshot.mime,
+                detached: true,
+            };
+            self.hide_status();
+            self.update_control_mode();
+            self.update_save_enabled();
+            self.show_toast("Source moved or removed");
+        } else if !self.media.borrow().detached() {
+            match presentation {
+                FsPresentation::Show(destination) => {
+                    if pending_target.as_deref() == Some(destination.path.as_path()) {
+                        self.fs_refresh_timer.cancel();
+                        self.stop_animation();
+                        self.svg_timer.cancel();
+                        self.stop_video();
+                        // A known rename carries the visible static pixels to
+                        // its new logical source while validation is pending.
+                        let snapshot = self.media.borrow().static_snapshot(&path);
+                        if snapshot.is_some() {
+                            *self.media.borrow_mut() = MediaState::Loading {
+                                path: destination.path.clone(),
+                                snapshot,
+                            };
+                        }
+                        if !self.invalidate_image(&destination.path) {
+                            *self.media.borrow_mut() = MediaState::Loading {
+                                path: destination.path.clone(),
+                                snapshot: None,
+                            };
+                            self.update_control_mode();
+                        }
+                        self.set_current_name(Some(&destination.path));
+                    } else {
+                        self.show_destination(destination, Arrival::Refresh);
+                    }
+                }
+                FsPresentation::Empty => self.empty_state("No media left in this folder"),
+                FsPresentation::Unchanged => {}
+            }
         }
         self.update_pos_label();
         if removal {

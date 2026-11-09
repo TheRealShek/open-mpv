@@ -84,6 +84,7 @@ enum Direction {
 #[derive(Clone, Copy)]
 enum Arrival {
     Direct,
+    Refresh,
     Step { direction: Direction, budget: u32 },
 }
 
@@ -92,20 +93,62 @@ enum Arrival {
 /// unrepresentable while the reusable video pipeline remains lazy.
 enum MediaState {
     Empty,
-    Loading(PathBuf),
+    Loading {
+        path: PathBuf,
+        snapshot: Option<StaticSnapshot>,
+    },
     Image {
         path: PathBuf,
         decoded: Rc<Decoded>,
         mime: String,
+        detached: bool,
     },
     Video(PathBuf),
     Error(PathBuf),
 }
 
+/// The one static image still visible while a background reload is pending.
+#[derive(Clone)]
+struct StaticSnapshot {
+    decoded: Rc<Decoded>,
+    mime: String,
+}
+
 impl MediaState {
+    fn static_snapshot(&self, source: &Path) -> Option<StaticSnapshot> {
+        match self {
+            Self::Image {
+                path,
+                decoded,
+                mime,
+                detached: false,
+            } if path == source && matches!(&**decoded, Decoded::Static { .. }) => {
+                Some(StaticSnapshot {
+                    decoded: decoded.clone(),
+                    mime: mime.clone(),
+                })
+            }
+            Self::Loading { path, snapshot } if path == source => snapshot.clone(),
+            _ => None,
+        }
+    }
+
+    fn detached(&self) -> bool {
+        matches!(self, Self::Image { detached: true, .. })
+    }
+
+    /// A retained snapshot and a loading destination have no actionable source.
+    fn source_path(&self) -> Option<&Path> {
+        if self.detached() || matches!(self, Self::Loading { .. }) {
+            None
+        } else {
+            self.path()
+        }
+    }
+
     fn path(&self) -> Option<&Path> {
         match self {
-            MediaState::Loading(path)
+            MediaState::Loading { path, .. }
             | MediaState::Image { path, .. }
             | MediaState::Video(path)
             | MediaState::Error(path) => Some(path),
@@ -239,6 +282,10 @@ impl App {
         if self.shutting_down.get() {
             return;
         }
+        if self.media.borrow().detached() {
+            self.clear_media();
+        }
+        self.present_default();
         let Some(job) = self.open_scans.borrow_mut().request(path.to_path_buf()) else {
             return;
         };
@@ -418,7 +465,8 @@ impl App {
         *self.monitor.borrow_mut() = monitor;
     }
 
-    /// Present the window for states with no image to size from.
+    /// Request activation only for startup and deliberate opens/activation.
+    /// Async presentation updates may size the window but must never raise it.
     pub fn present_default(&self) {
         if !self.presented.get() {
             self.win.set_default_size(800, 600);
@@ -433,6 +481,8 @@ impl App {
         let destination = self.navigation.borrow_mut().select(idx);
         if let Some(destination) = destination {
             self.show_destination(destination, arrival);
+        } else if self.media.borrow().detached() {
+            self.empty_state("No media left in this folder");
         }
     }
 
@@ -445,10 +495,19 @@ impl App {
         let idx = destination.index;
         let path = destination.path.clone();
         let generation = destination.generation;
-        *self.media.borrow_mut() = MediaState::Loading(path.clone());
+        let snapshot = if matches!(arrival, Arrival::Refresh) {
+            self.media.borrow().static_snapshot(&path)
+        } else {
+            None
+        };
+        *self.media.borrow_mut() = MediaState::Loading {
+            path: path.clone(),
+            snapshot,
+        };
         self.update_control_mode();
         self.cache.pin(&path);
         self.set_current_name(Some(&path));
+        self.show_status("Loading…");
         self.update_pos_label();
         // Stop any active video playback immediately so sound and frames
         // do not continue while loading or discovering sidecars.
@@ -617,9 +676,6 @@ impl App {
         if self.chrome_visible() {
             self.start_transport_tick();
         }
-        // Dimensions arrive with preroll; until then present at the
-        // default size rather than blocking on the pipeline.
-        self.present_default();
     }
 
     fn stop_video(&self) {
@@ -688,6 +744,9 @@ impl App {
         self.operations.borrow_mut().clear();
         self.set_idle_inhibited(false);
         self.wayland_idle.borrow_mut().take();
+        self.view.clear();
+        *self.media.borrow_mut() = MediaState::Empty;
+        self.cache.retain_folder(None);
 
         // Taking the player also drops its bus-watch guard after stop reaches
         // Null, so no streaming callback can outlive process shutdown.
@@ -1368,6 +1427,7 @@ impl App {
             path,
             decoded: decoded.clone(),
             mime,
+            detached: false,
         };
         if matches!(&*decoded, Decoded::Animated { .. }) {
             let playback = Rc::new(animation::Playback::default());
@@ -1390,7 +1450,7 @@ impl App {
             self.spawn_animation(decoded, generation);
         }
         self.update_save_enabled();
-        self.maybe_first_present(size);
+        self.size_to_media(size);
     }
 
     fn stop_animation(&self) {
@@ -1631,7 +1691,6 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
         ));
-        self.present_default();
     }
 
     fn empty_state(self: &Rc<Self>, message: &str) {
@@ -1641,19 +1700,6 @@ impl App {
         self.set_current_name(None);
         self.update_pos_label();
         self.show_status(message);
-        self.present_default();
-    }
-
-    /// First image decides the initial window size: the image at 100%,
-    /// capped at 85% of the monitor work area (FR-6.6).
-    fn maybe_first_present(&self, size: (f64, f64)) {
-        if !self.presented.get() {
-            self.size_to_media(size);
-            self.presented.set(true);
-            // The cold-start metric (NFR-1.1): launch → first present.
-            crate::applog!("first present: window shown");
-        }
-        self.win.present();
     }
 
     /// Size the window to `size` at 100%, capped at 85% of the monitor
@@ -1728,6 +1774,9 @@ impl App {
                     budget: SKIP_BUDGET,
                 },
             ),
+            None if self.media.borrow().detached() => {
+                self.empty_state("No media left in this folder");
+            }
             None => self.flash(match direction {
                 Direction::Next => "Last image",
                 Direction::Previous => "First image",
@@ -1763,6 +1812,9 @@ impl App {
     // ----- file operations (FR-5) --------------------------------------
 
     fn trash_current(self: &Rc<Self>) {
+        if !Action::Trash.enabled(self.workspace_state()) {
+            return;
+        }
         let Some(path) = self.current_path() else {
             return;
         };
@@ -1853,6 +1905,9 @@ impl App {
     }
 
     fn undo_trash(self: &Rc<Self>) {
+        if self.media.borrow().detached() {
+            return;
+        }
         let Some(token) = self.operations.borrow_mut().begin_undo() else {
             return;
         };
@@ -1936,6 +1991,9 @@ impl App {
     }
 
     fn save_rotation(self: &Rc<Self>) {
+        if !self.save_availability().0 {
+            return;
+        }
         let rotation = self.view.rotation();
         let (path, mime) = match &*self.media.borrow() {
             MediaState::Image { path, mime, .. } => (path.clone(), mime.clone()),
@@ -2012,6 +2070,7 @@ impl App {
     fn save_availability(&self) -> (bool, String) {
         let media = self.media.borrow();
         let reason = match &*media {
+            MediaState::Image { detached: true, .. } => Some("Source moved or removed".into()),
             MediaState::Image { decoded, mime, .. }
                 if matches!(&**decoded, Decoded::Static { .. }) =>
             {
@@ -2236,7 +2295,7 @@ impl App {
     fn workspace_state(&self) -> WorkspaceState {
         let media = match &*self.media.borrow() {
             MediaState::Empty => Media::Empty,
-            MediaState::Loading(_) => Media::Loading,
+            MediaState::Loading { .. } => Media::Loading,
             MediaState::Image { decoded, .. } if matches!(&**decoded, Decoded::Animated { .. }) => {
                 Media::AnimatedImage
             }
@@ -2249,8 +2308,9 @@ impl App {
         let markup = self.view.markup_status();
         WorkspaceState {
             media,
-            has_navigation: !self.navigation.borrow().is_empty(),
-            can_handoff: self.media.borrow().path().is_some()
+            has_navigation: !self.navigation.borrow().is_empty() || self.media.borrow().detached(),
+            can_trash: self.media.borrow().source_path().is_some(),
+            can_handoff: self.media.borrow().source_path().is_some()
                 && self.handoff.borrow().is_none()
                 && !self.shutting_down.get(),
             pannable: self.view.is_pannable(),
@@ -2261,7 +2321,7 @@ impl App {
                 && !self.view.markup_has_draft(),
             markup_can_undo: markup.is_some_and(|status| status.can_undo),
             can_save: self.save_availability().0,
-            can_undo_trash: self.operations.borrow().has_undo(),
+            can_undo_trash: !self.media.borrow().detached() && self.operations.borrow().has_undo(),
             help_visible: self.help_label.is_visible(),
             fullscreen: self.win.is_fullscreen(),
         }
@@ -2321,7 +2381,10 @@ impl App {
             Command::Next => self.navigate(Direction::Next),
             Command::Previous => self.navigate(Direction::Previous),
             Command::First => self.show_index(0, Arrival::Direct),
-            Command::Last => self.show_index(self.navigation.borrow().len() - 1, Arrival::Direct),
+            Command::Last => {
+                let index = self.navigation.borrow().len().saturating_sub(1);
+                self.show_index(index, Arrival::Direct);
+            }
             Command::ToggleAnimation => {
                 if let Some(playback) = self.animation.borrow().as_ref() {
                     playback.toggle();

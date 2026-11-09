@@ -52,8 +52,15 @@ new product decisions rather than incidental implementation.
 - **FR-3.1 / FR-3.3** Next, Previous, First and Last use the same typed actions from keys, controls
   and gestures. Reaching an end without wrapping gives subtle feedback.
 - **FR-3.4 / FR-3.5** Folder additions, removals and renames update the set while preserving the
-  logical current item. Removing the current item lands on its nearest
-  remaining position rather than the first item.
+  logical current item. Explicit Trash of the current item lands on its nearest
+  remaining position rather than the first item. External disappearance of a
+  displayed static image retains one in-memory snapshot until explicit navigation,
+  another open or close. The live set still updates, with no selected source for
+  the snapshot. Show a brief "Source moved or removed" message and disable Trash,
+  Rotate Save, trash Undo and external handoff. Recreating the old path never
+  reattaches the snapshot. Same-folder supported renames follow their known new
+  path. Animated images, SVG and video keep the normal replacement/empty behavior.
+  Retention never creates disk state or an image history.
 - **FR-3.5** External image content changes, additions/replacements, removals and
   renames invalidate affected cached images and pending decodes as soon as
   their monitor events arrive, before asynchronous metadata queries complete.
@@ -63,8 +70,8 @@ new product decisions rather than incidental implementation.
   Refresh reloads the current image with the normal view reset and clears
   transient Quick Markup. Animation and SVG work for the old contents is rejected.
   Navigation, folder replacement, clearing and shutdown cancel deferred refresh.
-  Content notifications do not restart video playback. Existing removal and
-  rename navigation behavior still applies, including delete/recreate races.
+  Content notifications do not restart video playback. The static-image retention
+  rule above applies to external removals, including delete/recreate races.
   A reported rename moves known entries to their new logical path immediately,
   retaining provisional metadata until the destination query completes. Reload
   waits for validation. Later deletion, another rename, source recreation or
@@ -109,8 +116,10 @@ new product decisions rather than incidental implementation.
 ### FR-5 — File, clipboard and editing safety
 
 - **FR-5.1 / FR-5.2** Trash immediately moves the current item to freedesktop trash and offers a
-  short Undo. Undo resolves mount-relative paths from both `.Trash/<uid>` and
-  `.Trash-<uid>` against the mount root. Undo never overwrites a path recreated
+  short Undo. Trash is unavailable while a destination is loading, when the
+  displayed pixels may still belong to the previous file. Show a loading message
+  during this interval. Undo resolves mount-relative paths from both
+  `.Trash/<uid>` and `.Trash-<uid>` against the mount root. Undo never overwrites a path recreated
   after deletion and never mutates an unrelated folder or media generation.
 - **FR-5.3 / FR-5.4 / FR-5.5** Explicit rotate-save supports only editable static images. JPEG remains
   lossless; every save path is atomic and preserves either the complete old or
@@ -154,7 +163,7 @@ new product decisions rather than incidental implementation.
   exclude shell-reserved space where the platform exposes usable bounds;
   the window's monitor geometry also limits sizing when available. Placement
   remains compositor-owned. Subsequent media reuses the window size; the
-  initial video may resize once when preroll supplies its dimensions.
+  initial media may resize once after loading or preroll supplies its dimensions.
 - **FR-6.7** Escape unwinds the active draft, focused mode, Explorer destination and
   fullscreen before closing. Quit closes immediately and leaves no process.
 - **NFR-5.2** A generated help surface documents every active action and binding.
@@ -163,7 +172,10 @@ new product decisions rather than incidental implementation.
 
 - **FR-7.1** The permanent application ID is `io.github.TheRealShek.OpenMpv`.
 - **FR-7.1** GTK application activation provides one process and one active Workspace.
-  Opening another path replaces the current media and raises the Workspace.
+  Opening another path replaces the current media and raises the Workspace once,
+  before asynchronous scan or decoding completes. Startup and deliberate activation
+  also present it. Background monitor updates, decode completion, video preroll,
+  errors and empty-folder transitions never request activation or change workspace.
 - **FR-7.2** Multiple windows or side-by-side comparison require a future product
   decision and must not be introduced accidentally.
 
@@ -315,7 +327,9 @@ new product decisions rather than incidental implementation.
   directory, including the previous foreground entry; same-folder opens retain
   useful cache hits. Empty and error presentation releases all cached images
   without discarding the Navigation set or Trash Undo state. Cancelled decode
-  completions cannot restore released entries.
+  completions cannot restore released entries. A detached static snapshot keeps
+  only its displayed image, releases cached neighbors and cancels pending decoding.
+  Navigation, another open and close release that snapshot.
 - **NFR-1.3 / NFR-2.1b** Viewer first-frame decoding has at most two active jobs,
   including jobs awaiting cancellation, and at most three queued requests
   (the current image and two neighbors). Requests for the same path share
