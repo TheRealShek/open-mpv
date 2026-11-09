@@ -70,6 +70,8 @@ Opening a file lets you browse the other supported photos and videos in the
 same folder. Opening a folder starts with its first supported file.
 Folder and automatic subtitle discovery run in the background so an already
 open window stays responsive while storage is busy. The latest open request wins.
+External subtitles are checked in the background too. Only readable regular
+files are accepted, and navigating or closing discards pending attachment results.
 Edits made by another application refresh the current image after file-change
 notifications settle. Cached neighbors are invalidated too. Refreshing resets
 the image view and clears any transient Quick Markup. Background refreshes,
