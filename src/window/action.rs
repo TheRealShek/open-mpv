@@ -73,6 +73,7 @@ pub(super) struct WorkspaceState {
     pub media: Media,
     pub has_navigation: bool,
     pub can_handoff: bool,
+    pub can_trash: bool,
     pub pannable: bool,
     pub marking: bool,
     pub markup_draft: bool,
@@ -438,7 +439,11 @@ impl Action {
             A::MarkupCopy if state.markup_can_copy => C::CopyMarkup,
             A::MarkupClear if state.marking && state.markup_shapes => C::ClearMarkup,
             A::Save if image && state.can_save && normal => C::Save,
-            A::Trash if !matches!(media, Media::Empty) && normal => C::Trash,
+            A::Trash
+                if !matches!(media, Media::Empty | Media::Loading) && state.can_trash && normal =>
+            {
+                C::Trash
+            }
             A::Undo if state.markup_can_undo => C::MarkupUndo,
             A::Undo if normal && state.can_undo_trash => C::TrashUndo,
             A::Fullscreen => C::ToggleFullscreen,
@@ -497,6 +502,7 @@ mod tests {
             media,
             has_navigation: false,
             can_handoff: false,
+            can_trash: true,
             pannable: false,
             marking: false,
             markup_draft: false,
@@ -508,6 +514,16 @@ mod tests {
             help_visible: false,
             fullscreen: false,
         }
+    }
+
+    #[test]
+    fn trash_is_unavailable_while_destination_is_loading() {
+        assert_eq!(Action::Trash.resolve(state(Media::Loading)), None);
+        assert_eq!(Action::Trash.resolve(state(Media::Empty)), None);
+        assert_eq!(
+            Action::Trash.resolve(state(Media::Error)),
+            Some(Command::Trash)
+        );
     }
 
     #[test]

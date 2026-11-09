@@ -139,6 +139,12 @@ impl Coordinator {
         Some(token)
     }
 
+    pub(super) fn is_trashing(&self, path: &Path) -> bool {
+        self.trash
+            .values()
+            .any(|pending| pending.context.path == path)
+    }
+
     pub(super) fn trash_applies(&self, token: &TrashToken, navigation: &Navigation) -> bool {
         self.trash.contains_key(&token.0.id) && token.0.matches_set(navigation)
     }

@@ -26,7 +26,7 @@ impl App {
         }
         // Presentation owns the source. Navigation may already be moving
         // toward a different destination when this action is invoked.
-        let Some(path) = self.media.borrow().path().map(Path::to_path_buf) else {
+        let Some(path) = self.media.borrow().source_path().map(Path::to_path_buf) else {
             return;
         };
         let file = gio::File::for_path(&path);

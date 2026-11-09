@@ -216,17 +216,16 @@ fn external_image_edits_refresh_current_and_cached_contents() {
         app.show_index(0, Arrival::Direct);
         wait_for_image(&app, &path, 5).await;
 
-        // Removal selects the remaining item; recreating the path must never
-        // restore its old cached pixels or steal the current selection.
+        // Removal retains the viewed snapshot. Recreating the path must never
+        // reattach it or reload the new contents before explicit navigation.
         std::fs::remove_file(&path).unwrap();
-        wait_for_image(&app, &neighbor, 10).await;
+        glib::timeout_future(Duration::from_millis(250)).await;
+        assert!(app.media.borrow().detached());
         assert!(!app.cache.contains(&path));
         write_test_image(&path, 6);
         glib::timeout_future(Duration::from_millis(250)).await;
-        assert_eq!(
-            app.navigation.borrow().current_path(),
-            Some(neighbor.as_path())
-        );
+        assert!(app.media.borrow().detached());
+        assert_eq!(app.navigation.borrow().current_path(), None);
         let index = app.navigation.borrow().index_of(&path).unwrap();
         app.show_index(index, Arrival::Direct);
         wait_for_image(&app, &path, 6).await;
@@ -257,12 +256,15 @@ fn content_events_reject_late_successes_and_coalesce_refresh() {
         let neighbors = (!foreground).then(|| path.clone());
         app.decodes.borrow_mut().replace(demand, neighbors);
         let job = app.decodes.borrow_mut().start().unwrap();
-        *app.media.borrow_mut() = MediaState::Loading(path.clone());
+        *app.media.borrow_mut() = MediaState::Loading {
+            path: path.clone(),
+            snapshot: None,
+        };
         app.on_fs_event(set, &file, None, gio::FileMonitorEvent::Changed);
         assert!(job.cancellable.is_cancelled());
         app.on_decode_completed(path.clone(), Ok((test_image(2), "image/png".into())));
         assert!(!app.cache.contains(&path));
-        assert!(matches!(*app.media.borrow(), MediaState::Loading(_)));
+        assert!(matches!(*app.media.borrow(), MediaState::Loading { .. }));
     }
     for _ in 0..100 {
         app.on_fs_event(set, &file, None, gio::FileMonitorEvent::ChangesDoneHint);
@@ -323,7 +325,7 @@ fn renamed_image_waits_for_metadata_before_reloading() {
         );
         glib::timeout_future(Duration::from_millis(250)).await;
         assert!(
-            matches!(*app.media.borrow(), MediaState::Loading(_)),
+            matches!(*app.media.borrow(), MediaState::Loading { .. }),
             "must not decode the vanished source while metadata is pending"
         );
         assert!(app.fs_refresh_timer.0.borrow().is_none());
@@ -332,8 +334,8 @@ fn renamed_image_waits_for_metadata_before_reloading() {
         gate.cancel();
         wait_for_image(&app, &new, 3).await;
 
-        // A destination that no longer resolves to a regular file follows
-        // removal policy instead of leaving the old image permanently Loading.
+        // A destination that vanishes before validation detaches the static
+        // snapshot instead of leaving it permanently Loading.
         let broken = dir.path().join("broken.png");
         std::fs::rename(&new, &broken).unwrap();
         std::fs::remove_file(&broken).unwrap();
@@ -345,7 +347,7 @@ fn renamed_image_waits_for_metadata_before_reloading() {
             gio::FileMonitorEvent::Renamed,
         );
         let start = std::time::Instant::now();
-        while !matches!(*app.media.borrow(), MediaState::Empty) {
+        while !app.media.borrow().detached() {
             assert!(start.elapsed() < Duration::from_secs(5));
             glib::timeout_future(Duration::from_millis(5)).await;
         }
@@ -393,7 +395,7 @@ fn pending_rename_survives_deletion_and_a_second_rename() {
                     None,
                     gio::FileMonitorEvent::Deleted,
                 );
-                wait_for_image(&app, &neighbor, 10).await;
+                assert!(app.media.borrow().detached());
             } else if mode == 1 {
                 std::fs::rename(&intermediate, &final_path).unwrap();
                 app.on_fs_event(
@@ -423,6 +425,12 @@ fn pending_rename_survives_deletion_and_a_second_rename() {
             glib::timeout_future(Duration::from_millis(150)).await;
             monitor::SNAPSHOT_TEST_GATE.with(|slot| slot.borrow_mut().take());
             gate.cancel();
+            if deleted {
+                assert!(matches!(&*app.media.borrow(), MediaState::Image { path, decoded, detached: true, .. }
+                    if path == &intermediate && decoded.first_texture().width() == 3));
+                assert_eq!(app.navigation.borrow().current_path(), None);
+                app.dispatch_action(Action::Next);
+            }
             let (expected, width) = match mode {
                 0 => (&neighbor, 10),
                 1 => (&final_path, 3),
@@ -698,4 +706,202 @@ fn rotate_save_and_trash_undo_reload_after_cache_cleanup() {
         assert_eq!(app.navigation.borrow().set_id(), set);
         app.shutdown();
     });
+}
+
+#[test]
+#[ignore = "requires an isolated Wayland session; run separately"]
+fn background_presentation_never_shows_an_unpresented_window() {
+    let app = edit_test_app();
+    let path = PathBuf::from("/tmp/background.png");
+    app.apply_decoded(path.clone(), test_image(3), "image/png".into(), 0);
+    assert!(
+        !app.win.is_visible(),
+        "decode completion requested presentation"
+    );
+    app.show_error(&path, "test error");
+    assert!(!app.win.is_visible(), "error requested presentation");
+    app.empty_state("test empty");
+    assert!(!app.win.is_visible(), "empty state requested presentation");
+    app.present_default();
+    assert!(app.win.is_visible(), "deliberate activation must present");
+    app.shutdown();
+    app.win.destroy();
+}
+
+#[test]
+#[ignore = "requires an isolated Wayland session; run separately"]
+fn external_moves_retain_one_static_image_and_disable_source_actions() {
+    let app = edit_test_app();
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.png");
+    let neighbor = dir.path().join("b.png");
+    write_test_image(&path, 3);
+    write_test_image(&neighbor, 10);
+    app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+    app.show_index(0, Arrival::Direct);
+    glib::MainContext::default().block_on(async {
+        wait_for_image(&app, &path, 3).await;
+        let snapshot = match &*app.media.borrow() {
+            MediaState::Image { decoded, .. } => Rc::downgrade(decoded),
+            _ => unreachable!(),
+        };
+        std::fs::rename(&path, outside.path().join("a.png")).unwrap();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        assert!(matches!(&*app.media.borrow(), MediaState::Image { path: shown, .. } if shown == &path));
+        assert!(snapshot.upgrade().is_some());
+        for action in [Action::Trash, Action::Save, Action::ShowInFiles, Action::OpenWith, Action::Undo] {
+            assert!(!action.enabled(app.workspace_state()), "{action:?}");
+            app.dispatch_action(action);
+        }
+        assert!(neighbor.exists());
+        // Recreating the old path and removing every neighbor must leave the
+        // same pixels detached, with no cached history or source reattachment.
+        write_test_image(&path, 7);
+        std::fs::remove_file(&neighbor).unwrap();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        assert!(matches!(&*app.media.borrow(), MediaState::Image { decoded, .. } if decoded.first_texture().width() == 3));
+        app.dispatch_action(Action::Next);
+        wait_for_image(&app, &path, 7).await;
+        assert!(snapshot.upgrade().is_none());
+        std::fs::remove_file(&path).unwrap();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        assert!(matches!(*app.media.borrow(), MediaState::Image { .. }));
+        assert!(app.navigation.borrow().is_empty());
+        app.shutdown();
+        assert!(matches!(*app.media.borrow(), MediaState::Empty));
+    });
+    app.win.destroy();
+}
+
+#[test]
+#[ignore = "requires an isolated Wayland session; run separately"]
+fn delayed_navigation_never_trashes_the_loading_destination() {
+    let app = edit_test_app();
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.png");
+    let b = dir.path().join("b.png");
+    write_test_image(&a, 3);
+    write_test_image(&b, 10);
+    app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+    app.show_index(0, Arrival::Direct);
+    glib::MainContext::default().block_on(async {
+        wait_for_image(&app, &a, 3).await;
+        app.cache.invalidate(&b);
+        let gate = gio::Cancellable::new();
+        loader::SLOW_TEST.with(|slot| *slot.borrow_mut() = Some((Vec::new(), gate.clone())));
+        for _ in 0..5 {
+            app.show_index(1, Arrival::Direct);
+            assert!(matches!(*app.media.borrow(), MediaState::Loading { .. }));
+            assert!(!Action::Trash.enabled(app.workspace_state()));
+            app.dispatch_action(Action::Trash);
+            app.trash_current();
+            assert!(a.exists() && b.exists());
+            assert!(app.status_area.get_visible());
+            app.show_index(0, Arrival::Direct);
+        }
+        app.shutdown();
+        loader::SLOW_TEST.with(|slot| slot.borrow_mut().take());
+        gate.cancel();
+        glib::timeout_future(Duration::from_millis(100)).await;
+    });
+    app.win.destroy();
+}
+
+#[test]
+#[ignore = "requires an isolated Wayland session; run separately"]
+fn cross_folder_rename_and_late_save_keep_snapshot_until_navigation() {
+    let app = edit_test_app();
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let path = dir.path().join("only.png");
+    let moved = outside.path().join("only.png");
+    write_test_image(&path, 3);
+    app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+    app.monitor.borrow_mut().take().unwrap().cancel();
+    app.show_index(0, Arrival::Direct);
+    glib::MainContext::default().block_on(async {
+        wait_for_image(&app, &path, 3).await;
+        let save = app
+            .operations
+            .borrow_mut()
+            .start_save(&app.navigation.borrow(), &path)
+            .unwrap();
+        let set = app.navigation.borrow().set_id().unwrap();
+        std::fs::rename(&path, &moved).unwrap();
+        app.on_fs_event(
+            set,
+            &gio::File::for_path(&path),
+            Some(&gio::File::for_path(&moved)),
+            gio::FileMonitorEvent::Renamed,
+        );
+        glib::timeout_future(Duration::from_millis(200)).await;
+        assert!(app.media.borrow().detached());
+        assert!(app.navigation.borrow().is_empty());
+        assert!(
+            app.operations
+                .borrow_mut()
+                .finish_save(&save, &app.navigation.borrow())
+                .is_none()
+        );
+        app.dispatch_action(Action::Last);
+        assert!(matches!(*app.media.borrow(), MediaState::Empty));
+        app.shutdown();
+    });
+    app.win.destroy();
+}
+
+#[test]
+#[ignore = "requires an isolated Wayland session; run separately"]
+fn deliberate_open_presents_once_before_delayed_results() {
+    let app = edit_test_app();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.png");
+    write_test_image(&path, 3);
+    app.open_path(&path);
+    assert!(app.win.get_visible());
+    app.win.set_visible(false);
+    glib::MainContext::default().block_on(async {
+        wait_for_image(&app, &path, 3).await;
+        assert!(!app.win.get_visible(), "decode must not present again");
+        app.open_path(dir.path().join("missing.png").as_path());
+        assert!(app.win.get_visible());
+        app.win.set_visible(false);
+        let started = std::time::Instant::now();
+        while !matches!(*app.media.borrow(), MediaState::Error(_)) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        assert!(!app.win.get_visible(), "error must not present again");
+        app.present_default();
+        assert!(app.win.get_visible());
+        app.shutdown();
+    });
+    app.win.destroy();
+}
+
+#[test]
+#[ignore = "requires an isolated Wayland session; run separately"]
+fn removal_during_background_refresh_retains_the_displayed_static_pixels() {
+    let app = edit_test_app();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.png");
+    write_test_image(&path, 3);
+    app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+    app.monitor.borrow_mut().take().unwrap().cancel();
+    app.show_index(0, Arrival::Direct);
+    glib::MainContext::default().block_on(async {
+        wait_for_image(&app, &path, 3).await;
+        let set = app.navigation.borrow().set_id().unwrap();
+        let file = gio::File::for_path(&path);
+        app.on_fs_event(set, &file, None, gio::FileMonitorEvent::Changed);
+        std::fs::remove_file(&path).unwrap();
+        app.on_fs_event(set, &file, None, gio::FileMonitorEvent::Deleted);
+        assert!(app.media.borrow().detached());
+        assert!(matches!(&*app.media.borrow(), MediaState::Image { decoded, .. } if decoded.first_texture().width() == 3));
+        app.open_path(dir.path());
+        assert!(matches!(*app.media.borrow(), MediaState::Empty));
+        app.shutdown();
+    });
+    app.win.destroy();
 }
