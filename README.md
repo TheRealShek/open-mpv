@@ -22,7 +22,9 @@ to manage, and no tracking or network access.
 - Pause videos, seek, change speed and volume, and choose audio or subtitles.
 - Move unwanted files to trash and use Undo to bring them back shortly after.
 - Save a rotation in supported image formats. JPEG rotations keep the original
-  image quality.
+  image quality. Saves check for source changes and reject detected conflicts.
+  Reopen the file before trying again. See the
+  [save guarantees](docs/REQUIREMENTS.md).
 - Use **Quick Markup** to draw boxes and arrows on a still image, then copy the
   result to the clipboard.
 
