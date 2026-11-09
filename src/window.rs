@@ -161,6 +161,19 @@ const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_TIMEOUT: Duration = Duration::from_millis(1200);
 const SVG_DEBOUNCE: Duration = Duration::from_millis(200);
 
+#[derive(Clone)]
+struct SubtitleRequest {
+    path: PathBuf,
+    video: PathBuf,
+    generation: u64,
+}
+
+impl SubtitleRequest {
+    fn is_current(&self, generation: u64, video: Option<&Path>, shutting_down: bool) -> bool {
+        !shutting_down && self.generation == generation && video == Some(self.video.as_path())
+    }
+}
+
 pub struct App {
     pub win: gtk::ApplicationWindow,
     cfg: Config,
@@ -172,6 +185,7 @@ pub struct App {
     fs_refresh_timer: TimerSlot,
     open_scans: RefCell<ScanQueue<PathBuf>>,
     sidecar_scans: RefCell<ScanQueue<Destination>>,
+    subtitle_attachments: RefCell<ScanQueue<SubtitleRequest>>,
     media: RefCell<MediaState>,
     animation: RefCell<Option<Rc<animation::Playback>>>,
     animation_btn: gtk::Button,
@@ -679,6 +693,7 @@ impl App {
     }
 
     fn stop_video(&self) {
+        self.subtitle_attachments.borrow_mut().cancel_all();
         let mut discard_player = self
             .player
             .borrow()
@@ -725,6 +740,7 @@ impl App {
         // sources, then prevent monitors and timers from scheduling more UI
         // work while the close request proceeds.
         self.open_scans.borrow_mut().cancel_all();
+        self.subtitle_attachments.borrow_mut().cancel_all();
         self.sidecar_scans.borrow_mut().cancel_all();
         self.navigation.borrow_mut().supersede();
         self.decodes.borrow_mut().cancel_all();
@@ -763,15 +779,88 @@ impl App {
     }
 
     fn attach_subtitle(self: &Rc<Self>, path: &Path) {
-        if !self.is_video_showing() {
-            self.show_toast("Open a video before adding subtitles");
+        if self.shutting_down.get() {
             return;
         }
+        let video = match &*self.media.borrow() {
+            MediaState::Video(video) => video.clone(),
+            _ => {
+                self.show_toast("Open a video before adding subtitles");
+                return;
+            }
+        };
+        let request = SubtitleRequest {
+            path: path.to_path_buf(),
+            video,
+            generation: self.navigation.borrow().generation(),
+        };
+        let Some(job) = self.subtitle_attachments.borrow_mut().request(request) else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let mut job = job;
+            loop {
+                let request = job.request.clone();
+                let result = job
+                    .run(|request, cancelled| {
+                        player::ValidatedSubtitle::open(&request.path, cancelled)
+                    })
+                    .await;
+                let Some(app) = weak.upgrade() else { return };
+                let (current, next) = app.subtitle_attachments.borrow_mut().finish();
+                let video = match &*app.media.borrow() {
+                    MediaState::Video(video) => Some(video.clone()),
+                    _ => None,
+                };
+                if current
+                    && request.is_current(
+                        app.navigation.borrow().generation(),
+                        video.as_deref(),
+                        app.shutting_down.get(),
+                    )
+                {
+                    match result {
+                        Ok(Ok(subtitle)) => app.apply_subtitle(&subtitle),
+                        Ok(Err(source)) => {
+                            let error = player::PlayerError::SubtitleFile {
+                                path: request.path,
+                                source,
+                            };
+                            eprintln!("open-mpv: {error}");
+                            if matches!(&error, player::PlayerError::SubtitleFile { source, .. }
+                                if source.kind() == std::io::ErrorKind::InvalidInput)
+                            {
+                                app.show_toast("Could not add the subtitles. Choose a regular SRT or WebVTT file.");
+                            } else {
+                                app.show_toast(&error::message(
+                                    &error,
+                                    "Could not add the subtitles.",
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("open-mpv: subtitle attachment worker panicked: {error:?}");
+                            app.show_toast("Could not check the subtitle file. Try another file.");
+                        }
+                    }
+                }
+                if app.shutting_down.get() {
+                    return;
+                }
+                let Some(next) = next else { break };
+                job = next;
+            }
+        });
+    }
+
+    fn apply_subtitle(self: &Rc<Self>, subtitle: &player::ValidatedSubtitle) {
+        let path = subtitle.path();
         let Some(player) = self.player.borrow().clone() else {
             self.show_toast("Video player is unavailable");
             return;
         };
-        match player.attach_subtitle(path) {
+        match player.attach_subtitle(subtitle) {
             Ok(()) => {
                 self.update_subtitles(player.subtitle_snapshot());
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -811,6 +900,7 @@ impl App {
                 return;
             }
         };
+        let generation = self.navigation.borrow().generation();
         let filter = gtk::FileFilter::new();
         filter.set_name(Some("SRT and WebVTT subtitles"));
         filter.add_suffix("srt");
@@ -836,7 +926,9 @@ impl App {
                 move |result| match result {
                     Ok(file) => match file.path() {
                         Some(path) if config::is_subtitle(&path) => {
-                            if !app.is_video_showing()
+                            if app.shutting_down.get()
+                                || !app.navigation.borrow().is_current_generation(generation)
+                                || !app.is_video_showing()
                                 || app.current_path().as_deref() != Some(video.as_path())
                             {
                                 app.show_toast("The video changed; choose its subtitle again");
@@ -2998,6 +3090,7 @@ mod tests {
                 let subtitle = tempfile::Builder::new().suffix(".srt").tempfile().unwrap();
                 pipeline.refuse_transition(Some(transition));
                 app.attach_subtitle(subtitle.path());
+                wait_for_subtitle_validation(&app);
                 assert!(matches!(&*app.media.borrow(), MediaState::Error(_)));
                 assert!(app.inhibit_cookie.get().is_none());
                 assert!(!app.is_video_showing());
@@ -3007,6 +3100,101 @@ mod tests {
                     .unwrap();
                 app.win.close();
             });
+        }
+    }
+
+    fn wait_for_subtitle_validation(app: &super::App) {
+        use super::*;
+        glib::MainContext::ref_thread_default().block_on(async {
+            let start = std::time::Instant::now();
+            while !app.subtitle_attachments.borrow().is_idle() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "subtitle validation stalled"
+                );
+                glib::timeout_future(Duration::from_millis(2)).await;
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires Wayland; uses an unmapped window and a test pipeline"]
+    fn subtitle_drop_validation_and_lifecycle() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        gtk::init().unwrap();
+        let gtk_app = gtk::Application::builder()
+            .application_id("io.github.TheRealShek.OpenMpv.SubtitleTest")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        gtk_app.register(gio::Cancellable::NONE).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("blocked.srt");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        let unreadable = dir.path().join("unreadable.vtt");
+        std::fs::write(&unreadable, "subtitle").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let valid = dir.path().join("valid.srt");
+        std::fs::write(&valid, "1\n00:00:00,000 --> 00:00:10,000\nSubtitle\n").unwrap();
+
+        crate::player::tests::with_player(|player, _| {
+            let app = App::new(&gtk_app, Config::default());
+            let video = PathBuf::from("/tmp/subtitle-test.mp4");
+            player.play(&video, None).unwrap();
+            *app.media.borrow_mut() = MediaState::Video(video);
+            let player = Rc::new(player);
+            *app.player.borrow_mut() = Some(player.clone());
+            for (path, reason) in [(&fifo, "regular"), (&unreadable, "permission")] {
+                assert!(app.handle_dropped_files(vec![gio::File::for_path(path)]));
+                wait_for_subtitle_validation(&app);
+                assert!(app.toast_label.text().contains(reason));
+                assert!(player.has_video());
+                assert!(player.is_playing());
+                assert!(!player.has_external_subtitle());
+            }
+            assert!(app.handle_dropped_files(vec![gio::File::for_path(&valid)]));
+            wait_for_subtitle_validation(&app);
+            assert!(player.has_external_subtitle());
+            assert!(app.indicator.text().contains("valid.srt"));
+            assert!(!app.win.is_visible());
+            app.shutdown();
+            app.win.close();
+        });
+
+        for shutdown in [false, true] {
+            for path in [&valid, &unreadable] {
+                crate::player::tests::with_player(|player, _| {
+                    let app = App::new(&gtk_app, Config::default());
+                    let video = PathBuf::from("/tmp/subtitle-test.mp4");
+                    player.play(&video, None).unwrap();
+                    *app.media.borrow_mut() = MediaState::Video(video.clone());
+                    let player = Rc::new(player);
+                    *app.player.borrow_mut() = Some(player.clone());
+                    app.attach_subtitle(path);
+                    // Supersede before GTK dispatches the validation result.
+                    if shutdown {
+                        app.shutdown();
+                    } else {
+                        app.stop_video();
+                        app.navigation.borrow_mut().supersede();
+                        player.play(&video, None).unwrap();
+                    }
+                    wait_for_subtitle_validation(&app);
+                    assert!(!player.has_external_subtitle());
+                    assert!(app.toast_label.text().is_empty());
+                    assert!(!app.win.is_visible());
+                    app.shutdown();
+                    app.win.close();
+                });
+            }
         }
     }
 

@@ -17,7 +17,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -41,7 +40,7 @@ use playback::{FocusedPlayback, ResumeAction, SeekRequest, issue_seek, same_rate
 #[allow(unused_imports)]
 pub use tracks::AudioTrack;
 pub use tracks::{
-    AudioChoice, AudioSnapshot, SubtitleChoice, SubtitleSnapshot, SubtitleTrack,
+    AudioChoice, AudioSnapshot, SubtitleChoice, SubtitleSnapshot, SubtitleTrack, ValidatedSubtitle,
     matching_sidecar_cancellable,
 };
 
@@ -458,15 +457,12 @@ impl Player {
         }
     }
 
-    /// Attach a local SRT/WebVTT file to the current video. `playbin3`
+    /// Attach a worker-validated local SRT/WebVTT file to the current video. `playbin3`
     /// consumes one external `suburi`, so a later drop replaces it. The
     /// pipeline is re-prerolled asynchronously and resumes at the same
     /// position and play/pause state (FR-10.7).
-    pub fn attach_subtitle(&self, path: &Path) -> Result<(), PlayerError> {
-        fs::File::open(path).map_err(|source| PlayerError::SubtitleFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    pub fn attach_subtitle(&self, subtitle: &ValidatedSubtitle) -> Result<(), PlayerError> {
+        let path = subtitle.path();
         let video = self
             .playback
             .borrow()

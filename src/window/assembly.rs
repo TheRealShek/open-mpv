@@ -357,6 +357,7 @@ impl App {
             fs_refresh_timer: TimerSlot::default(),
             open_scans: RefCell::new(open::ScanQueue::default()),
             sidecar_scans: RefCell::new(open::ScanQueue::default()),
+            subtitle_attachments: RefCell::new(open::ScanQueue::default()),
             media: RefCell::new(MediaState::Empty),
             animation: RefCell::new(None),
             animation_btn,

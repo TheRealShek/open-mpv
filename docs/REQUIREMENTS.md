@@ -229,7 +229,8 @@ new product decisions rather than incidental implementation.
   volume/mute, looping and 0.5×–2× pitch-preserving playback presets.
 - **FR-10.7** Embedded and local SRT/WebVTT subtitles support Automatic, Off and track
   selection. External attachment is local, non-modal and forgotten on
-  navigation.
+  navigation. Attachment accepts only readable regular files, including symlinks
+  to regular files. Files rejected by validation leave playback unchanged.
 - **FR-10.8** Audio-track selection appears only when a video contains multiple tracks and
   remains in the secondary menu rather than normal transport chrome.
 - **FR-10.1** Compatible installed hardware decoding is preferred using a policy verified
@@ -328,6 +329,15 @@ new product decisions rather than incidental implementation.
   reused for pipeline replacement and playback. Cheap filename filters precede
   metadata queries. Cancellation cannot interrupt an operating-system call
   already waiting on storage; its worker slot stays occupied until it returns.
+- **NFR-1.3 / FR-10.7** Manual subtitle validation opens files off GTK with
+  nonblocking flags and checks the opened descriptor to reject special files.
+  It has one active worker, including cancelled work, and one replaceable pending
+  request. Navigation and shutdown cancel attachments; only the latest request
+  for the same video and navigation generation may update playback or show an
+  error. Cancellation cannot interrupt a filesystem call already waiting on
+  storage and never releases its worker slot early. GStreamer subsequently
+  reads the subtitle path, so validation does not pin its contents against
+  external changes.
 - **NFR-2.1 / NFR-2.1a** The displayed image may exceed a cache budget, but all additional decoded
   media is bounded by checked byte and count limits. A zero neighbor budget
   retains no neighbors. Installing a folder releases cached images outside that

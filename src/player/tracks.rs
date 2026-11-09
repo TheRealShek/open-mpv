@@ -2,10 +2,61 @@
 //! stream state and its transitions belong to `FocusedPlayback`.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use crate::config;
+
+/// A readable regular subtitle checked on a filesystem worker. Construction
+/// performs I/O; consuming it on GTK does not. GStreamer reads the path later.
+#[derive(Debug)]
+pub struct ValidatedSubtitle {
+    path: PathBuf,
+}
+
+impl ValidatedSubtitle {
+    pub fn open(path: &Path, cancelled: &AtomicBool) -> io::Result<Self> {
+        let check_cancelled = || {
+            if cancelled.load(AtomicOrdering::Relaxed) {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "subtitle request cancelled",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        check_cancelled()?;
+        // Check the opened descriptor, not metadata followed by a blocking
+        // open: a symlink or replacement may point to a FIFO by then.
+        let file = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOCTTY,
+            rustix::fs::Mode::empty(),
+        )?;
+        let metadata = rustix::fs::fstat(&file)?;
+        if rustix::fs::FileType::from_raw_mode(metadata.st_mode)
+            != rustix::fs::FileType::RegularFile
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "subtitle must be a regular file",
+            ));
+        }
+        check_cancelled()?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioTrack {
@@ -216,5 +267,104 @@ mod tests {
             Some(dir.join("movie.en.vtt"))
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    #[test]
+    fn validation_accepts_readable_files_and_regular_symlink_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movie.srt");
+        fs::write(&path, "subtitle").unwrap();
+        let link = dir.path().join("linked.vtt");
+        symlink(&path, &link).unwrap();
+        for path in [&path, &link] {
+            let checked = ValidatedSubtitle::open(path, &AtomicBool::new(false)).unwrap();
+            assert_eq!(checked.path(), path);
+        }
+    }
+
+    #[test]
+    fn validation_rejects_special_files_and_symlinks_to_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("blocked.srt");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        let link = dir.path().join("linked.srt");
+        symlink(&fifo, &link).unwrap();
+        for path in [
+            fifo.as_path(),
+            link.as_path(),
+            dir.path(),
+            Path::new("/dev/null"),
+        ] {
+            let error = ValidatedSubtitle::open(path, &AtomicBool::new(false)).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidInput,
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn validation_preserves_unreadable_and_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        if fs::metadata(dir.path()).unwrap().uid() == 0 {
+            use std::os::unix::process::CommandExt;
+
+            // Fedora CI runs as root, which bypasses mode bits. Re-run as an
+            // unprivileged user so permission-denied coverage stays meaningful.
+            // Copy the test executable out of potentially private build paths.
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            let executable = dir.path().join("subtitle-permission-test");
+            fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "player::tracks::validation_tests::validation_preserves_unreadable_and_missing_file_errors",
+                    "--nocapture",
+                ])
+                .uid(65534)
+                .gid(65534)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "unprivileged subtitle validation failed: {status}"
+            );
+            return;
+        }
+        let path = dir.path().join("unreadable.srt");
+        fs::write(&path, "subtitle").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let error = ValidatedSubtitle::open(&path, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let missing = dir.path().join("missing.srt");
+        let link = dir.path().join("broken.srt");
+        symlink(&missing, &link).unwrap();
+        for path in [&missing, &link] {
+            let error = ValidatedSubtitle::open(path, &AtomicBool::new(false)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        }
+    }
+
+    #[test]
+    fn cancelled_validation_does_not_open_the_file() {
+        let error =
+            ValidatedSubtitle::open(Path::new("missing.srt"), &AtomicBool::new(true)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
     }
 }
