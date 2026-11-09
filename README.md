@@ -70,11 +70,19 @@ Folder and automatic subtitle discovery run in the background so an already
 open window stays responsive while storage is busy. The latest open request wins.
 Edits made by another application refresh the current image after file-change
 notifications settle. Cached neighbors are invalidated too. Refreshing resets
-the image view and clears any transient Quick Markup.
+the image view and clears any transient Quick Markup. Background refreshes,
+errors and folder changes do not raise or activate the window. Opening a path
+or activating the application brings it forward once, before loading finishes.
+If a displayed static photo moves out of the folder or is removed externally,
+its pixels stay visible until you navigate, open another path or close the window.
+The folder list stays current. Trash, Rotate Save, trash Undo and external
+handoff stay disabled for this retained snapshot, even if its old path is recreated.
+Animated images, SVGs and videos still follow the folder's replacement behavior.
 The window starts at a size that fits your display and keeps that size as
 you browse. Rapid navigation keeps image-loading work bounded and gives the
-current photo priority over preloading neighbors. Opening another folder releases
-cached images from the previous folder. Switching between photos and videos
+current photo priority over preloading neighbors. A loading message identifies
+pending navigation, and Trash stays disabled until loading finishes.
+Opening another folder releases cached images from the previous folder. Switching between photos and videos
 keeps playback controls responsive.
 
 If you prefer the terminal:
