@@ -2,6 +2,7 @@
 //! individual transitions. No codecs, display server, or timing races required.
 use super::*;
 use gst::subclass::prelude::*;
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod imp {
@@ -149,11 +150,21 @@ fn subtitle_attach_and_recovery_require_completed_teardown() {
         let subtitle = tempfile::Builder::new().suffix(".srt").tempfile().unwrap();
         player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::ReadyToNull);
-        assert!(player.attach_subtitle(subtitle.path()).is_err());
+        assert!(
+            player
+                .attach_subtitle(
+                    &ValidatedSubtitle::open(subtitle.path(), &AtomicBool::new(false)).unwrap()
+                )
+                .is_err()
+        );
         assert!(pipeline.suburi().is_none());
         *pipeline.imp().refuse.lock().unwrap() = None;
         player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
-        player.attach_subtitle(subtitle.path()).unwrap();
+        player
+            .attach_subtitle(
+                &ValidatedSubtitle::open(subtitle.path(), &AtomicBool::new(false)).unwrap(),
+            )
+            .unwrap();
         let suburi = pipeline.suburi();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::ReadyToNull);
         assert!(!recover_without_external(
@@ -173,7 +184,13 @@ fn failed_subtitle_restart_and_recovery_clear_pending_resume() {
         let subtitle = tempfile::Builder::new().suffix(".srt").tempfile().unwrap();
         player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
         *pipeline.imp().refuse.lock().unwrap() = Some(gst::StateChange::PausedToPlaying);
-        assert!(player.attach_subtitle(subtitle.path()).is_err());
+        assert!(
+            player
+                .attach_subtitle(
+                    &ValidatedSubtitle::open(subtitle.path(), &AtomicBool::new(false)).unwrap()
+                )
+                .is_err()
+        );
         assert!(!player.is_playing());
         assert_eq!(
             player.playback.borrow_mut().observe_async_done(),
@@ -326,10 +343,18 @@ fn gtk_sink_survives_subtitle_rebuild_and_recovery() {
         for _ in 0..3 {
             player.play(&video, None).unwrap();
             wait_for_playback(&player).await;
-            player.attach_subtitle(&subtitle).unwrap();
+            player
+                .attach_subtitle(
+                    &ValidatedSubtitle::open(&subtitle, &AtomicBool::new(false)).unwrap(),
+                )
+                .unwrap();
             wait_for_playback(&player).await;
             let before = recovered.get();
-            player.attach_subtitle(&broken).unwrap();
+            player
+                .attach_subtitle(
+                    &ValidatedSubtitle::open(&broken, &AtomicBool::new(false)).unwrap(),
+                )
+                .unwrap();
             let start = std::time::Instant::now();
             while player.has_external_subtitle() || recovered.get() == before {
                 assert!(
@@ -364,4 +389,23 @@ async fn wait_for_playback(player: &Player) {
             break;
         }
     }
+}
+
+#[test]
+fn subtitle_attachment_rejects_fifo_without_waiting_for_a_writer() {
+    with_player(|player, _| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked.srt");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        player.play(Path::new("/tmp/test.mp4"), None).unwrap();
+        assert!(ValidatedSubtitle::open(&path, &AtomicBool::new(false)).is_err());
+        assert!(player.has_video());
+    });
 }
