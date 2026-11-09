@@ -273,7 +273,7 @@ mod tests {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     #[test]
     fn validation_accepts_readable_files_and_regular_symlink_targets() {
@@ -321,6 +321,32 @@ mod validation_tests {
     #[test]
     fn validation_preserves_unreadable_and_missing_file_errors() {
         let dir = tempfile::tempdir().unwrap();
+        if fs::metadata(dir.path()).unwrap().uid() == 0 {
+            use std::os::unix::process::CommandExt;
+
+            // Fedora CI runs as root, which bypasses mode bits. Re-run as an
+            // unprivileged user so permission-denied coverage stays meaningful.
+            // Copy the test executable out of potentially private build paths.
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            let executable = dir.path().join("subtitle-permission-test");
+            fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "player::tracks::validation_tests::validation_preserves_unreadable_and_missing_file_errors",
+                    "--nocapture",
+                ])
+                .uid(65534)
+                .gid(65534)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "unprivileged subtitle validation failed: {status}"
+            );
+            return;
+        }
         let path = dir.path().join("unreadable.srt");
         fs::write(&path, "subtitle").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
