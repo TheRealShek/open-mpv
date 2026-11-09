@@ -126,7 +126,14 @@ new product decisions rather than incidental implementation.
   complete new file across interruption. Replacement preserves the source
   owner, group, Unix permissions, access time and `user.*` extended attributes;
   modification and change times reflect the explicit save, while security and
-  system attributes follow the filesystem's replacement policy.
+  system attributes follow the filesystem's replacement policy. Before the
+  asynchronous edit starts, capture the source device, inode, size, nanosecond
+  modification and change times, and the destination path entry. Recheck the
+  open source and destination immediately before replacement. Reject detected
+  edits, replacements or removal without installing the staged result, and
+  explain that the user should reopen the file before retrying. This metadata
+  check does not eliminate the final check-to-replacement race with external
+  writers.
 - **FR-5.6** No source media changes automatically. Current source writes are limited to
   explicit Trash, Restore and Rotate Save.
 - **FR-5.6** Copy creates no file. In Viewer it copies a static image, intrinsic-size SVG
