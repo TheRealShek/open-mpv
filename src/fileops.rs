@@ -49,6 +49,11 @@ pub enum RestoreError {
         path: PathBuf,
         source: std::io::Error,
     },
+    Rollback {
+        path: PathBuf,
+        preserved: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for RestoreError {
@@ -62,6 +67,16 @@ impl fmt::Display for RestoreError {
                 "could not restore {} because another file now exists there",
                 path.display()
             ),
+            RestoreError::Rollback {
+                path,
+                preserved,
+                source,
+            } => write!(
+                f,
+                "could not return {} to trash: {source}; the file is preserved at {}. Move it back manually",
+                path.display(),
+                preserved.display()
+            ),
             RestoreError::Move { path, source } => {
                 write!(f, "could not restore {}: {source}", path.display())
             }
@@ -73,7 +88,9 @@ impl std::error::Error for RestoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RestoreError::NotFound(_) | RestoreError::DestinationExists(_) => None,
-            RestoreError::Move { source, .. } => Some(source),
+            RestoreError::Move { source, .. } | RestoreError::Rollback { source, .. } => {
+                Some(source)
+            }
         }
     }
 }
@@ -161,48 +178,227 @@ pub async fn editable_mime_types() -> BTreeSet<String> {
         .collect()
 }
 
-pub async fn trash(path: &Path) -> Result<(), TrashError> {
-    gio::File::for_path(path)
-        .trash_future(glib::Priority::DEFAULT)
-        .await
-        .map_err(|source| TrashError {
+/// The exact payload moved by one Trash operation. Holding its descriptor keeps
+/// its inode from being reused while Undo is offered, including after emptying Trash.
+#[derive(Debug, Clone)]
+pub struct TrashedFile {
+    original: PathBuf,
+    file: PathBuf,
+    info: PathBuf,
+    source: std::sync::Arc<File>,
+    info_source: std::sync::Arc<File>,
+}
+
+impl PartialEq for TrashedFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.original == other.original
+            && self.file == other.file
+            && self.info == other.info
+            && std::sync::Arc::ptr_eq(&self.source, &other.source)
+    }
+}
+
+impl Eq for TrashedFile {}
+
+impl TrashedFile {
+    #[cfg(test)]
+    pub(crate) fn test_receipt(original: &Path) -> Self {
+        Self {
+            original: original.to_path_buf(),
+            file: PathBuf::new(),
+            info: PathBuf::new(),
+            source: std::sync::Arc::new(File::open("/dev/null").unwrap()),
+            info_source: std::sync::Arc::new(File::open("/dev/null").unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TRASH_FAILURE_TEST: std::cell::RefCell<Option<gio::Cancellable>> = const { std::cell::RefCell::new(None) };
+}
+
+/// GIO moves within a filesystem, preserving identity. A successful move whose
+/// receipt cannot be identified still succeeds, but must not offer ambiguous Undo.
+pub async fn trash(path: &Path) -> Result<Option<TrashedFile>, TrashError> {
+    #[cfg(test)]
+    if let Some(gate) = TRASH_FAILURE_TEST.with(|state| state.borrow().clone()) {
+        gate.future().await;
+        return Err(TrashError {
             path: path.to_path_buf(),
-            source,
+            source: glib::Error::new(gio::IOErrorEnum::PermissionDenied, "injected trash failure"),
+        });
+    }
+    let path = path.to_path_buf();
+    let worker_path = path.clone();
+    gio::spawn_blocking(move || trash_sync(&worker_path))
+        .await
+        .unwrap_or_else(|_| {
+            Err(TrashError {
+                path,
+                source: glib::Error::new(gio::IOErrorEnum::Failed, "trash worker failed"),
+            })
         })
 }
 
-/// Restore the most recently trashed file whose original location was
-/// `orig` (FR-5.2). Reads the freedesktop trash directories directly
-/// (the same on-disk format GIO writes) rather than the `trash://`
-/// gvfs backend, which is not reliably reachable outside a running
-/// GUI main loop.
-pub fn restore(orig: &Path) -> Result<(), RestoreError> {
-    let trash_dirs = trash_dirs_for(orig);
-    restore_from(orig, &trash_dirs)
+fn trash_sync(path: &Path) -> Result<Option<TrashedFile>, TrashError> {
+    let capture = || -> std::io::Result<File> {
+        let fd = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )?;
+        Ok(File::from(fd))
+    };
+    let source = capture().map_err(|error| TrashError {
+        path: path.to_path_buf(),
+        source: glib::Error::new(gio::IOErrorEnum::Failed, &error.to_string()),
+    })?;
+    let dirs = trash_dirs_for(path);
+    let before: BTreeSet<_> = find_trashed_files(path, &dirs).into_iter().collect();
+    gio::File::for_path(path)
+        .trash(gio::Cancellable::NONE)
+        .map_err(|source| TrashError {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let selected = identify_trashed_file(&source, &before, find_trashed_files(path, &dirs));
+    let receipt = selected.and_then(|(file, info)| {
+        let info_source = File::open(&info).ok()?;
+        Some(TrashedFile {
+            original: path.to_path_buf(),
+            file,
+            info,
+            source: std::sync::Arc::new(source),
+            info_source: std::sync::Arc::new(info_source),
+        })
+    });
+    if receipt.is_none() {
+        eprintln!(
+            "open-mpv: moved {} to trash, but could not identify its exact Undo entry",
+            path.display()
+        );
+    }
+    Ok(receipt)
 }
 
-fn restore_from(orig: &Path, trash_dirs: &[TrashDirectory]) -> Result<(), RestoreError> {
-    let (file, info) = find_trashed_file(orig, trash_dirs)
-        .ok_or_else(|| RestoreError::NotFound(orig.to_path_buf()))?;
+fn identify_trashed_file(
+    source: &File,
+    before: &BTreeSet<(PathBuf, PathBuf)>,
+    candidates: Vec<(PathBuf, PathBuf)>,
+) -> Option<(PathBuf, PathBuf)> {
+    let mut matches = candidates
+        .into_iter()
+        .filter(|entry| !before.contains(entry) && same_file(source, &entry.0));
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
+}
+
+fn same_file(source: &File, path: &Path) -> bool {
+    match (source.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(source), Ok(candidate)) => {
+            source.dev() == candidate.dev() && source.ino() == candidate.ino()
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESTORE_REPLACEMENT_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static RESTORE_ROLLBACK_CONFLICT_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     rustix::fs::renameat_with(
         rustix::fs::CWD,
-        &file,
+        from,
         rustix::fs::CWD,
-        orig,
+        to,
         rustix::fs::RenameFlags::NOREPLACE,
     )
-    .map_err(|source| {
-        let source = std::io::Error::from(source);
-        if source.kind() == std::io::ErrorKind::AlreadyExists {
-            RestoreError::DestinationExists(orig.to_path_buf())
-        } else {
-            RestoreError::Move {
-                path: orig.to_path_buf(),
-                source,
-            }
+    .map_err(std::io::Error::from)
+}
+
+/// Restore only the retained entry. Claim its pathname into a private directory
+/// on the trash filesystem, then verify the claimed inode before publishing it.
+pub fn restore(receipt: &TrashedFile) -> Result<(), RestoreError> {
+    let orig = &receipt.original;
+    if !same_file(&receipt.source, &receipt.file) {
+        return Err(RestoreError::NotFound(orig.clone()));
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(".open-mpv-restore-")
+        .tempdir_in(receipt.file.parent().unwrap_or(Path::new("/")))
+        .map_err(|source| RestoreError::Move {
+            path: orig.clone(),
+            source,
+        })?;
+    let claimed = staging.path().join("payload");
+    #[cfg(test)]
+    RESTORE_REPLACEMENT_TEST.with(|replacement| {
+        if let Some(replacement) = replacement.borrow_mut().take() {
+            std::fs::rename(replacement, &receipt.file).unwrap();
         }
+    });
+    rename_no_replace(&receipt.file, &claimed).map_err(|source| RestoreError::Move {
+        path: orig.clone(),
+        source,
     })?;
-    let _ = std::fs::remove_file(info);
+    let result = if !same_file(&receipt.source, &claimed) {
+        Err(RestoreError::NotFound(orig.clone()))
+    } else {
+        rename_no_replace(&claimed, orig).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                RestoreError::DestinationExists(orig.clone())
+            } else {
+                RestoreError::Move {
+                    path: orig.clone(),
+                    source,
+                }
+            }
+        })
+    };
+    if let Err(error) = result {
+        #[cfg(test)]
+        RESTORE_ROLLBACK_CONFLICT_TEST.with(|conflict| {
+            if conflict.replace(false) {
+                std::fs::write(&receipt.file, b"concurrent entry").unwrap();
+            }
+        });
+        if let Err(source) = rename_no_replace(&claimed, &receipt.file) {
+            // Never let TempDir cleanup erase a claimed payload on rollback failure.
+            let _ = staging.keep();
+            return Err(RestoreError::Rollback {
+                path: orig.clone(),
+                preserved: claimed,
+                source,
+            });
+        }
+        return Err(error);
+    }
+    // Claim metadata before deleting it as well. Another process may have reused
+    // the public trash name while the original payload was being restored.
+    let info = staging.path().join("entry.trashinfo");
+    if rename_no_replace(&receipt.info, &info).is_ok() {
+        if same_file(&receipt.info_source, &info) {
+            // Only the exact metadata we retained is eligible for cleanup.
+            if let Err(error) = std::fs::remove_file(&info) {
+                eprintln!(
+                    "open-mpv: restored {}, but could not remove trash metadata: {error}",
+                    orig.display()
+                );
+                let _ = staging.keep();
+            }
+        } else if let Err(error) = rename_no_replace(&info, &receipt.info) {
+            eprintln!(
+                "open-mpv: restored {}, but could not return replaced trash metadata: {error}; preserved at {}",
+                orig.display(),
+                info.display()
+            );
+            let _ = staging.keep();
+        }
+    }
     Ok(())
 }
 
@@ -226,8 +422,8 @@ impl TrashDirectory {
     }
 }
 
-fn find_trashed_file(orig: &Path, trash_dirs: &[TrashDirectory]) -> Option<(PathBuf, PathBuf)> {
-    let mut best: Option<(PathBuf, PathBuf, String)> = None; // (files/<n>, info file, date)
+fn find_trashed_files(orig: &Path, trash_dirs: &[TrashDirectory]) -> Vec<(PathBuf, PathBuf)> {
+    let mut matches = Vec::new();
     for trash_dir in trash_dirs {
         let info_dir = trash_dir.path.join("info");
         let Ok(entries) = std::fs::read_dir(&info_dir) else {
@@ -241,12 +437,10 @@ fn find_trashed_file(orig: &Path, trash_dirs: &[TrashDirectory]) -> Option<(Path
             let Ok(text) = std::fs::read_to_string(&info_path) else {
                 continue;
             };
-            let (mut path, mut date) = (None, String::new());
+            let mut path = None;
             for line in text.lines() {
                 if let Some(v) = line.strip_prefix("Path=") {
                     path = Some(percent_decode(v));
-                } else if let Some(v) = line.strip_prefix("DeletionDate=") {
-                    date = v.to_string();
                 }
             }
             let Some(path) = path else { continue };
@@ -262,13 +456,10 @@ fn find_trashed_file(orig: &Path, trash_dirs: &[TrashDirectory]) -> Option<(Path
                 continue;
             };
             let file = trash_dir.path.join("files").join(stem);
-            // ISO 8601 deletion dates compare correctly as strings.
-            if best.as_ref().is_none_or(|(_, _, d)| date > *d) {
-                best = Some((file, info_path, date));
-            }
+            matches.push((file, info_path));
         }
     }
-    best.map(|(file, info, _)| (file, info))
+    matches
 }
 
 /// Trash directories that could hold `orig` per the freedesktop trash
@@ -656,16 +847,16 @@ mod tests {
         let file = dir.join("victim.txt");
         std::fs::write(&file, b"payload").unwrap();
 
-        block_on(trash(&file)).unwrap();
+        let receipt = block_on(trash(&file)).unwrap().unwrap();
         assert!(!file.exists(), "file must be gone after trash");
 
-        restore(&file).unwrap();
+        restore(&receipt).unwrap();
         assert!(file.exists(), "file must be back after restore");
         assert_eq!(std::fs::read(&file).unwrap(), b"payload");
 
         // Restoring again must fail cleanly — nothing left in trash.
         assert!(matches!(
-            restore(&file),
+            restore(&receipt),
             Err(RestoreError::NotFound(path)) if path == file
         ));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -678,11 +869,11 @@ mod tests {
         let file = dir.join("victim.txt");
         std::fs::write(&file, b"trashed payload").unwrap();
 
-        block_on(trash(&file)).unwrap();
+        let receipt = block_on(trash(&file)).unwrap().unwrap();
         std::fs::write(&file, b"replacement").unwrap();
 
         assert!(matches!(
-            restore(&file),
+            restore(&receipt),
             Err(RestoreError::DestinationExists(path)) if path == file
         ));
         assert_eq!(std::fs::read(&file).unwrap(), b"replacement");
@@ -690,7 +881,7 @@ mod tests {
         // The failed restore retained both the payload and its trash metadata,
         // so removing the conflict makes the same Undo recoverable.
         std::fs::remove_file(&file).unwrap();
-        restore(&file).unwrap();
+        restore(&receipt).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b"trashed payload");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -728,17 +919,24 @@ mod tests {
                     std::fs::write(&info, &metadata).unwrap();
                     let candidates = std::slice::from_ref(&trash);
                     assert_eq!(
-                        find_trashed_file(&orig, candidates),
-                        Some((payload.clone(), info.clone()))
+                        find_trashed_files(&orig, candidates),
+                        vec![(payload.clone(), info.clone())]
                     );
                     assert!(
-                        find_trashed_file(&dir.path().join("unrelated/photo.jpg"), candidates)
-                            .is_none()
+                        find_trashed_files(&dir.path().join("unrelated/photo.jpg"), candidates)
+                            .is_empty()
                     );
 
+                    let receipt = TrashedFile {
+                        original: orig.clone(),
+                        file: payload.clone(),
+                        info: info.clone(),
+                        source: std::sync::Arc::new(File::open(&payload).unwrap()),
+                        info_source: std::sync::Arc::new(File::open(&info).unwrap()),
+                    };
                     std::fs::write(&orig, b"replacement").unwrap();
                     assert!(matches!(
-                        restore_from(&orig, candidates),
+                        restore(&receipt),
                         Err(RestoreError::DestinationExists(path)) if path == orig
                     ));
                     assert_eq!(std::fs::read(&orig).unwrap(), b"replacement");
@@ -746,12 +944,12 @@ mod tests {
                     assert_eq!(std::fs::read_to_string(&info).unwrap(), metadata);
 
                     std::fs::remove_file(&orig).unwrap();
-                    restore_from(&orig, candidates).unwrap();
+                    restore(&receipt).unwrap();
                     assert_eq!(std::fs::read(&orig).unwrap(), b"trashed payload");
                     assert!(!payload.exists());
                     assert!(!info.exists());
                     assert!(matches!(
-                        restore_from(&orig, candidates),
+                        restore(&receipt),
                         Err(RestoreError::NotFound(path)) if path == orig
                     ));
                     std::fs::remove_file(&orig).unwrap();
@@ -761,24 +959,175 @@ mod tests {
     }
 
     #[test]
-    fn trash_lookup_selects_the_newest_entry_across_mount_layouts() {
-        let dir = tempfile::tempdir().unwrap();
-        let trash_dirs = TrashDirectory::mount_local(dir.path(), 1000);
-        let orig = dir.path().join("photo.jpg");
-        for (trash, date) in trash_dirs.iter().zip(["2026-01-01", "2026-01-02"]) {
-            std::fs::create_dir_all(trash.path.join("info")).unwrap();
-            std::fs::create_dir_all(trash.path.join("files")).unwrap();
-            std::fs::write(trash.path.join("files/photo.jpg"), date).unwrap();
-            std::fs::write(
-                trash.path.join("info/photo.jpg.trashinfo"),
-                format!("[Trash Info]\nPath=photo.jpg\nDeletionDate={date}T00:00:00\n"),
-            )
-            .unwrap();
+    fn undo_restores_exact_version_with_equal_deletion_dates() {
+        for reverse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut dirs = TrashDirectory::mount_local(dir.path(), 1000);
+            if reverse {
+                dirs.reverse();
+            }
+            let orig = dir.path().join("photo.jpg");
+            for (index, trash) in dirs.iter().enumerate() {
+                std::fs::create_dir_all(trash.path.join("info")).unwrap();
+                std::fs::create_dir_all(trash.path.join("files")).unwrap();
+                std::fs::write(trash.path.join("files/photo.jpg"), [index as u8]).unwrap();
+                std::fs::write(
+                    trash.path.join("info/photo.jpg.trashinfo"),
+                    "[Trash Info]\nPath=photo.jpg\nDeletionDate=2026-01-01T00:00:00\n",
+                )
+                .unwrap();
+            }
+            let source = File::open(dirs[1].path.join("files/photo.jpg")).unwrap();
+            let mut candidates = find_trashed_files(&orig, &dirs);
+            if reverse {
+                candidates.reverse();
+            }
+            let (file, info) =
+                identify_trashed_file(&source, &BTreeSet::new(), candidates).unwrap();
+            let receipt = TrashedFile {
+                original: orig.clone(),
+                file,
+                info_source: std::sync::Arc::new(File::open(&info).unwrap()),
+                info,
+                source: std::sync::Arc::new(source),
+            };
+            restore(&receipt).unwrap();
+            assert_eq!(
+                std::fs::read(&orig).unwrap(),
+                [1],
+                "enumeration order: {reverse}"
+            );
         }
-        restore_from(&orig, &trash_dirs).unwrap();
-        assert_eq!(std::fs::read_to_string(&orig).unwrap(), "2026-01-02");
-        assert!(trash_dirs[0].path.join("files/photo.jpg").exists());
-        assert!(trash_dirs[0].path.join("info/photo.jpg.trashinfo").exists());
+    }
+
+    #[test]
+    fn replacement_between_restore_check_and_claim_is_never_published() {
+        for conflict in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let original = dir.path().join("original");
+            let file = dir.path().join("payload");
+            let info = dir.path().join("payload.trashinfo");
+            let replacement = dir.path().join("replacement");
+            std::fs::write(&file, b"exact version").unwrap();
+            std::fs::write(&info, b"original metadata").unwrap();
+            std::fs::write(&replacement, b"replaced entry").unwrap();
+            let receipt = TrashedFile {
+                original: original.clone(),
+                file: file.clone(),
+                info: info.clone(),
+                source: std::sync::Arc::new(File::open(&file).unwrap()),
+                info_source: std::sync::Arc::new(File::open(&info).unwrap()),
+            };
+            RESTORE_REPLACEMENT_TEST.with(|state| *state.borrow_mut() = Some(replacement));
+            RESTORE_ROLLBACK_CONFLICT_TEST.with(|state| state.set(conflict));
+            let error = restore(&receipt).unwrap_err();
+            assert!(
+                !original.exists(),
+                "a replacement must never reach the destination"
+            );
+            assert_eq!(std::fs::read(&info).unwrap(), b"original metadata");
+            if conflict {
+                let RestoreError::Rollback { preserved, .. } = error else {
+                    panic!("must preserve claimed payload on conflict")
+                };
+                assert_eq!(std::fs::read(&file).unwrap(), b"concurrent entry");
+                assert_eq!(std::fs::read(preserved).unwrap(), b"replaced entry");
+            } else {
+                assert!(matches!(error, RestoreError::NotFound(_)));
+                assert_eq!(std::fs::read(&file).unwrap(), b"replaced entry");
+                assert_eq!(
+                    std::fs::read_dir(dir.path()).unwrap().count(),
+                    2,
+                    "private staging must be cleaned up"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_or_replaced_receipt_never_restores_another_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let file = dir.path().join("payload");
+        std::fs::write(&file, b"original payload").unwrap();
+        let receipt = TrashedFile {
+            original: original.clone(),
+            file: file.clone(),
+            info: dir.path().join("info"),
+            source: std::sync::Arc::new(File::open(&file).unwrap()),
+            info_source: std::sync::Arc::new(File::open("/dev/null").unwrap()),
+        };
+        std::fs::remove_file(&file).unwrap();
+        assert!(matches!(restore(&receipt), Err(RestoreError::NotFound(_))));
+        std::fs::write(&file, b"replacement").unwrap();
+        assert!(matches!(restore(&receipt), Err(RestoreError::NotFound(_))));
+        assert!(!original.exists());
+        assert_eq!(std::fs::read(file).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn restore_preserves_replaced_trash_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let file = dir.path().join("payload");
+        let info = dir.path().join("entry.trashinfo");
+        std::fs::write(&file, b"exact version").unwrap();
+        std::fs::write(&info, b"original metadata").unwrap();
+        let receipt = TrashedFile {
+            original: original.clone(),
+            file: file.clone(),
+            info: info.clone(),
+            source: std::sync::Arc::new(File::open(&file).unwrap()),
+            info_source: std::sync::Arc::new(File::open(&info).unwrap()),
+        };
+        std::fs::remove_file(&info).unwrap();
+        std::fs::write(&info, b"replacement metadata").unwrap();
+        restore(&receipt).unwrap();
+        assert_eq!(std::fs::read(original).unwrap(), b"exact version");
+        assert_eq!(std::fs::read(info).unwrap(), b"replacement metadata");
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn trash_receipt_excludes_existing_hardlinks_and_rejects_ambiguity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        std::fs::write(&path, b"payload").unwrap();
+        let source = File::open(&path).unwrap();
+        let old = (dir.path().join("old"), dir.path().join("old.info"));
+        let new = (dir.path().join("new"), dir.path().join("new.info"));
+        std::fs::hard_link(&path, &old.0).unwrap();
+        std::fs::hard_link(&path, &new.0).unwrap();
+        for candidates in [
+            vec![old.clone(), new.clone()],
+            vec![new.clone(), old.clone()],
+        ] {
+            assert_eq!(
+                identify_trashed_file(&source, &BTreeSet::from([old.clone()]), candidates.clone()),
+                Some(new.clone())
+            );
+            assert_eq!(
+                identify_trashed_file(&source, &BTreeSet::new(), candidates),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn successive_real_trash_operations_keep_independent_receipts() {
+        let _guard = ASYNC_LOCK.lock().unwrap();
+        let dir = home_tempdir("trash-versions");
+        let path = dir.join("same.txt");
+        std::fs::write(&path, b"older").unwrap();
+        let older = block_on(trash(&path)).unwrap().unwrap();
+        std::fs::write(&path, b"newer").unwrap();
+        let newer = block_on(trash(&path)).unwrap().unwrap();
+        restore(&newer).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer");
+        std::fs::remove_file(&path).unwrap();
+        restore(&older).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"older");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -823,16 +1172,17 @@ mod tests {
         .unwrap();
         std::fs::write(trash.join("files/good"), b"payload").unwrap();
 
-        let selected = find_trashed_file(
+        let selected = find_trashed_files(
             &orig,
             &[TrashDirectory {
                 path: trash.clone(),
                 relative_root: dir.path().to_path_buf(),
             }],
-        )
-        .unwrap();
-        assert_eq!(selected.0, trash.join("files/good"));
-        assert_eq!(selected.1, trash.join("info/good.trashinfo"));
+        );
+        assert_eq!(
+            selected,
+            vec![(trash.join("files/good"), trash.join("info/good.trashinfo"))]
+        );
     }
 
     #[test]

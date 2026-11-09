@@ -642,6 +642,15 @@ impl App {
     }
 
     fn show_video(self: &Rc<Self>, path: &Path, subtitle: Option<PathBuf>) {
+        self.start_video(path, subtitle, None);
+    }
+
+    fn start_video(
+        self: &Rc<Self>,
+        path: &Path,
+        subtitle: Option<PathBuf>,
+        recovery: Option<&player::PlaybackRecovery>,
+    ) {
         // Reuse the shared pipeline for ordinary video navigation. External
         // text pads are the exception: playbin3 can retain their playsink
         // ownership across Null and intermittently connect the next text pad
@@ -668,7 +677,11 @@ impl App {
         };
         self.hide_status();
         self.view.show_live_paintable(player.paintable());
-        if let Err(e) = player.play(path, subtitle) {
+        let result = match recovery {
+            Some(recovery) => player.restore_playback(path, recovery),
+            None => player.play(path, subtitle),
+        };
+        if let Err(e) = result {
             eprintln!("open-mpv: play {}: {e}", path.display());
             self.show_error(path, &error::message(&e, "Could not play the video."));
             return;
@@ -679,7 +692,11 @@ impl App {
         *self.media.borrow_mut() = MediaState::Video(path.to_path_buf());
         self.update_control_mode();
         crate::applog!("play: {}", path.display());
-        self.start_idle_inhibition();
+        if player.is_playing() {
+            self.start_idle_inhibition();
+        } else {
+            self.set_idle_inhibited(false);
+        }
         self.update_save_enabled();
         self.fit_seek_bar();
         // Blank rather than carry the previous video's numbers over the
@@ -1918,6 +1935,7 @@ impl App {
             self.show_toast("Another file operation is still in progress");
             return;
         };
+        let recovery = self.with_video(Player::recovery_point).flatten();
         // Release the file before it moves to trash.
         if config::is_video(&path) {
             self.stop_video();
@@ -1928,7 +1946,7 @@ impl App {
             async move {
                 let started = std::time::Instant::now();
                 match fileops::trash(&path).await {
-                    Ok(()) => {
+                    Ok(receipt) => {
                         crate::applog!(
                             "trash: {} in {:.1} ms",
                             path.display(),
@@ -1971,17 +1989,24 @@ impl App {
                                 removed_current,
                             );
                         }
-                        let disposition = app.operations.borrow_mut().finish_trash(token);
+                        let disposition = app.operations.borrow_mut().finish_trash(token, receipt);
                         match disposition {
                             UndoDisposition::Offered(id) if !app.shutting_down.get() => {
                                 app.show_undo_toast("Moved to trash", id);
                             }
+                            UndoDisposition::Unavailable if !app.shutting_down.get() => {
+                                app.show_toast(
+                                    "Moved to trash. Undo is unavailable; restore it using Files.",
+                                );
+                            }
                             UndoDisposition::Offered(_)
+                            | UndoDisposition::Unavailable
                             | UndoDisposition::NewerOfferPreserved
                             | UndoDisposition::OperationSuperseded => {}
                         }
                     }
                     Err(e) => {
+                        app.recover_failed_trash(&token, recovery.as_ref());
                         app.operations.borrow_mut().cancel_trash(&token);
                         eprintln!("open-mpv: error: {e}");
                         if !app.shutting_down.get() {
@@ -1994,6 +2019,22 @@ impl App {
                 }
             }
         ));
+    }
+
+    fn recover_failed_trash(
+        self: &Rc<Self>,
+        token: &operation::TrashToken,
+        recovery: Option<&player::PlaybackRecovery>,
+    ) {
+        let applies = !self.shutting_down.get()
+            && self
+                .operations
+                .borrow()
+                .trash_failure_applies(token, &self.navigation.borrow())
+            && matches!(&*self.media.borrow(), MediaState::Video(path) if path == token.path());
+        if applies && let Some(recovery) = recovery {
+            self.start_video(token.path(), None, Some(recovery));
+        }
     }
 
     fn undo_trash(self: &Rc<Self>) {
@@ -2011,14 +2052,13 @@ impl App {
             #[strong(rename_to = app)]
             self,
             async move {
-                // `restore` has to enumerate the freedesktop trash on
-                // disk. Keep that synchronous filesystem work off the GTK
-                // main thread while the Gio pool runs it (NFR-1.2).
+                // Keep filesystem identity checks and the restore move off GTK.
                 let restore_path = path.clone();
+                let receipt = token.receipt().clone();
                 let result: Result<FileSnapshot, Box<dyn std::error::Error + Send + Sync>> =
                     match gio::spawn_blocking(
                         move || -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
-                            fileops::restore(&restore_path)?;
+                            fileops::restore(&receipt)?;
                             let metadata = std::fs::metadata(&restore_path)?;
                             if !metadata.is_file() {
                                 return Err(std::io::Error::other(format!(
@@ -3274,6 +3314,64 @@ mod tests {
     }
 
     #[test]
+    fn successful_trash_without_receipt_clears_the_previous_undo() {
+        let (dir, mut navigation) = navigation_of("trash-no-receipt", &["a.jpg"]);
+        navigation.select(0).unwrap();
+        let mut operations = OperationCoordinator::default();
+        let path = dir.join("a.jpg");
+        let first = operations.start_trash(&navigation, &path).unwrap();
+        operations.finish_test_trash(first);
+        assert!(operations.has_undo());
+        let second = operations.start_trash(&navigation, &path).unwrap();
+        assert_eq!(
+            operations.finish_trash(second, None),
+            UndoDisposition::Unavailable
+        );
+        assert!(!operations.has_undo());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_trash_recovery_requires_the_original_media_generation() {
+        let (dir, mut navigation) = navigation_of("trash-failure", &["a.mp4", "b.mp4"]);
+        navigation.select(0).unwrap();
+        let path = dir.join("a.mp4");
+        let mut operations = OperationCoordinator::default();
+        let token = operations.start_trash(&navigation, &path).unwrap();
+        assert!(operations.trash_failure_applies(&token, &navigation));
+        navigation.select(1).unwrap();
+        assert!(!operations.trash_failure_applies(&token, &navigation));
+        navigation.select(0).unwrap();
+        assert!(
+            !operations.trash_failure_applies(&token, &navigation),
+            "returning to the same path is a newer session"
+        );
+        let set = navigation.set_id().unwrap();
+        let before = navigation.generation();
+        navigation.remove(&path);
+        operations.observe_removal(set, &path, before, navigation.generation(), true);
+        assert!(
+            !operations.trash_failure_applies(&token, &navigation),
+            "monitor removal must win"
+        );
+        navigation.install(
+            Folder::scan(
+                &dir,
+                Sort {
+                    order: SortOrder::Name,
+                    reverse: false,
+                },
+            )
+            .unwrap(),
+        );
+        navigation.select(0).unwrap();
+        assert!(!operations.trash_failure_applies(&token, &navigation));
+        operations.cancel_trash(&token);
+        assert!(!operations.trash_failure_applies(&token, &navigation));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn undo_completion_after_navigation_keeps_the_current_media() {
         let (dir, mut navigation) =
             navigation_of("undo-after-navigation", &["a.jpg", "b.jpg", "c.jpg"]);
@@ -3290,7 +3388,7 @@ mod tests {
         assert_eq!(after_trash.path, dir.join("b.jpg"));
         operations.observe_removal(set, &trashed, before, navigation.generation(), true);
         assert!(matches!(
-            operations.finish_trash(trash),
+            operations.finish_test_trash(trash),
             UndoDisposition::Offered(_)
         ));
         let undo = operations.begin_undo().unwrap();
@@ -3383,7 +3481,7 @@ mod tests {
             // The operation result also reconciles removal. The second
             // arrival becomes a harmless NotFound.
             apply_removal(&mut operations, &mut navigation);
-            let UndoDisposition::Offered(_) = operations.finish_trash(trash) else {
+            let UndoDisposition::Offered(_) = operations.finish_test_trash(trash) else {
                 panic!("successful Trash must offer Undo");
             };
             if !monitor_first {
@@ -3426,7 +3524,7 @@ mod tests {
         navigation.remove(&trashed);
         operations.observe_removal(set, &trashed, before, navigation.generation(), true);
         assert!(matches!(
-            operations.finish_trash(trash),
+            operations.finish_test_trash(trash),
             UndoDisposition::Offered(_)
         ));
         let undo = operations.begin_undo().unwrap();
@@ -3549,12 +3647,12 @@ mod tests {
         let mut operations = OperationCoordinator::default();
 
         let first = operations.start_trash(&navigation, &path).unwrap();
-        let UndoDisposition::Offered(first_id) = operations.finish_trash(first) else {
+        let UndoDisposition::Offered(first_id) = operations.finish_test_trash(first) else {
             panic!("first Trash must offer Undo");
         };
         let second = operations.start_trash(&navigation, &path).unwrap();
         assert!(matches!(
-            operations.finish_trash(second),
+            operations.finish_test_trash(second),
             UndoDisposition::Offered(_)
         ));
 
@@ -3607,7 +3705,7 @@ mod tests {
         navigation.select(0).unwrap();
         let trash = operations.start_trash(&navigation, &first_path).unwrap();
         assert!(matches!(
-            operations.finish_trash(trash),
+            operations.finish_test_trash(trash),
             UndoDisposition::Offered(_)
         ));
         let undo = operations.begin_undo().unwrap();

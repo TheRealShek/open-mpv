@@ -524,7 +524,7 @@ fn folder_cleanup_rejects_late_decodes_and_preserves_operations() {
         .borrow_mut()
         .start_trash(&app.navigation.borrow(), &path)
         .unwrap();
-    app.operations.borrow_mut().finish_trash(trash);
+    app.operations.borrow_mut().finish_test_trash(trash);
     for error in [false, true] {
         app.cache
             .put_foreground(path.clone(), test_image(3), "image/png".into());
@@ -676,7 +676,8 @@ fn cached_navigation_presentation_latency() {
 #[ignore = "requires GNOME/Wayland, a user trash, and ImageMagick; run separately"]
 fn rotate_save_and_trash_undo_reload_after_cache_cleanup() {
     let app = edit_test_app();
-    let dir = tempfile::tempdir().unwrap();
+    // The home filesystem supports freedesktop Trash; /tmp may be an internal mount.
+    let dir = tempfile::tempdir_in(glib::user_cache_dir()).unwrap();
     let path = dir.path().join("image.png");
     write_test_image(&path, 3);
     app.open_path(&path);
@@ -685,6 +686,14 @@ fn rotate_save_and_trash_undo_reload_after_cache_cleanup() {
         let set = app.navigation.borrow().set_id();
         app.dispatch_action(Action::RotateClockwise);
         app.dispatch_action(Action::Save);
+        let start = std::time::Instant::now();
+        while app.operations.borrow().is_saving() {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "save did not settle"
+            );
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
         wait_for_image(&app, &path, 1).await;
         app.dispatch_action(Action::Trash);
         let start = std::time::Instant::now();
@@ -904,4 +913,197 @@ fn removal_during_background_refresh_retains_the_displayed_static_pixels() {
         app.shutdown();
     });
     app.win.destroy();
+}
+
+/// Holds the actual Trash completion so navigation and monitor events can win.
+#[test]
+#[ignore = "requires GTK; uses unmapped windows and a test pipeline"]
+fn failed_video_trash_recovers_controls_without_touching_newer_media() {
+    gtk::init().unwrap();
+    let gtk_app = gtk::Application::builder()
+        .application_id("io.github.TheRealShek.OpenMpv.TrashFailureTest")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    gtk_app.register(gio::Cancellable::NONE).unwrap();
+    for playing in [false, true] {
+        for scenario in [
+            "unchanged",
+            "navigate",
+            "return",
+            "monitor",
+            "reopen",
+            "shutdown",
+        ] {
+            crate::player::tests::with_player(|player, _| {
+                let app = App::new(&gtk_app, Config::default());
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("a.mp4");
+                std::fs::write(&path, b"fixture").unwrap();
+                if scenario != "monitor" {
+                    std::fs::write(dir.path().join("b.mp4"), b"fixture").unwrap();
+                }
+                app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+                app.navigation.borrow_mut().select(0).unwrap();
+                *app.player.borrow_mut() = Some(Rc::new(player));
+                app.start_video(&path, None, None);
+                if !playing {
+                    app.with_video(Player::toggle_pause).unwrap().unwrap();
+                }
+                app.show_chrome();
+                let gate = gio::Cancellable::new();
+                fileops::TRASH_FAILURE_TEST.with(|state| *state.borrow_mut() = Some(gate.clone()));
+                app.trash_current();
+                assert!(
+                    app.player
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|player| !player.has_video())
+                );
+                assert!(app.transport_tick.borrow().is_none());
+                match scenario {
+                    "navigate" | "return" => {
+                        let next = app.navigation.borrow_mut().select(1).unwrap();
+                        app.start_video(&next.path, None, None);
+                        if scenario == "return" {
+                            app.navigation.borrow_mut().select(0).unwrap();
+                            app.start_video(&path, None, None);
+                        }
+                    }
+                    "monitor" => {
+                        let set = app.navigation.borrow().set_id().unwrap();
+                        app.on_fs_event(
+                            set,
+                            &gio::File::for_path(&path),
+                            None,
+                            gio::FileMonitorEvent::Deleted,
+                        );
+                    }
+                    "reopen" => {
+                        app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+                        app.navigation.borrow_mut().select(0).unwrap();
+                        app.start_video(&path, None, None);
+                    }
+                    "shutdown" => app.shutdown(),
+                    _ => {}
+                }
+                let generation = app.navigation.borrow().generation();
+                gate.cancel();
+                glib::MainContext::ref_thread_default().block_on(async {
+                    glib::timeout_future(Duration::from_millis(2)).await;
+                    let start = std::time::Instant::now();
+                    while app.operations.borrow().is_trashing(&path) {
+                        assert!(
+                            start.elapsed() < Duration::from_secs(5),
+                            "Trash did not settle"
+                        );
+                        glib::timeout_future(Duration::from_millis(2)).await;
+                    }
+                });
+                fileops::TRASH_FAILURE_TEST.with(|state| state.borrow_mut().take());
+                assert_eq!(app.navigation.borrow().generation(), generation);
+                if scenario == "monitor" || scenario == "shutdown" {
+                    assert!(
+                        app.player
+                            .borrow()
+                            .as_ref()
+                            .is_none_or(|player| !player.has_video())
+                    );
+                } else {
+                    let expected_playing = scenario != "unchanged" || playing;
+                    assert!(app.player.borrow().as_ref().unwrap().has_video());
+                    assert_eq!(app.with_video(Player::is_playing), Some(expected_playing));
+                    assert!(app.transport.get_visible());
+                    assert!(app.transport_tick.borrow().is_some());
+                    assert_eq!(
+                        app.play_btn.icon_name().as_deref(),
+                        Some(if expected_playing {
+                            "open-mpv-media-playback-pause-symbolic"
+                        } else {
+                            "open-mpv-media-playback-start-symbolic"
+                        })
+                    );
+                }
+                assert!(path.exists(), "failure must leave source intact");
+                app.shutdown();
+            });
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires GTK, GStreamer codecs and OPEN_MPV_TRANSITION_VIDEO; run separately under timeout"]
+fn failed_video_trash_restores_real_pipeline_position_and_state() {
+    use std::os::unix::fs::PermissionsExt;
+    let app = edit_test_app();
+    let fixture = PathBuf::from(
+        std::env::var_os("OPEN_MPV_TRANSITION_VIDEO").expect("provide a local test video"),
+    );
+    let dir = tempfile::tempdir_in(glib::user_cache_dir()).unwrap();
+    let path = dir.path().join("video.webm");
+    std::fs::copy(fixture, &path).unwrap();
+    app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+    app.navigation.borrow_mut().select(0).unwrap();
+    glib::MainContext::default().block_on(async {
+        for playing in [false, true] {
+            app.show_video(&path, None);
+            let start = std::time::Instant::now();
+            while app.with_video(Player::progress).flatten().is_none() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "video failed to preroll"
+                );
+                glib::timeout_future(Duration::from_millis(10)).await;
+            }
+            if !playing {
+                app.with_video(Player::toggle_pause).unwrap().unwrap();
+            }
+            app.with_video(|player| player.seek_fraction(0.4));
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let before = app.with_video(Player::progress).flatten().unwrap().0;
+            assert!(before > 3.0, "fixture must be at least ten seconds long");
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            app.show_chrome();
+            app.trash_current();
+            let start = std::time::Instant::now();
+            while app.operations.borrow().is_trashing(&path) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "Trash did not settle"
+                );
+                glib::timeout_future(Duration::from_millis(10)).await;
+            }
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(path.exists(), "test must exercise failed Trash");
+            assert!(app.toast_label.text().contains("trash"));
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let after = app
+                .with_video(Player::progress)
+                .flatten()
+                .expect("recovered progress")
+                .0;
+            assert!(
+                (after - before).abs() < 1.0,
+                "position changed from {before} to {after}"
+            );
+            assert_eq!(app.with_video(Player::is_playing), Some(playing));
+            assert!(app.transport.get_visible());
+            assert!(app.transport_tick.borrow().is_some());
+            assert_eq!(
+                app.play_btn.icon_name().as_deref(),
+                Some(if playing {
+                    "open-mpv-media-playback-pause-symbolic"
+                } else {
+                    "open-mpv-media-playback-start-symbolic"
+                })
+            );
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let later = app.with_video(Player::progress).flatten().unwrap().0;
+            if playing {
+                assert!(later > after + 0.1, "playback did not resume");
+            } else {
+                assert!((later - after).abs() < 0.05, "paused playback advanced");
+            }
+        }
+        app.shutdown();
+    });
 }

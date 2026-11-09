@@ -325,7 +325,10 @@ impl FocusedPlayback {
     }
 
     pub(super) fn pending_seek_position(&self) -> Option<f64> {
-        self.seek.pending().map(|request| request.position)
+        self.seek
+            .pending()
+            .map(|request| request.position)
+            .or_else(|| self.resume.as_ref().map(|resume| resume.position))
     }
 
     pub(super) fn current_video(&self) -> Option<&Path> {
@@ -412,6 +415,10 @@ impl FocusedPlayback {
 
     pub(super) fn subtitle_cycle_choice(&self) -> Option<SubtitleChoice> {
         (!self.subtitle_tracks.is_empty()).then(|| cycled_subtitle_choice(self))
+    }
+
+    pub(super) fn is_resuming(&self) -> bool {
+        self.resume.is_some()
     }
 
     pub(super) fn resume_point(&self) -> (f64, f64, bool) {

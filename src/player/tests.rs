@@ -15,6 +15,8 @@ mod imp {
         uri: Mutex<Option<String>>,
         #[property(get, set, nullable)]
         suburi: Mutex<Option<String>>,
+        #[property(get, set)]
+        mute: Mutex<bool>,
         pub refuse: Mutex<Option<gst::StateChange>>,
         pub refuse_seek: AtomicBool,
     }
@@ -407,5 +409,89 @@ fn subtitle_attachment_rejects_fifo_without_waiting_for_a_writer() {
         player.play(Path::new("/tmp/test.mp4"), None).unwrap();
         assert!(ValidatedSubtitle::open(&path, &AtomicBool::new(false)).is_err());
         assert!(player.has_video());
+    });
+}
+
+#[test]
+fn trash_recovery_restores_position_rate_and_playing_or_paused_state() {
+    for playing in [false, true] {
+        with_player(|player, pipeline| {
+            let path = Path::new("/tmp/movie.mp4");
+            player.play(path, Some("/tmp/movie.srt".into())).unwrap();
+            player.playback.borrow_mut().cache_duration(100.0);
+            player
+                .playback
+                .borrow_mut()
+                .begin_seek(SeekRequest::new(23.5, 1.5));
+            if !playing {
+                player.toggle_pause().unwrap();
+            }
+            let recovery = player.recovery_point().unwrap();
+            assert_eq!(recovery.position, 23.5);
+            assert_eq!(recovery.rate, 1.5);
+            assert_eq!(recovery.playing, playing);
+            player.stop().unwrap();
+            assert!(!player.has_video());
+            player.restore_playback(path, &recovery).unwrap();
+            assert_eq!(
+                pipeline.current_state(),
+                gst::State::Paused,
+                "seek before playback"
+            );
+            assert!(player.has_video());
+            assert_eq!(pipeline.suburi().as_deref(), Some("file:///tmp/movie.srt"));
+            let on_event: Rc<dyn Fn(Event)> = Rc::new(|_| panic!("unexpected recovery error"));
+            finish_async(
+                &player.playbin,
+                &player.seek_target,
+                &player.playback,
+                &on_event,
+            );
+            assert_eq!(player.playback.borrow().pending_seek_position(), Some(23.5));
+            finish_async(
+                &player.playbin,
+                &player.seek_target,
+                &player.playback,
+                &on_event,
+            );
+            assert_eq!(player.is_playing(), playing);
+            assert_eq!(player.playback_rate(), 1.5);
+            assert_eq!(
+                pipeline.current_state(),
+                if playing {
+                    gst::State::Playing
+                } else {
+                    gst::State::Paused
+                }
+            );
+        });
+    }
+}
+
+#[test]
+fn navigation_cancels_pending_trash_recovery_seek() {
+    with_player(|player, _| {
+        player.play(Path::new("/tmp/old.mp4"), None).unwrap();
+        player.playback.borrow_mut().cache_duration(100.0);
+        player
+            .playback
+            .borrow_mut()
+            .begin_seek(SeekRequest::new(23.5, 1.0));
+        let recovery = player.recovery_point().unwrap();
+        player.stop().unwrap();
+        player
+            .restore_playback(Path::new("/tmp/old.mp4"), &recovery)
+            .unwrap();
+        player.play(Path::new("/tmp/new.mp4"), None).unwrap();
+        assert!(!player.playback.borrow().is_resuming());
+        assert_eq!(player.playback.borrow().pending_seek_position(), None);
+        let on_event: Rc<dyn Fn(Event)> = Rc::new(|_| panic!("stale recovery error"));
+        finish_async(
+            &player.playbin,
+            &player.seek_target,
+            &player.playback,
+            &on_event,
+        );
+        assert!(player.is_playing());
     });
 }

@@ -21,6 +21,12 @@ pub(super) fn message(error: &(dyn Error + 'static), operation: &str) -> String 
             glycin_reason(error)
         } else if let Some(error) = error.downcast_ref::<fileops::RestoreError>() {
             match error {
+                fileops::RestoreError::Rollback { preserved, .. } => {
+                    return format!(
+                        "{operation} The file could not be returned to Trash. It is preserved at {}. Move it back manually.",
+                        preserved.display()
+                    );
+                }
                 fileops::RestoreError::NotFound(_) => Some("The file is no longer in the trash."),
                 fileops::RestoreError::DestinationExists(_) => {
                     Some("Another file already exists at the original location.")
@@ -99,6 +105,19 @@ fn glycin_reason(error: &glycin::Error) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_rollback_failure_exposes_the_preserved_payload() {
+        let error = fileops::RestoreError::Rollback {
+            path: "/photos/image.png".into(),
+            preserved: "/trash/.open-mpv-restore-test/payload".into(),
+            source: io::Error::from(io::ErrorKind::AlreadyExists),
+        };
+        assert_eq!(
+            message(&error, "Could not restore the file."),
+            "Could not restore the file. The file could not be returned to Trash. It is preserved at /trash/.open-mpv-restore-test/payload. Move it back manually."
+        );
+    }
 
     #[test]
     fn save_conflict_explains_how_to_retry() {
