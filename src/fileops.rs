@@ -1,6 +1,8 @@
 //! Source-media writes (FR-5): move to trash, restore from trash, and
 //! rotate-save. Restores use no-replace rename semantics, and every image
 //! edit is staged in a same-directory temporary file before replacement.
+//! Rotate-save captures source identity/version before editing and rejects
+//! detected changes before replacement; the final check-to-rename race remains.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -87,6 +89,7 @@ pub enum SaveRotationError {
         source: Box<glycin::ErrorCtx>,
     },
     LosslessUnavailable(PathBuf),
+    SourceChanged(PathBuf),
     SparseWrite {
         path: PathBuf,
         source: glycin::Error,
@@ -118,6 +121,11 @@ impl fmt::Display for SaveRotationError {
                 "could not rotate {} without re-encoding JPEG pixels",
                 path.display()
             ),
+            SaveRotationError::SourceChanged(path) => write!(
+                f,
+                "could not save {} because the source changed during saving; reopen the file and try again",
+                path.display()
+            ),
             SaveRotationError::SparseWrite { path, source } => {
                 write!(f, "could not write {}: {source}", path.display())
             }
@@ -136,7 +144,7 @@ impl std::error::Error for SaveRotationError {
         match self {
             SaveRotationError::Editor { source, .. }
             | SaveRotationError::Rotation { source, .. } => Some(source.as_ref()),
-            SaveRotationError::LosslessUnavailable(_) => None,
+            SaveRotationError::LosslessUnavailable(_) | SaveRotationError::SourceChanged(_) => None,
             SaveRotationError::SparseWrite { source, .. } => Some(source),
             SaveRotationError::ReadEdited(source)
             | SaveRotationError::AtomicWrite { source, .. } => Some(source),
@@ -344,6 +352,11 @@ pub async fn save_rotation(
         3 => Rotation::_90,
         _ => return Ok(SaveRotationOutcome::Saved),
     };
+    // Capture identity and version before the editor can read asynchronously.
+    let stage_path = path.to_path_buf();
+    let staged = spawn_io(move || AtomicReplacement::empty(&stage_path))
+        .await
+        .map_err(|source| save_write_error(path, source))?;
     let file = gio::File::for_path(path);
     let editable =
         glycin::Editor::new(file)
@@ -374,7 +387,7 @@ pub async fn save_rotation(
         let bytes = spawn_io(move || data.get_full())
             .await
             .map_err(SaveRotationError::ReadEdited)?;
-        return atomic_write_async(path, bytes).await;
+        return atomic_write_async(staged, bytes).await;
     }
 
     let edit = editable
@@ -386,13 +399,9 @@ pub async fn save_rotation(
         })?;
     match edit {
         glycin::SparseEdit::Sparse(_) => {
-            let stage_path = path.to_path_buf();
-            let staged = spawn_io(move || AtomicReplacement::copy_of(&stage_path))
+            let staged = spawn_io(move || staged.copy_source())
                 .await
-                .map_err(|source| SaveRotationError::AtomicWrite {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+                .map_err(|source| save_write_error(path, source))?;
             let outcome = edit
                 .apply_to(gio::File::for_path(staged.path()))
                 .await
@@ -401,34 +410,56 @@ pub async fn save_rotation(
                     source,
                 })?;
             debug_assert_eq!(outcome, glycin::EditOutcome::Changed);
-            spawn_io(move || staged.commit()).await.map_err(|source| {
-                SaveRotationError::AtomicWrite {
-                    path: path.to_path_buf(),
-                    source,
-                }
-            })
+            spawn_io(move || staged.commit())
+                .await
+                .map_err(|source| save_write_error(path, source))
         }
         glycin::SparseEdit::Complete(data) => {
             let bytes = spawn_io(move || data.get_full())
                 .await
                 .map_err(SaveRotationError::ReadEdited)?;
-            atomic_write_async(path, bytes).await
+            atomic_write_async(staged, bytes).await
         }
     }
 }
 
 async fn atomic_write_async(
-    path: &Path,
+    mut staged: AtomicReplacement,
     bytes: Vec<u8>,
 ) -> Result<SaveRotationOutcome, SaveRotationError> {
-    let write_path = path.to_path_buf();
-    spawn_io(move || atomic_write(&write_path, &bytes))
-        .await
-        .map_err(|source| SaveRotationError::AtomicWrite {
+    let path = staged.target.clone();
+    spawn_io(move || {
+        staged.file_mut().write_all(&bytes)?;
+        staged.commit()
+    })
+    .await
+    .map_err(|source| save_write_error(&path, source))
+}
+
+fn save_write_error(path: &Path, source: std::io::Error) -> SaveRotationError {
+    if source
+        .get_ref()
+        .is_some_and(|error| error.is::<SourceChanged>())
+    {
+        SaveRotationError::SourceChanged(path.to_path_buf())
+    } else {
+        SaveRotationError::AtomicWrite {
             path: path.to_path_buf(),
             source,
-        })
+        }
+    }
 }
+
+#[derive(Debug)]
+struct SourceChanged;
+
+impl fmt::Display for SourceChanged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("source changed during saving")
+    }
+}
+
+impl std::error::Error for SourceChanged {}
 
 async fn spawn_io<T: Send + 'static>(
     operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
@@ -440,6 +471,7 @@ async fn spawn_io<T: Send + 'static>(
 
 /// Write through an exclusively created same-directory file, then fsync and
 /// rename it over the destination (FR-5.5, NFR-3.1).
+#[cfg(test)]
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<SaveRotationOutcome> {
     let mut staged = AtomicReplacement::empty(path)?;
     staged.file_mut().write_all(bytes)?;
@@ -451,11 +483,13 @@ struct AtomicReplacement {
     target: PathBuf,
     source: File,
     metadata: Metadata,
+    entry_metadata: Metadata,
 }
 
 impl AtomicReplacement {
     fn empty(target: &Path) -> std::io::Result<Self> {
         let dir = target.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+        let entry_metadata = std::fs::symlink_metadata(target)?;
         let source = File::open(target)?;
         let metadata = source.metadata()?;
         if !metadata.is_file() {
@@ -469,19 +503,40 @@ impl AtomicReplacement {
             target.file_name().unwrap_or_default().to_string_lossy()
         );
         let temp = tempfile::Builder::new().prefix(&prefix).tempfile_in(dir)?;
-        Ok(Self {
+        let staged = Self {
             temp,
             target: target.to_path_buf(),
             source,
             metadata,
-        })
+            entry_metadata,
+        };
+        staged.check_source()?;
+        Ok(staged)
     }
 
-    fn copy_of(target: &Path) -> std::io::Result<Self> {
-        let mut staged = Self::empty(target)?;
-        let mut source = &staged.source;
-        std::io::copy(&mut source, staged.temp.as_file_mut())?;
-        Ok(staged)
+    fn copy_source(mut self) -> std::io::Result<Self> {
+        self.check_source()?;
+        let mut source = &self.source;
+        std::io::copy(&mut source, self.temp.as_file_mut())?;
+        self.check_source()?;
+        Ok(self)
+    }
+
+    fn check_source(&self) -> std::io::Result<()> {
+        let entry = match std::fs::symlink_metadata(&self.target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(std::io::Error::other(SourceChanged));
+            }
+            Err(error) => return Err(error),
+        };
+        if !same_source_version(&self.entry_metadata, &entry)
+            || !same_source_version(&self.metadata, &self.source.metadata()?)
+            || !same_source_version(&self.metadata, &std::fs::metadata(&self.target)?)
+        {
+            return Err(std::io::Error::other(SourceChanged));
+        }
+        Ok(())
     }
 
     fn path(&self) -> &Path {
@@ -512,11 +567,25 @@ impl AtomicReplacement {
             .parent()
             .ok_or(std::io::ErrorKind::InvalidInput)?;
         let dir = File::open(dir)?;
+        // This metadata check detects edits and replacements during staging.
+        // It cannot close the final check-to-rename race with external writers.
+        self.check_source()?;
         self.temp
             .persist(&self.target)
             .map_err(|error| error.error)?;
         Ok(saved_outcome(dir.sync_all()))
     }
+}
+
+/// Ignore atime: reading the image can update it without changing the source.
+fn same_source_version(before: &Metadata, after: &Metadata) -> bool {
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
 }
 
 fn saved_outcome(directory_sync: std::io::Result<()>) -> SaveRotationOutcome {
@@ -830,6 +899,135 @@ mod tests {
             .expect("JPEG must contain a start-of-scan marker");
         let segment_len = usize::from(u16::from_be_bytes([bytes[marker + 2], bytes[marker + 3]]));
         &bytes[marker + 2 + segment_len..]
+    }
+
+    #[test]
+    fn staged_save_rejects_external_changes() {
+        let _guard = ASYNC_LOCK.lock().unwrap();
+        for replacement in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("img.png");
+            std::fs::write(&target, b"old").unwrap();
+            let before = std::fs::metadata(&target).unwrap();
+            let staged = AtomicReplacement::empty(&target).unwrap();
+            let staged_path = staged.path().to_path_buf();
+
+            if replacement {
+                let external = dir.path().join("external.png");
+                std::fs::write(&external, b"new").unwrap();
+                File::open(&external)
+                    .unwrap()
+                    .set_times(FileTimes::new().set_modified(before.modified().unwrap()))
+                    .unwrap();
+                std::fs::rename(&external, &target).unwrap();
+            } else {
+                std::fs::write(&target, b"new").unwrap();
+                // Same length and restored mtime must still conflict via ctime.
+                File::open(&target)
+                    .unwrap()
+                    .set_times(FileTimes::new().set_modified(before.modified().unwrap()))
+                    .unwrap();
+            }
+            let external = std::fs::metadata(&target).unwrap();
+
+            let error = block_on(atomic_write_async(staged, b"rotated".to_vec())).unwrap_err();
+            assert!(matches!(
+                error,
+                SaveRotationError::SourceChanged(ref path) if path == &target
+            ));
+            assert_eq!(std::fs::read(&target).unwrap(), b"new");
+            assert_eq!(std::fs::metadata(&target).unwrap().ino(), external.ino());
+            assert!(!staged_path.exists());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn sparse_save_rejects_changes_before_and_after_copy() {
+        for change_before_copy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("img.png");
+            std::fs::write(&target, b"original").unwrap();
+            let staged = AtomicReplacement::empty(&target).unwrap();
+            let staged_path = staged.path().to_path_buf();
+            let error = if change_before_copy {
+                std::fs::write(&target, b"external edit").unwrap();
+                staged.copy_source().err().unwrap()
+            } else {
+                let mut staged = staged.copy_source().unwrap();
+                staged.file_mut().write_all(b"rotation").unwrap();
+                std::fs::write(&target, b"external edit").unwrap();
+                staged.commit().unwrap_err()
+            };
+            assert!(matches!(
+                save_write_error(&target, error),
+                SaveRotationError::SourceChanged(_)
+            ));
+            assert_eq!(std::fs::read(&target).unwrap(), b"external edit");
+            assert!(!staged_path.exists());
+        }
+    }
+
+    #[test]
+    fn staged_save_rejects_removal_and_symlink_replacement() {
+        for symlink in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("img.png");
+            let other = dir.path().join("other.png");
+            std::fs::write(&target, b"original").unwrap();
+            std::fs::write(&other, b"other image").unwrap();
+            let mut staged = AtomicReplacement::empty(&target).unwrap();
+            staged.file_mut().write_all(b"rotation").unwrap();
+            let staged_path = staged.path().to_path_buf();
+            std::fs::remove_file(&target).unwrap();
+            if symlink {
+                std::os::unix::fs::symlink(&other, &target).unwrap();
+            }
+
+            assert!(matches!(
+                save_write_error(&target, staged.commit().unwrap_err()),
+                SaveRotationError::SourceChanged(_)
+            ));
+            assert_eq!(std::fs::read(&other).unwrap(), b"other image");
+            assert_eq!(target.is_symlink(), symlink);
+            assert!(!staged_path.exists());
+        }
+    }
+
+    #[test]
+    fn staged_save_rejects_permission_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("img.png");
+        std::fs::write(&target, b"original").unwrap();
+        let mut staged = AtomicReplacement::empty(&target).unwrap();
+        staged.file_mut().write_all(b"rotation").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(matches!(
+            save_write_error(&target, staged.commit().unwrap_err()),
+            SaveRotationError::SourceChanged(_)
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn sparse_save_preserves_source_copy_and_ignores_access_time_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("img.png");
+        std::fs::write(&target, b"original").unwrap();
+        File::open(&target)
+            .unwrap()
+            .set_times(FileTimes::new().set_accessed(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let staged = AtomicReplacement::empty(&target)
+            .unwrap()
+            .copy_source()
+            .unwrap();
+        assert_eq!(std::fs::read(staged.path()).unwrap(), b"original");
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        staged.commit().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
     }
 
     #[test]

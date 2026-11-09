@@ -27,11 +27,16 @@ pub(super) fn message(error: &(dyn Error + 'static), operation: &str) -> String 
                 }
                 _ => None,
             }
-        } else if matches!(
-            error.downcast_ref::<fileops::SaveRotationError>(),
-            Some(fileops::SaveRotationError::LosslessUnavailable(_))
-        ) {
-            Some("This image cannot be rotated without losing quality.")
+        } else if let Some(error) = error.downcast_ref::<fileops::SaveRotationError>() {
+            match error {
+                fileops::SaveRotationError::LosslessUnavailable(_) => {
+                    Some("This image cannot be rotated without losing quality.")
+                }
+                fileops::SaveRotationError::SourceChanged(_) => {
+                    Some("The source changed during saving. Reopen the file and try again.")
+                }
+                _ => None,
+            }
         } else if matches!(
             error.downcast_ref::<player::PlayerError>(),
             Some(
@@ -94,6 +99,15 @@ fn glycin_reason(error: &glycin::Error) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_conflict_explains_how_to_retry() {
+        let error = fileops::SaveRotationError::SourceChanged("/private/picture.png".into());
+        assert_eq!(
+            message(&error, "Could not save the rotation."),
+            "Could not save the rotation. The source changed during saving. Reopen the file and try again."
+        );
+    }
 
     #[test]
     fn typed_causes_are_readable_without_backend_details() {
