@@ -44,7 +44,7 @@ mod operation;
 use crate::folder::TargetOutcome as OpenOutcome;
 use action::{Action, Command, Media, WorkspaceState};
 use monitor::FsQueryVersions;
-use open::ScanQueue;
+use open::{ScanJob, ScanQueue};
 use operation::{Coordinator as OperationCoordinator, UndoDisposition, UndoEffect, UndoId};
 
 const SEEK_STEP_SECONDS: f64 = 10.0;
@@ -160,6 +160,13 @@ impl MediaState {
 const TOAST_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_TIMEOUT: Duration = Duration::from_millis(1200);
 const SVG_DEBOUNCE: Duration = Duration::from_millis(200);
+
+struct SvgRequest {
+    decoded: Rc<Decoded>,
+    generation: u64,
+    width: u32,
+    height: u32,
+}
 
 #[derive(Clone)]
 struct SubtitleRequest {
@@ -277,6 +284,7 @@ pub struct App {
     toast_timer: TimerSlot,
     undo_timer: TimerSlot,
     svg_timer: TimerSlot,
+    svg_renders: RefCell<ScanQueue<SvgRequest>>,
     markup_action: gio::SimpleAction,
     markup_box_action: gio::SimpleAction,
     markup_arrow_action: gio::SimpleAction,
@@ -502,6 +510,7 @@ impl App {
 
     fn show_destination(self: &Rc<Self>, destination: Destination, arrival: Arrival) {
         self.fs_refresh_timer.cancel();
+        self.cancel_svg_renders();
         self.stop_animation();
         if self.view.cancel_markup() {
             self.update_cursor();
@@ -772,7 +781,7 @@ impl App {
         self.indicator_timer.cancel();
         self.toast_timer.cancel();
         self.undo_timer.cancel();
-        self.svg_timer.cancel();
+        self.cancel_svg_renders();
         self.stop_transport_tick();
         self.operations.borrow_mut().clear();
         self.set_idle_inhibited(false);
@@ -1630,19 +1639,25 @@ impl App {
         ));
     }
 
-    /// Re-render the current SVG at the displayed resolution once zoom
-    /// settles, so vectors stay sharp at any zoom (FR-2.3).
+    fn cancel_svg_renders(&self) {
+        self.svg_timer.cancel();
+        self.svg_renders.borrow_mut().cancel_all();
+    }
+
+    /// Invalidate older zoom requests immediately, including during debounce.
+    /// Glycin shares the image's cancellable, so obsolete renders drain without
+    /// cancelling the cached image or releasing their active slot early.
     fn schedule_svg_rerender(self: &Rc<Self>) {
-        let is_svg = matches!(
-            &*self.media.borrow(),
-            MediaState::Image {
-                decoded,
-                ..
-            } if matches!(&**decoded, Decoded::Svg { .. })
-        );
-        if !is_svg {
+        self.cancel_svg_renders();
+        if self.shutting_down.get() {
             return;
         }
+        let decoded = match &*self.media.borrow() {
+            MediaState::Image { decoded, .. } if matches!(&**decoded, Decoded::Svg { .. }) => {
+                decoded.clone()
+            }
+            _ => return,
+        };
         let generation = self.navigation.borrow().generation();
         reset_timer(
             &self.svg_timer,
@@ -1651,42 +1666,69 @@ impl App {
                 #[strong(rename_to = app)]
                 self,
                 move || {
-                    let decoded = match &*app.media.borrow() {
-                        MediaState::Image { decoded, .. } => Some(decoded.clone()),
-                        _ => None,
-                    };
-                    let Some(decoded) = decoded else { return };
                     let Decoded::Svg { nominal, .. } = &*decoded else {
-                        return;
+                        unreachable!("SVG requests contain SVG images");
                     };
+                    // Allocation can change fit zoom without another view signal.
                     let zoom = app.view.zoom_percent() / 100.0;
-                    let w = svg_render_dimension(nominal.0 * zoom);
-                    let h = svg_render_dimension(nominal.1 * zoom);
-                    glib::spawn_future_local(clone!(
-                        #[strong]
-                        app,
-                        async move {
-                            let Decoded::Svg { image, .. } = &*decoded else {
-                                return;
-                            };
-                            let started = std::time::Instant::now();
-                            let request = glycin::FrameRequest::new().scale(w, h);
-                            if let Ok(frame) = image.specific_frame(request).await
-                                && app.navigation.borrow().is_current_generation(generation)
-                            {
-                                crate::applog!(
-                                    "svg: re-rendered {}x{} in {:.1} ms",
-                                    w,
-                                    h,
-                                    started.elapsed().as_secs_f64() * 1000.0
-                                );
-                                app.view.update_texture(frame.texture());
-                            }
-                        }
-                    ));
+                    let request = SvgRequest {
+                        decoded: decoded.clone(),
+                        generation,
+                        width: svg_render_dimension(nominal.0 * zoom),
+                        height: svg_render_dimension(nominal.1 * zoom),
+                    };
+                    let job = app.svg_renders.borrow_mut().request(request);
+                    if let Some(job) = job {
+                        app.start_svg_render(job);
+                    }
                 }
             ),
         );
+    }
+
+    fn start_svg_render(self: &Rc<Self>, mut job: ScanJob<SvgRequest>) {
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            loop {
+                let request = job.request;
+                let Decoded::Svg { image, .. } = &*request.decoded else {
+                    unreachable!("SVG requests contain SVG images");
+                };
+                let started = std::time::Instant::now();
+                #[cfg(test)]
+                if let Some(gate) = decode_tests::svg_test_gate(request.width, request.height) {
+                    use gio::prelude::CancellableExtManual;
+                    gate.future().await;
+                }
+                let frame_request =
+                    glycin::FrameRequest::new().scale(request.width, request.height);
+                let result = image.specific_frame(frame_request).await;
+                let Some(app) = weak.upgrade() else { return };
+                let (current, next) = app.svg_renders.borrow_mut().finish();
+                if current
+                    && !app.shutting_down.get()
+                    && app
+                        .navigation
+                        .borrow()
+                        .is_current_generation(request.generation)
+                {
+                    match result {
+                        Ok(frame) => {
+                            crate::applog!(
+                                "svg: re-rendered {}x{} in {:.1} ms",
+                                request.width,
+                                request.height,
+                                started.elapsed().as_secs_f64() * 1000.0
+                            );
+                            app.view.update_texture(frame.texture());
+                        }
+                        Err(error) => eprintln!("open-mpv: SVG rerender: {error}"),
+                    }
+                }
+                let Some(next) = next else { return };
+                job = next;
+            }
+        });
     }
 
     fn schedule_decodes(
@@ -1768,6 +1810,7 @@ impl App {
     /// decoded image, and bump the generation so async work already in
     /// flight knows it has been superseded.
     fn clear_media(&self) {
+        self.cancel_svg_renders();
         self.fs_refresh_timer.cancel();
         self.sidecar_scans.borrow_mut().cancel_all();
         self.pending_media_size.set(None);

@@ -232,7 +232,7 @@ impl App {
         // Keep the last texture visible while the replacement is prepared.
         self.fs_refresh_timer.cancel();
         self.stop_animation();
-        self.svg_timer.cancel();
+        self.cancel_svg_renders();
         if self.view.cancel_markup() {
             self.update_cursor();
         }
@@ -389,7 +389,7 @@ impl App {
                 handoff.cancel();
             }
             self.fs_refresh_timer.cancel();
-            self.svg_timer.cancel();
+            self.cancel_svg_renders();
             self.decodes.borrow_mut().cancel_all();
             self.navigation.borrow_mut().clear_current();
             self.cache.retain_folder(None);
@@ -409,7 +409,7 @@ impl App {
                     if pending_target.as_deref() == Some(destination.path.as_path()) {
                         self.fs_refresh_timer.cancel();
                         self.stop_animation();
-                        self.svg_timer.cancel();
+                        self.cancel_svg_renders();
                         self.stop_video();
                         // A known rename carries the visible static pixels to
                         // its new logical source while validation is pending.

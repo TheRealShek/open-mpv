@@ -1,4 +1,4 @@
-//! Bounded folder scans, subtitle discovery and attachment validation. Each
+//! Bounded folder scans, subtitle discovery, attachment validation and SVG work. Each
 //! queue retains one running job and only the newest pending request, even
 //! when cancellation is stuck in I/O.
 
