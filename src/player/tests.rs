@@ -19,6 +19,7 @@ mod imp {
         mute: Mutex<bool>,
         pub refuse: Mutex<Option<gst::StateChange>>,
         pub refuse_seek: AtomicBool,
+        pub seeks: Mutex<Vec<(f64, f64)>>,
     }
 
     #[glib::object_subclass]
@@ -40,9 +41,26 @@ mod imp {
             }
             self.parent_change_state(transition)
         }
+        fn query(&self, query: &mut gst::QueryRef) -> bool {
+            match query.view_mut() {
+                gst::QueryViewMut::Position(query) => query.set(gst::ClockTime::from_seconds(3)),
+                gst::QueryViewMut::Duration(query) => query.set(gst::ClockTime::from_seconds(60)),
+                _ => return self.parent_query(query),
+            }
+            true
+        }
+
         fn send_event(&self, event: gst::Event) -> bool {
-            matches!(event.view(), gst::EventView::Seek(_))
-                && !self.refuse_seek.load(Ordering::Relaxed)
+            if let gst::EventView::Seek(seek) = event.view() {
+                let (rate, _, _, start, _, _) = seek.get();
+                let gst::GenericFormattedValue::Time(Some(position)) = start else {
+                    panic!("expected time seek");
+                };
+                let position = position.seconds_f64();
+                self.seeks.lock().unwrap().push((position, rate));
+                return !self.refuse_seek.load(Ordering::Relaxed);
+            }
+            false
         }
     }
 }
@@ -51,12 +69,23 @@ glib::wrapper! {
 }
 
 impl TestPipeline {
+    pub(crate) fn refuse_seeks(&self, refuse: bool) {
+        self.imp().refuse_seek.store(refuse, Ordering::Relaxed);
+    }
+
     pub(crate) fn refuse_transition(&self, transition: Option<gst::StateChange>) {
         *self.imp().refuse.lock().unwrap() = transition;
     }
 }
 
 pub(crate) fn with_player(test: impl FnOnce(Player, TestPipeline)) {
+    with_player_events(|_| {}, test);
+}
+
+pub(crate) fn with_player_events(
+    on_event: impl Fn(Event) + 'static,
+    test: impl FnOnce(Player, TestPipeline),
+) {
     gst::init().unwrap();
     let context = glib::MainContext::new();
     let _guard = context.acquire().unwrap();
@@ -84,6 +113,8 @@ pub(crate) fn with_player(test: impl FnOnce(Player, TestPipeline)) {
                 subtitles_default_on: Cell::new(true),
                 decoder_fallback: Arc::new(Mutex::new(DecoderFallback::default())),
                 _bus_watch: watch,
+                on_event: Rc::new(on_event),
+                seek_watch: None,
             };
             test(player, pipeline);
         })
@@ -494,4 +525,275 @@ fn navigation_cancels_pending_trash_recovery_seek() {
         );
         assert!(player.is_playing());
     });
+}
+
+#[test]
+fn scrubbing_keyboard_and_rate_refusals_reconcile_with_actual_progress() {
+    with_player(|mut player, pipeline| {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        player.on_event = Rc::new(move |event| observed.borrow_mut().push(event));
+        player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
+        pipeline.imp().refuse_seek.store(true, Ordering::Relaxed);
+        player.seek_fraction(0.5);
+        assert!(matches!(events.borrow().last(), Some(Event::SeekRefused)));
+        assert_eq!(player.progress(), Some((3.0, 60.0)));
+        player.seek_by(5.0);
+        assert_eq!(
+            pipeline.imp().seeks.lock().unwrap().last(),
+            Some(&(8.0, 1.0))
+        );
+        assert_eq!(events.borrow().len(), 2);
+
+        pipeline.imp().refuse_seek.store(false, Ordering::Relaxed);
+        player.seek_fraction(0.5);
+        player.seek_by(5.0);
+        player.seek_by(5.0);
+        assert_eq!(player.progress(), Some((40.0, 60.0)));
+        pipeline.imp().refuse_seek.store(true, Ordering::Relaxed);
+        finish_async(
+            &player.playbin,
+            &player.seek_target,
+            &player.playback,
+            &player.on_event,
+        );
+        assert_eq!(
+            pipeline.imp().seeks.lock().unwrap().last(),
+            Some(&(40.0, 1.0))
+        );
+        assert!(matches!(events.borrow().last(), Some(Event::SeekRefused)));
+        assert_eq!(player.progress(), Some((3.0, 60.0)));
+
+        pipeline.imp().refuse_seek.store(false, Ordering::Relaxed);
+        player.seek_by(5.0);
+        assert_eq!(player.set_playback_rate(1.5), Ok(1.5));
+        pipeline.imp().refuse_seek.store(true, Ordering::Relaxed);
+        finish_async(
+            &player.playbin,
+            &player.seek_target,
+            &player.playback,
+            &player.on_event,
+        );
+        assert!(matches!(
+            events.borrow().last(),
+            Some(Event::PlaybackRateError(PlaybackRateError::SeekRefused))
+        ));
+        assert_eq!(player.playback_rate(), 1.0);
+        assert_eq!(player.progress(), Some((3.0, 60.0)));
+    });
+}
+
+#[test]
+fn missing_completion_discards_queue_and_navigation_cancels_timeout() {
+    with_player(|mut player, pipeline| {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        player.on_event = Rc::new(move |event| observed.borrow_mut().push(event));
+        player.play(Path::new("/tmp/old.mp4"), None).unwrap();
+        player.seek_fraction(0.5);
+        player.set_playback_rate(1.5).unwrap();
+        player.seek_fraction(0.8);
+        std::thread::sleep(playback::SEEK_SETTLE);
+        expire_seek(&player.playbin, &player.playback, &player.on_event);
+        assert!(matches!(events.borrow().last(), Some(Event::SeekTimedOut)));
+        assert_eq!(player.progress(), Some((3.0, 60.0)));
+        assert_eq!(player.playback_rate(), 1.0);
+        assert_eq!(pipeline.imp().seeks.lock().unwrap().len(), 1);
+        expire_seek(&player.playbin, &player.playback, &player.on_event);
+        assert_eq!(events.borrow().len(), 1, "timeout reports once");
+        finish_async(
+            &player.playbin,
+            &player.seek_target,
+            &player.playback,
+            &player.on_event,
+        );
+        assert_eq!(
+            pipeline.imp().seeks.lock().unwrap().len(),
+            1,
+            "late completion cannot replay the discarded queue"
+        );
+        player.seek_by(5.0);
+        player.seek_fraction(0.9);
+        player.play(Path::new("/tmp/new.mp4"), None).unwrap();
+        std::thread::sleep(playback::SEEK_SETTLE);
+        expire_seek(&player.playbin, &player.playback, &player.on_event);
+        assert_eq!(events.borrow().len(), 1, "navigation cancels old work");
+        assert_eq!(player.progress(), Some((3.0, 60.0)));
+        player.stop().unwrap();
+        assert_eq!(player.playback.borrow().pending_seek_position(), None);
+        assert_eq!(pipeline.current_state(), gst::State::Null);
+    });
+}
+
+#[test]
+#[ignore = "requires GTK, GStreamer codecs and OPEN_MPV_TRANSITION_VIDEO; no windows mapped"]
+fn real_pipeline_seeks_rates_missing_completion_and_cleanup() {
+    gtk4::init().unwrap();
+    let video = PathBuf::from(
+        std::env::var_os("OPEN_MPV_TRANSITION_VIDEO").expect("provide a local test video"),
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let observed = events.clone();
+    let player = Player::new(move |event| observed.borrow_mut().push(event)).unwrap();
+    let playback = Rc::downgrade(&player.playback);
+    glib::MainContext::default().block_on(async {
+        player.play(&video, None).unwrap();
+        wait_for_playback(&player).await;
+        player.toggle_pause().unwrap();
+        for playing in [false, true] {
+            if playing {
+                player.toggle_pause().unwrap();
+            }
+            for rate in [1.5, 0.75, 1.0] {
+                player.seek_fraction(0.4);
+                player.seek_by(5.0);
+                player.seek_by(-2.0);
+                player.set_playback_rate(rate).unwrap();
+                glib::timeout_future(std::time::Duration::from_millis(700)).await;
+                assert_eq!(player.playback_rate(), rate);
+                assert!(player.playback.borrow().pending_seek_position().is_none());
+                let actual = player
+                    .playbin
+                    .query_position::<gst::ClockTime>()
+                    .unwrap()
+                    .seconds_f64();
+                let (_, duration) = player.progress().unwrap();
+                assert!(
+                    (actual - (duration * 0.4 + 3.0)).abs() < if playing { 1.5 } else { 0.2 },
+                    "seek landed at {actual}"
+                );
+                assert_eq!(player.is_playing(), playing);
+            }
+        }
+        player.toggle_pause().unwrap();
+        // Drain the pause completion before suppressing future seek completions.
+        glib::timeout_future(std::time::Duration::from_millis(200)).await;
+        assert_eq!(player.playbin.current_state(), gst::State::Paused);
+        assert!(events.borrow().iter().all(|event| !matches!(
+            event,
+            Event::SeekRefused
+                | Event::SeekTimedOut
+                | Event::PlaybackRateError(_)
+                | Event::Error(_)
+        )));
+        player
+            .playbin
+            .bus()
+            .unwrap()
+            .set_sync_handler(|_, message| {
+                if matches!(message.view(), gst::MessageView::AsyncDone(_)) {
+                    gst::BusSyncReply::Drop
+                } else {
+                    gst::BusSyncReply::Pass
+                }
+            });
+        player.seek_fraction(0.2);
+        player.set_playback_rate(2.0).unwrap();
+        player.seek_fraction(0.8);
+        glib::timeout_future(std::time::Duration::from_millis(1800)).await;
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| matches!(event, Event::SeekTimedOut))
+                .count(),
+            1
+        );
+        assert_eq!(player.playback_rate(), 1.0, "queued rate must be discarded");
+        let (position, duration) = player.progress().unwrap();
+        assert!(
+            (position - duration * 0.2).abs() < 0.2,
+            "progress must report actual position"
+        );
+        player.seek_fraction(0.6);
+        player.seek_fraction(0.9);
+        player.play(&video, None).unwrap();
+        wait_for_playback(&player).await;
+        glib::timeout_future(std::time::Duration::from_millis(1700)).await;
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| matches!(event, Event::SeekTimedOut))
+                .count(),
+            1,
+            "navigation cancels old feedback"
+        );
+        assert!(player.progress().unwrap().0 < 4.0);
+        player.stop().unwrap();
+        assert_eq!(player.playbin.current_state(), gst::State::Null);
+        assert_eq!(player.seek_target.current_state(), gst::State::Null);
+    });
+    drop(player);
+    assert!(
+        playback.upgrade().is_none(),
+        "watchdog and bus must release playback on drop"
+    );
+}
+
+#[test]
+fn expired_queue_is_discarded_before_late_completion_or_new_input() {
+    for completion_first in [false, true] {
+        with_player(|mut player, pipeline| {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let observed = events.clone();
+            player.on_event = Rc::new(move |event| observed.borrow_mut().push(event));
+            player.play(Path::new("/tmp/movie.mp4"), None).unwrap();
+            player.seek_fraction(0.4);
+            player.set_playback_rate(1.5).unwrap();
+            player.seek_fraction(0.8);
+            std::thread::sleep(playback::SEEK_SETTLE);
+            if completion_first {
+                finish_async(
+                    &player.playbin,
+                    &player.seek_target,
+                    &player.playback,
+                    &player.on_event,
+                );
+                assert_eq!(pipeline.imp().seeks.lock().unwrap().len(), 1);
+                assert_eq!(player.progress(), Some((3.0, 60.0)));
+            } else {
+                player.seek_by(5.0);
+                assert_eq!(
+                    pipeline.imp().seeks.lock().unwrap().last(),
+                    Some(&(8.0, 1.0))
+                );
+            }
+            assert_eq!(player.playback_rate(), 1.0);
+            assert_eq!(events.borrow().len(), 1);
+            assert!(matches!(events.borrow()[0], Event::SeekTimedOut));
+            expire_seek(&player.playbin, &player.playback, &player.on_event);
+            assert_eq!(events.borrow().len(), 1);
+        });
+    }
+}
+
+#[test]
+fn missing_recovery_seek_completion_restores_playing_or_paused_state() {
+    for playing in [false, true] {
+        with_player(|player, _| {
+            let recovery = PlaybackRecovery {
+                position: 23.5,
+                rate: 1.5,
+                playing,
+                subtitle: None,
+            };
+            player
+                .restore_playback(Path::new("/tmp/movie.mp4"), &recovery)
+                .unwrap();
+            finish_async(
+                &player.playbin,
+                &player.seek_target,
+                &player.playback,
+                &player.on_event,
+            );
+            assert!(player.playback.borrow().is_resuming());
+            std::thread::sleep(playback::SEEK_SETTLE);
+            expire_seek(&player.playbin, &player.playback, &player.on_event);
+            assert!(!player.playback.borrow().is_resuming());
+            assert_eq!(player.is_playing(), playing);
+            assert_eq!(player.progress(), Some((3.0, 60.0)));
+            assert_eq!(player.playback_rate(), 1.5);
+        });
+    }
 }

@@ -22,7 +22,7 @@ use super::tracks::{
 const SEEK_FLAGS: gst::SeekFlags = gst::SeekFlags::FLUSH.union(gst::SeekFlags::ACCURATE);
 /// Safety net: if a seek never gets its `AsyncDone` (broken file, stalled
 /// demuxer), stop reporting its target and fall back to real queries.
-const SEEK_SETTLE: Duration = Duration::from_millis(1500);
+pub(super) const SEEK_SETTLE: Duration = Duration::from_millis(1500);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackRateError {
     PitchFilterUnavailable,
@@ -234,7 +234,16 @@ impl FocusedPlayback {
     }
 
     pub(super) fn seek_refused(&mut self) {
-        self.seek.in_flight = None;
+        self.seek = SeekState::default();
+    }
+
+    /// Discard all unconfirmed work when completion never arrives.
+    pub(super) fn expire_seek(&mut self) -> bool {
+        if self.seek.in_flight.is_none() || self.seek.running().is_some() {
+            return false;
+        }
+        self.seek = SeekState::default();
+        true
     }
 
     pub(super) fn prepare_subtitle_rebuild(
@@ -727,8 +736,8 @@ fn stream_by_id(collection: &gst::StreamCollection, id: &str) -> Option<gst::Str
 impl SeekState {
     /// Where playback is headed, while it is still on its way there.
     pub(super) fn pending(&self) -> Option<SeekRequest> {
-        self.queued
-            .or_else(|| self.running().map(|(request, _)| request))
+        self.running()
+            .map(|(request, _)| self.queued.unwrap_or(request))
     }
 
     /// The in-flight seek, unless it is old enough to count as lost.
@@ -764,6 +773,7 @@ pub(super) fn issue_seek(
 ) -> bool {
     let position = request.position.max(0.0);
     let Ok(target) = gst::ClockTime::try_from_seconds_f64(position) else {
+        playback.borrow_mut().seek_refused();
         crate::applog!("player: refusing invalid seek target {position}");
         return false;
     };
@@ -1294,6 +1304,15 @@ mod tests {
         );
         refresh_stream_tracks(&mut playback);
         assert_eq!(playback.subtitle_tracks[0].label, "External — movie.en.srt");
+    }
+
+    #[test]
+    fn a_lost_seek_with_queued_scrub_and_rate_stops_being_reported() {
+        let mut state = SeekState::default();
+        issued(&mut state, request(12.0, 1.0), Duration::ZERO);
+        assert!(!state.request(request(20.0, 1.5)));
+        state.in_flight.as_mut().unwrap().1 = Instant::now() - SEEK_SETTLE;
+        assert_eq!(state.pending(), None);
     }
 
     #[test]

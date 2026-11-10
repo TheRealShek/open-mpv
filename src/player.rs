@@ -56,6 +56,8 @@ pub enum Event {
     SubtitlesChanged(SubtitleSnapshot),
     PlaybackRateError(PlaybackRateError),
     StateError(PlayerError),
+    SeekRefused,
+    SeekTimedOut,
 }
 
 #[derive(Debug)]
@@ -137,6 +139,8 @@ pub struct Player {
     decoder_fallback: Arc<Mutex<DecoderFallback>>,
     /// Keeps the bus watch alive; dropping it detaches the watch.
     _bus_watch: gst::bus::BusWatchGuard,
+    on_event: Rc<dyn Fn(Event)>,
+    seek_watch: Option<glib::SourceId>,
 }
 
 /// Transient recovery point captured before releasing a video for Trash.
@@ -375,6 +379,16 @@ impl Player {
             })
             .map_err(PlayerError::BusWatch)?;
 
+        let seek_watch = glib::timeout_add_local(std::time::Duration::from_millis(100), {
+            let playbin = playbin.clone();
+            let playback = playback.clone();
+            let on_event = on_event.clone();
+            move || {
+                expire_seek(&playbin, &playback, &on_event);
+                glib::ControlFlow::Continue
+            }
+        });
+
         Ok(Player {
             playbin,
             seek_target: sink,
@@ -384,6 +398,8 @@ impl Player {
             subtitles_default_on: Cell::new(true),
             decoder_fallback,
             _bus_watch: bus_watch,
+            on_event,
+            seek_watch: Some(seek_watch),
         })
     }
 
@@ -722,6 +738,7 @@ impl Player {
     /// are measured from the pending target, so hammering the seek key
     /// moves the full distance instead of repeating one 5-second jump.
     pub fn seek_by(&self, delta: f64) {
+        expire_seek(&self.playbin, &self.playback, &self.on_event);
         let Some((pos, dur)) = self.progress() else {
             return;
         };
@@ -730,6 +747,7 @@ impl Player {
 
     /// Seek to `fraction` (0..1) of the duration.
     pub fn seek_fraction(&self, fraction: f64) {
+        expire_seek(&self.playbin, &self.playback, &self.on_event);
         let Some(dur) = self.duration() else {
             return;
         };
@@ -739,10 +757,11 @@ impl Player {
     /// Keeps at most one seek in flight; a request that arrives during
     /// one supersedes any other waiting request (see `SeekState`).
     fn seek_to(&self, secs: f64) {
+        expire_seek(&self.playbin, &self.playback, &self.on_event);
         let request = SeekRequest::new(secs, self.playback_rate());
         let issue_now = self.playback.borrow_mut().request_seek(request);
         if issue_now {
-            issue_seek(&self.seek_target, &self.playback, request);
+            issue_seek_with_feedback(&self.seek_target, &self.playback, request, &self.on_event);
         }
     }
 
@@ -758,6 +777,7 @@ impl Player {
     /// audio segment unable to handle the next time-format seek, so that path
     /// is not compatible with the required seeking and looping behavior.
     pub fn set_playback_rate(&self, rate: f64) -> Result<f64, PlaybackRateError> {
+        expire_seek(&self.playbin, &self.playback, &self.on_event);
         if !PLAYBACK_RATES
             .iter()
             .any(|candidate| same_rate(*candidate, rate))
@@ -795,6 +815,7 @@ impl Player {
 
     /// Restart from the beginning (EOS loop, FR-10.3).
     pub fn rewind(&self) -> Result<(), PlayerError> {
+        expire_seek(&self.playbin, &self.playback, &self.on_event);
         // EOS has stopped advancing, even if the pipeline still says Playing.
         self.playback.borrow_mut().set_playing(false);
         let request = SeekRequest::new(0.0, self.playback_rate());
@@ -834,6 +855,10 @@ fn finish_async(
     playback: &Rc<RefCell<FocusedPlayback>>,
     on_event: &Rc<dyn Fn(Event)>,
 ) {
+    // A late completion must not dispatch a queue that already expired.
+    if expire_seek(playbin, playback, on_event) {
+        return;
+    }
     // Replacing an external sidecar rebuilds the
     // same URI, then restores position and
     // the former playback state without blocking the
@@ -848,11 +873,11 @@ fn finish_async(
             let needs_seek =
                 position > f64::EPSILON || !same_rate(rate, playback.borrow().accepted_rate());
             if !needs_seek || !issue_seek(seek_target, playback, SeekRequest::new(position, rate)) {
-                if needs_seek && !same_rate(rate, playback.borrow().accepted_rate()) {
-                    on_event(Event::PlaybackRateError(PlaybackRateError::SeekRefused));
-                }
                 playback.borrow_mut().cancel_resume();
                 finish_resume(playbin, playback, on_event, resume_playing);
+                if needs_seek {
+                    report_seek_refusal(playback, SeekRequest::new(position, rate), on_event);
+                }
             }
             return;
         }
@@ -867,11 +892,52 @@ fn finish_async(
     // up behind it can go out now.
     let next = { playback.borrow_mut().finish_seek() };
     if let Some(request) = next {
-        let rate_change = !same_rate(request.rate(), playback.borrow().accepted_rate());
-        if !issue_seek(seek_target, playback, request) && rate_change {
-            on_event(Event::PlaybackRateError(PlaybackRateError::SeekRefused));
-        }
+        issue_seek_with_feedback(seek_target, playback, request, on_event);
     }
+}
+
+/// Report after releasing the model borrow: UI callbacks query progress and rate.
+fn report_seek_refusal(
+    playback: &RefCell<FocusedPlayback>,
+    request: SeekRequest,
+    on_event: &Rc<dyn Fn(Event)>,
+) {
+    let rate_change = !same_rate(request.rate(), playback.borrow().accepted_rate());
+    if rate_change {
+        on_event(Event::PlaybackRateError(PlaybackRateError::SeekRefused));
+    } else {
+        on_event(Event::SeekRefused);
+    }
+}
+
+fn issue_seek_with_feedback(
+    seek_target: &gst::Element,
+    playback: &RefCell<FocusedPlayback>,
+    request: SeekRequest,
+    on_event: &Rc<dyn Fn(Event)>,
+) {
+    if !issue_seek(seek_target, playback, request) {
+        report_seek_refusal(playback, request, on_event);
+    }
+}
+
+fn expire_seek(
+    playbin: &gst::Element,
+    playback: &Rc<RefCell<FocusedPlayback>>,
+    on_event: &Rc<dyn Fn(Event)>,
+) -> bool {
+    let expired = playback.borrow_mut().expire_seek();
+    if !expired {
+        return false;
+    }
+    crate::applog!("player: seek completion timed out; discarding pending targets");
+    // A subtitle rebuild may also be waiting for this seek before resuming.
+    let resume_action = playback.borrow_mut().observe_async_done();
+    if let ResumeAction::Finish { resume_playing } = resume_action {
+        finish_resume(playbin, playback, on_event, resume_playing);
+    }
+    on_event(Event::SeekTimedOut);
+    true
 }
 
 fn finish_resume(
@@ -1055,6 +1121,9 @@ fn recover_without_external(
 
 impl Drop for Player {
     fn drop(&mut self) {
+        if let Some(source) = self.seek_watch.take() {
+            source.remove();
+        }
         // NFR-2.2: nothing keeps running once the window is gone.
         if let Err(error) = self.stop() {
             eprintln!("open-mpv: player cleanup: {error}");

@@ -1503,11 +1503,21 @@ impl App {
                     self.update_subtitles(snapshot);
                 }
             }
+            player::Event::SeekRefused | player::Event::SeekTimedOut => {
+                if self.is_video_showing() {
+                    self.update_transport();
+                    self.show_toast(match event {
+                        player::Event::SeekTimedOut => "Seeking took too long. Try again.",
+                        _ => "Could not seek in this video. Try another position.",
+                    });
+                }
+            }
             player::Event::PlaybackRateError(error) => {
                 if self.is_video_showing() {
                     if let Some(rate) = self.with_video(Player::playback_rate) {
                         self.update_playback_rate(rate);
                     }
+                    self.update_transport();
                     self.show_toast(&error.to_string());
                 }
             }
