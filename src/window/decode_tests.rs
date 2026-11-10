@@ -1107,3 +1107,31 @@ fn failed_video_trash_restores_real_pipeline_position_and_state() {
         app.shutdown();
     });
 }
+
+#[test]
+#[ignore = "requires GTK; uses an unmapped window and a test pipeline"]
+fn refused_seek_shows_feedback_and_reconciles_transport() {
+    let app = edit_test_app();
+    let weak = Rc::downgrade(&app);
+    crate::player::tests::with_player_events(
+        move |event| weak.upgrade().unwrap().on_player_event(event),
+        |player, pipeline| {
+            let player = Rc::new(player);
+            *app.player.borrow_mut() = Some(player.clone());
+            app.start_video(Path::new("/tmp/refused-seek.mp4"), None, None);
+            pipeline.refuse_seeks(true);
+            app.execute_command(Command::Seek(action::Step::Forward));
+            assert!(app.toast_label.text().contains("Could not seek"));
+            assert_eq!(app.time_label.text(), "0:03 / 1:00");
+            assert!((app.seek_bar.value() - 0.05).abs() < f64::EPSILON);
+            // GtkRange's default handler moves the thumb after change-value.
+            // The next transport update must restore the actual position.
+            app.seek_bar
+                .emit_by_name::<bool>("change-value", &[&gtk::ScrollType::Jump, &0.7_f64]);
+            app.update_transport();
+            assert!((app.seek_bar.value() - 0.05).abs() < f64::EPSILON);
+            assert_eq!(app.time_label.text(), "0:03 / 1:00");
+            app.shutdown();
+        },
+    );
+}
