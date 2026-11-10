@@ -250,7 +250,12 @@ new product decisions rather than incidental implementation.
   on the Reference environment; unsupported streams may fall back to installed
   software decoding. Requirements do not mandate one vendor backend.
 - **FR-10.6** Missing codecs, refused seeks/rates and subtitle errors are normal in-window
-  errors. Refused playback state changes never report success, and replacing
+  errors. Immediate and queued seek refusals show a brief message and reconcile
+  progress with the pipeline position. If seek completion is missing for 1.5
+  seconds, discard both the running target and queued scrub/rate request, report
+  the timeout, and query actual progress again, even with controls hidden.
+  Navigation and close cancel pending seeks and their feedback.
+  Refused playback state changes never report success, and replacing
   media requires the old pipeline to finish stopping. Playback failure never
   crashes the app. Technical causes belong in diagnostics; user messages use
   plain language.

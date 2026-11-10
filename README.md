@@ -87,7 +87,9 @@ you browse. Rapid navigation keeps image-loading work bounded and gives the
 current photo priority over preloading neighbors. A loading message identifies
 pending navigation, and Trash stays disabled until loading finishes.
 Opening another folder releases cached images from the previous folder. Switching between photos and videos
-keeps playback controls responsive.
+keeps playback controls responsive. If seeking is refused or takes too long,
+a brief message explains the failure and progress returns to the reported
+playback position. Try another position or reopen the video.
 
 Trash Undo restores the exact file version moved by that operation, including
 when older versions from the same path are already in Trash. It never replaces
