@@ -100,11 +100,14 @@ volume, mute state and subtitles during the current open-mpv session.
 
 | Setting | Default | Use it when | Values and effect |
 | --- | --- | --- | --- |
-| `cache-budget-mb` | `256` | You want faster neighboring-image navigation or lower memory use. | Maximum extra decoded-image memory in MiB beyond the image currently displayed. `0` keeps no decoded neighbors. Videos are never stored in this cache. |
+| `cache-budget-mb` | `256` | You want faster neighboring-image navigation or lower memory use. | Maximum retained first-frame buffer bytes in MiB for decoded neighbors beyond the image currently displayed. `0` keeps no decoded neighbors. Videos are never stored in this cache. |
 
-The displayed image can itself use more memory than this budget. Lowering the
-budget saves memory at the cost of decoding nearby images again when you reach
-them.
+The budget counts each neighbor's actual Glycin buffer length, including
+high-precision pixels and row padding. It does not cap total process memory:
+the displayed image, animation/SVG working frames, decoder processes and their
+working memory, GPU copies and library overhead are separate. The displayed
+image can itself exceed the budget. Lowering the budget saves memory at the
+cost of decoding nearby images again when you reach them.
 
 ## Custom key bindings
 

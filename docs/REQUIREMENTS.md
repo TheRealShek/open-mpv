@@ -111,7 +111,13 @@ new product decisions rather than incidental implementation.
   of user pause; restoring the window never overrides it. The contextual button
   reflects playback state, and toggling flashes “Paused” or “Play”.
 - **NFR-1.3 / NFR-3.3** Async decode, animation, SVG and metadata results apply only to the media
-  generation that started them.
+  generation that started them. SVG zoom rerenders have one active request and
+  one replaceable pending request across media changes. A newer view request
+  invalidates older results immediately, including during its debounce delay.
+  Navigation, source invalidation, clearing and shutdown discard pending SVG
+  work and reject its results. An obsolete active render keeps its slot until
+  completion because cancelling the shared Glycin image would invalidate cache
+  reuse. Each requested dimension is limited to 4096 pixels.
 
 ### FR-5 — File, clipboard and editing safety
 
@@ -357,7 +363,11 @@ new product decisions rather than incidental implementation.
   reads the subtitle path, so validation does not pin its contents against
   external changes.
 - **NFR-2.1 / NFR-2.1a** The displayed image may exceed a cache budget, but all additional decoded
-  media is bounded by checked byte and count limits. A zero neighbor budget
+  media is bounded by checked byte and count limits. Charge the actual retained
+  first-frame buffer length, including high-precision pixels and row padding.
+  This cache budget excludes displayed/working frames, decoder processes and
+  working memory, GPU copies and library overhead; it is not a total PSS cap.
+  A zero neighbor budget
   retains no neighbors. Installing a folder releases cached images outside that
   directory, including the previous foreground entry; same-folder opens retain
   useful cache hits. Empty and error presentation releases all cached images

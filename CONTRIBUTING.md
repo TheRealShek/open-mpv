@@ -79,3 +79,16 @@ behavior.
 
 Some behavior, including keyboard, pointer, clipboard and visual interaction,
 must also be tested in a real GNOME Wayland session.
+
+The SVG ordering and high-precision cache regressions use unmapped GTK windows.
+Run them separately in a Wayland session:
+
+```sh
+cargo test --locked window::decode_tests::svg_zoom_requests_are_bounded_and_superseded_results_never_display -- --ignored --exact
+cargo test --locked window::decode_tests::high_precision_navigation_evicts_neighbors_and_settles_pss -- --ignored --exact --nocapture
+```
+
+The memory check needs ImageMagick, generates temporary 12 MP RGBA16 TIFFs and
+reports Linux process-tree PSS over repeated navigation and after cleanup.
+Texture downloads fault in the CPU mappings without presenting a window.
+These checks do not establish displayed behavior or GPU memory use.

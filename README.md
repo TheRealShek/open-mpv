@@ -85,8 +85,12 @@ Animated images, SVGs and videos still follow the folder's replacement behavior.
 The window starts at a size that fits your display and keeps that size as
 you browse. Rapid navigation keeps image-loading work bounded and gives the
 current photo priority over preloading neighbors. A loading message identifies
-pending navigation, and Trash stays disabled until loading finishes.
-Opening another folder releases cached images from the previous folder. Switching between photos and videos
+pending navigation, and Trash stays disabled until loading finishes. SVG zooming
+keeps one rerender active and only the latest requested resolution pending;
+older results cannot replace the latest view.
+Opening another folder releases cached images from the previous folder. The
+[neighbor cache budget](docs/CONFIGURATION.md#neighbor-image-cache) counts retained image buffers,
+including high-precision pixels and row padding. Switching between photos and videos
 keeps playback controls responsive. If seeking is refused or takes too long,
 a brief message explains the failure and progress returns to the reported
 playback position. Try another position or reopen the video.
