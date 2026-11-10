@@ -429,6 +429,7 @@ impl App {
             toast_timer: TimerSlot::default(),
             undo_timer: TimerSlot::default(),
             svg_timer: TimerSlot::default(),
+            svg_renders: RefCell::new(ScanQueue::default()),
             markup_action: gio::SimpleAction::new(Action::Markup.name(), None),
             markup_box_action: gio::SimpleAction::new(Action::MarkupBox.name(), None),
             markup_arrow_action: gio::SimpleAction::new(Action::MarkupArrow.name(), None),

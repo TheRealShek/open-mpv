@@ -15,7 +15,6 @@ use std::rc::Rc;
 
 use gtk4::gdk;
 use gtk4::gio;
-use gtk4::prelude::TextureExt;
 
 /// Longest edge we ask glycin to re-render an SVG at while zooming;
 /// bounds memory for pathological zoom levels.
@@ -24,18 +23,21 @@ pub const SVG_RENDER_MAX: u32 = 4096;
 pub enum Decoded {
     Static {
         texture: gdk::Texture,
+        bytes: usize,
     },
     /// Keeps the glycin image (and its loader process) alive so frames
     /// can be pulled for playback.
     Animated {
         image: glycin::Image,
         first: gdk::Texture,
+        bytes: usize,
     },
     /// Keeps the glycin image alive to re-render sharply at new zoom
     /// levels; `nominal` is the document's own size in px.
     Svg {
         image: glycin::Image,
         first: gdk::Texture,
+        bytes: usize,
         nominal: (f64, f64),
     },
 }
@@ -66,7 +68,7 @@ impl std::error::Error for DecodeError {
 impl Decoded {
     pub fn first_texture(&self) -> gdk::Texture {
         match self {
-            Decoded::Static { texture } => texture.clone(),
+            Decoded::Static { texture, .. } => texture.clone(),
             Decoded::Animated { first, .. } => first.clone(),
             Decoded::Svg { first, .. } => first.clone(),
         }
@@ -103,44 +105,42 @@ pub async fn decode(
         mime,
         started.elapsed().as_secs_f64() * 1000.0
     );
+    let bytes = frame.buf_slice().len();
     let is_svg = matches!(mime.as_str(), "image/svg+xml" | "image/svg+xml-compressed");
     let decoded = if is_svg {
         Decoded::Svg {
+            bytes,
             nominal: (f64::from(frame.width()), f64::from(frame.height())),
             first: frame.texture(),
             image,
         }
     } else if frame.delay().is_some() {
         Decoded::Animated {
+            bytes,
             first: frame.texture(),
             image,
         }
     } else {
         Decoded::Static {
+            bytes,
             texture: frame.texture(),
         }
     };
     Ok((Rc::new(decoded), mime))
 }
 
-/// Upper-bound resident size of a decoded frame, assuming 4 bytes per
-/// pixel; glycin frames are often RGB8, so this over-counts by ≤ ⅓,
-/// erring toward staying under the budget.
+/// Exact backing-buffer length supplied to GDK, including high-precision
+/// pixels and row padding. This excludes decoder processes and GPU copies.
 fn frame_bytes(decoded: &Decoded) -> usize {
-    let t = decoded.first_texture();
-    let (Ok(width), Ok(height)) = (usize::try_from(t.width()), usize::try_from(t.height())) else {
-        // An invalid foreign dimension must never wrap into a small cache
-        // charge. Treat it as over-budget so it cannot retain neighbors.
-        return usize::MAX;
-    };
-    width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .unwrap_or(usize::MAX)
+    match decoded {
+        Decoded::Static { bytes, .. }
+        | Decoded::Animated { bytes, .. }
+        | Decoded::Svg { bytes, .. } => *bytes,
+    }
 }
 
 /// Tiny LRU keyed by path: current image plus pre-decoded neighbors.
-/// Bounded twice — by entry count and by estimated decoded bytes
+/// Bounded twice — by entry count and by retained first-frame buffer bytes
 /// (NFR-2.1) — so a folder of 100 MP photos cannot triple its RAM the
 /// way it would with a count-only cap. Pin changes and insertions enforce both
 /// limits without evicting the foreground entry. Speculative entries, including
@@ -281,11 +281,46 @@ mod tests {
             gdk::MemoryTexture::new(w, h, gdk::MemoryFormat::R8g8b8a8, &bytes, (w * 4) as usize);
         Rc::new(Decoded::Static {
             texture: tex.into(),
+            bytes: bytes.len(),
         })
     }
 
     fn put(cache: &Cache, name: &str, w: i32, h: i32) {
         cache.put_neighbor(PathBuf::from(name), decoded(w, h), "image/png".into());
+    }
+
+    #[test]
+    fn high_precision_neighbors_use_their_full_buffer_charge() {
+        for (format, pixel_bytes) in [
+            (gdk::MemoryFormat::R16g16b16a16, 8),
+            (gdk::MemoryFormat::R32g32b32a32Float, 16),
+        ] {
+            let width = 100;
+            let height = 100;
+            let stride = width * pixel_bytes + 64;
+            let bytes = gtk4::glib::Bytes::from_owned(vec![0u8; stride * height]);
+            let texture =
+                gdk::MemoryTexture::new(width as i32, height as i32, format, &bytes, stride);
+            let decoded = Rc::new(Decoded::Static {
+                texture: texture.into(),
+                bytes: bytes.len(),
+            });
+            let cache = Cache::new(3, stride * height);
+            cache.put_foreground("shown".into(), decoded.clone(), "image/tiff".into());
+            cache.put_neighbor("a".into(), decoded.clone(), "image/tiff".into());
+            cache.put_neighbor("b".into(), decoded.clone(), "image/tiff".into());
+            assert!(
+                !cache.contains(Path::new("a")),
+                "high-precision neighbor must be evicted: {format:?}"
+            );
+            assert!(cache.contains(Path::new("b")));
+            cache.pin(Path::new("b"));
+            cache.put_neighbor("c".into(), decoded.clone(), "image/tiff".into());
+            assert!(!cache.contains(Path::new("shown")));
+            cache.retain_folder(None);
+            assert!(cache.entries.borrow().is_empty());
+            assert_eq!(Rc::strong_count(&decoded), 1);
+        }
     }
 
     #[test]

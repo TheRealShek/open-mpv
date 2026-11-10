@@ -612,6 +612,15 @@ impl ImageView {
         self.queue_draw();
     }
 
+    #[cfg(test)]
+    pub(crate) fn texture_size(&self) -> Option<(i32, i32)> {
+        self.state()
+            .paintable
+            .as_ref()?
+            .downcast_ref::<gtk::gdk::Texture>()
+            .map(|texture| (texture.width(), texture.height()))
+    }
+
     /// Initial fit mode from config (FR-8.2 `fit=`).
     pub fn set_default_fit_actual(&self, actual: bool) {
         self.state().default_fit_actual = actual;

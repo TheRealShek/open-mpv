@@ -151,6 +151,7 @@ fn test_image(width: i32) -> Rc<Decoded> {
     );
     Rc::new(Decoded::Static {
         texture: texture.into(),
+        bytes: stride,
     })
 }
 
@@ -1134,4 +1135,284 @@ fn refused_seek_shows_feedback_and_reconciles_transport() {
             app.shutdown();
         },
     );
+}
+
+#[derive(Default)]
+struct SvgTest {
+    requests: Vec<(u32, u32)>,
+    gate: gio::Cancellable,
+}
+
+thread_local! {
+    static SVG_TEST: RefCell<Option<SvgTest>> = const { RefCell::new(None) };
+}
+
+pub(super) fn svg_test_gate(width: u32, height: u32) -> Option<gio::Cancellable> {
+    SVG_TEST.with(|state| {
+        let mut state = state.borrow_mut();
+        let test = state.as_mut()?;
+        test.requests.push((width, height));
+        Some(test.gate.clone())
+    })
+}
+
+#[test]
+#[ignore = "requires a Wayland session; creates no mapped window"]
+fn svg_zoom_requests_are_bounded_and_superseded_results_never_display() {
+    let app = edit_test_app();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.svg");
+    std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16" fill="red"/></svg>"#).unwrap();
+    write_test_image(&dir.path().join("b.png"), 7);
+    let context = glib::MainContext::default();
+    let cancel = gio::Cancellable::new();
+    let (decoded, mime) = context.block_on(loader::decode(&path, &cancel)).unwrap();
+    app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+    let destination = app.navigation.borrow_mut().select(0).unwrap();
+    app.apply_decoded(path.clone(), decoded.clone(), mime, destination.generation);
+    let settle = || {
+        context.block_on(glib::timeout_future(
+            SVG_DEBOUNCE + Duration::from_millis(50),
+        ))
+    };
+    let gate = gio::Cancellable::new();
+    SVG_TEST.with(|state| {
+        *state.borrow_mut() = Some(SvgTest {
+            requests: Vec::new(),
+            gate: gate.clone(),
+        })
+    });
+    app.view.allocate(16, 8, -1, None);
+    app.view.zoom_fit();
+    app.view.allocate(8, 4, -1, None);
+    settle();
+    assert_eq!(
+        SVG_TEST.with(|state| state.borrow().as_ref().unwrap().requests.clone()),
+        [(8, 4)],
+        "debounce uses the latest allocated fit size"
+    );
+    SVG_TEST.with(|state| state.borrow_mut().take());
+    gate.cancel();
+    settle();
+    app.view.allocate(640, 480, -1, None);
+    let gate = gio::Cancellable::new();
+    SVG_TEST.with(|state| {
+        *state.borrow_mut() = Some(SvgTest {
+            requests: Vec::new(),
+            gate: gate.clone(),
+        })
+    });
+    for zoom in 2..=8 {
+        app.view.zoom_to(f64::from(zoom), None);
+        settle();
+    }
+    assert_eq!(
+        SVG_TEST.with(|state| state.borrow().as_ref().unwrap().requests.clone()),
+        [(64, 32)]
+    );
+    assert_eq!(app.view.texture_size(), Some((8, 4)));
+    SVG_TEST.with(|state| state.borrow_mut().take());
+    gate.cancel();
+    context.block_on(async {
+        let start = std::time::Instant::now();
+        while !app.svg_renders.borrow().is_idle() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            glib::timeout_future(Duration::from_millis(10)).await;
+        }
+    });
+    assert_eq!(app.view.texture_size(), Some((256, 128)));
+
+    // A newer zoom invalidates the active result before its debounce fires.
+    let gate = gio::Cancellable::new();
+    SVG_TEST.with(|state| {
+        *state.borrow_mut() = Some(SvgTest {
+            requests: Vec::new(),
+            gate: gate.clone(),
+        })
+    });
+    app.view.zoom_to(3.0, None);
+    settle();
+    app.view.zoom_to(4.0, None);
+    gate.cancel();
+    context.block_on(glib::timeout_future(Duration::from_millis(50)));
+    assert_eq!(app.view.texture_size(), Some((256, 128)));
+    SVG_TEST.with(|state| state.borrow_mut().take());
+    settle();
+    assert_eq!(app.view.texture_size(), Some((128, 64)));
+
+    // Navigation cancels pending work but retains the one active slot.
+    let gate = gio::Cancellable::new();
+    SVG_TEST.with(|state| {
+        *state.borrow_mut() = Some(SvgTest {
+            requests: Vec::new(),
+            gate: gate.clone(),
+        })
+    });
+    app.view.zoom_to(5.0, None);
+    settle();
+    app.view.zoom_to(6.0, None);
+    settle();
+    app.show_index(1, Arrival::Direct);
+    gate.cancel();
+    SVG_TEST.with(|state| state.borrow_mut().take());
+    settle();
+    assert!(app.svg_renders.borrow().is_idle());
+    assert_eq!(app.view.texture_size(), Some((7, 1)));
+    assert_eq!(
+        Rc::strong_count(&decoded),
+        1,
+        "obsolete requests released the SVG"
+    );
+    // Shutdown also rejects an active completion and drops its pending zoom.
+    let generation = app.navigation.borrow().generation();
+    app.apply_decoded(path, decoded.clone(), "image/svg+xml".into(), generation);
+    let gate = gio::Cancellable::new();
+    SVG_TEST.with(|state| {
+        *state.borrow_mut() = Some(SvgTest {
+            requests: Vec::new(),
+            gate: gate.clone(),
+        })
+    });
+    app.view.zoom_to(2.0, None);
+    settle();
+    app.view.zoom_to(3.0, None);
+    settle();
+    app.shutdown();
+    assert!(!app.svg_renders.borrow().is_idle());
+    SVG_TEST.with(|state| state.borrow_mut().take());
+    gate.cancel();
+    settle();
+    assert!(app.svg_renders.borrow().is_idle());
+    assert_eq!(Rc::strong_count(&decoded), 1);
+    assert_eq!(app.view.texture_size(), None);
+}
+
+#[test]
+#[ignore = "requires Wayland and ImageMagick; creates no mapped window"]
+fn high_precision_navigation_evicts_neighbors_and_settles_pss() {
+    let app = edit_test_app_with_budget(100);
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("0.tiff");
+    assert!(
+        std::process::Command::new("magick")
+            .args([
+                "-size",
+                "4000x3000",
+                "gradient:red-blue",
+                "-alpha",
+                "set",
+                "-depth",
+                "16"
+            ])
+            .arg(&first)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for i in 1..4 {
+        std::fs::copy(&first, dir.path().join(format!("{i}.tiff"))).unwrap();
+    }
+    app.install_folder(Folder::scan(dir.path(), app.cfg.sort).unwrap());
+    let context = glib::MainContext::default();
+    let mut samples = Vec::new();
+    for cycle in 0..3 {
+        for i in 0..4 {
+            app.show_index(i, Arrival::Direct);
+            context.block_on(async {
+                let start = std::time::Instant::now();
+                while !matches!(*app.media.borrow(), MediaState::Image { .. }) {
+                    assert!(start.elapsed() < Duration::from_secs(10));
+                    glib::timeout_future(Duration::from_millis(20)).await;
+                }
+                glib::timeout_future(Duration::from_millis(500)).await;
+            });
+            let media = app.media.borrow();
+            let MediaState::Image { decoded, .. } = &*media else {
+                unreachable!()
+            };
+            let Decoded::Static { bytes, texture } = &**decoded else {
+                unreachable!()
+            };
+            assert!(
+                *bytes >= 4000 * 3000 * 8,
+                "fixture must decode at high precision: {:?}, {bytes}",
+                texture.format()
+            );
+            // Fault in the zero-copy source mapping without mapping a window.
+            // An untouched mmap contributes no resident pages to PSS.
+            let mut pixels = vec![0; 4000 * 3000 * 4];
+            texture.download(&mut pixels, 4000 * 4);
+            std::hint::black_box(&pixels);
+            drop(pixels);
+            let neighbors = (0..4)
+                .filter(|n| *n != i && app.cache.contains(&dir.path().join(format!("{n}.tiff"))))
+                .count();
+            assert!(neighbors <= 1, "100 MiB can hold only one 96 MB neighbor");
+        }
+        let sample = process_tree_pss(std::process::id());
+        eprintln!(
+            "high-precision navigation cycle {cycle}: PSS {} KiB across {} processes",
+            sample.0, sample.1
+        );
+        samples.push(sample.0);
+    }
+    app.clear_media();
+    app.shutdown();
+    context.block_on(glib::timeout_future(Duration::from_secs(1)));
+    let after = process_tree_pss(std::process::id());
+    eprintln!(
+        "after cleanup: PSS {} KiB across {} processes; settled samples {samples:?}",
+        after.0, after.1
+    );
+    assert!(
+        after.0 < *samples.last().unwrap(),
+        "cleanup releases decoded buffers"
+    );
+    assert!((0..4).all(|i| !app.cache.contains(&dir.path().join(format!("{i}.tiff")))));
+}
+
+fn edit_test_app_with_budget(budget: u32) -> Rc<App> {
+    gtk::init().unwrap();
+    let gtk_app = gtk::Application::builder()
+        .application_id("io.github.TheRealShek.OpenMpv.MemoryTest")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    gtk_app.register(gio::Cancellable::NONE).unwrap();
+    App::new(
+        &gtk_app,
+        Config {
+            cache_budget_mb: budget,
+            ..Config::default()
+        },
+    )
+}
+
+fn process_tree_pss(pid: u32) -> (u64, usize) {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).unwrap_or_default();
+    let pss = status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Pss:")?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .unwrap_or(0);
+    let mut children = BTreeSet::new();
+    if let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) {
+        for task in tasks.flatten() {
+            let list = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            children.extend(
+                list.split_whitespace()
+                    .filter_map(|child| child.parse::<u32>().ok()),
+            );
+        }
+    }
+    children
+        .into_iter()
+        .map(process_tree_pss)
+        .fold((pss, usize::from(pss > 0)), |total, child| {
+            (total.0 + child.0, total.1 + child.1)
+        })
 }
