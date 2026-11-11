@@ -8,11 +8,11 @@ case "$desktop" in
     dnf --setopt=install_weak_deps=False -y install \
       kernel-core kernel-modules dracut systemd pam shadow-utils util-linux \
       gnome-shell gnome-settings-daemon dbus-daemon mesa-dri-drivers mesa-libEGL \
-      ImageMagick glycin-loaders gstreamer1-plugin-gtk4 gstreamer1-plugins-good \
-      ffmpeg-free python3-gobject python3-cairo python3-pillow adwaita-icon-theme
+      gtk4 python3-gobject python3-cairo python3-pillow adwaita-icon-theme
     if [ "${PROBE_ONLY:-0}" != 1 ]; then
       dnf --setopt=install_weak_deps=False -y install \
-        cargo rust gcc pkgconf-pkg-config gtk4-devel glycin-devel gstreamer1-devel
+        cargo rust gcc pkgconf-pkg-config gtk4-devel glycin-devel gstreamer1-devel \
+        ImageMagick glycin-loaders gstreamer1-plugin-gtk4 gstreamer1-plugins-good ffmpeg-free
     fi
     kernel=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -1)
     dracut --no-hostonly --add-drivers 'virtio_pci virtio_blk virtio_gpu 9p 9pnet_virtio' \
@@ -24,10 +24,10 @@ case "$desktop" in
   hyprland)
     pacman -Syu --noconfirm --needed \
       linux mkinitcpio systemd-sysvcompat shadow util-linux dbus \
-      hyprland mesa imagemagick gtk4 glycin \
-      gst-plugin-gtk4 gst-plugins-good ffmpeg python-gobject python-cairo python-pillow
+      hyprland mesa gtk4 python-gobject python-cairo python-pillow
     if [ "${PROBE_ONLY:-0}" != 1 ]; then
-      pacman -S --noconfirm --needed rust gcc pkgconf
+      pacman -S --noconfirm --needed rust gcc pkgconf imagemagick glycin \
+        gst-plugin-gtk4 gst-plugins-good ffmpeg
     fi
     printf '%s\n' 'MODULES=(virtio_pci virtio_blk virtio_gpu 9p 9pnet_virtio)' \
       'HOOKS=(base udev modconf block filesystems)' > /tmp/mkinitcpio-ci.conf

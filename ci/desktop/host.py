@@ -137,6 +137,25 @@ def service(qmp, request, artifacts):
         raise ValueError(f'unknown request: {request["kind"]}')
 
 
+def validate_result(value, artifacts):
+    probe_only = (artifacts / 'probe-only').exists()
+    tests = value.get('tests', [])
+    if (value.get('status') != 'passed' or value.get('probe_only') is not probe_only
+            or not tests or any(test.get('status') != 'passed' for test in tests)):
+        raise RuntimeError(f'guest suite failed or returned incomplete results: {value}')
+    required = {'compositor-routed-input-probe'}
+    if not probe_only:
+        required.update(('shared-viewer-and-desktop-behavior', 'rust-default'))
+        inventory = (artifacts / 'ignored-inventory.txt').read_text()
+        ignored = {line.removesuffix(': test').replace('::', '-')
+                   for line in inventory.splitlines() if line.endswith(': test')}
+        if not ignored:
+            raise RuntimeError('guest returned an empty desktop regression inventory')
+        required.update(ignored)
+    if not required.issubset({test['name'] for test in tests}):
+        raise RuntimeError(f'guest result omitted required scenarios: {required}')
+
+
 def prepare(args, directory, artifacts):
     tag = args.image or f'open-mpv-ci-{args.desktop}:{os.getpid()}'
     container = None
@@ -186,7 +205,9 @@ def run_vm(directory, artifacts, timeout):
                                        log, pass_fds=(display.fileno(),))
             number = wait_for(lambda: display_file.read_text().strip(), 'Xvfb',
                               alive=lambda: xvfb.poll() is None)
-        environment = {**os.environ, 'DISPLAY': f':{number}', 'LIBGL_ALWAYS_SOFTWARE': '1'}
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ('WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS')}
+        environment.update(DISPLAY=f':{number}', LIBGL_ALWAYS_SOFTWARE='1', SDL_VIDEODRIVER='x11')
         qmp_path = directory / 'qmp.sock'
         command = [
             'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', '2', '-m', '4096',
@@ -214,8 +235,7 @@ def run_vm(directory, artifacts, timeout):
             result = artifacts / 'result.json'
             if result.exists():
                 value = json.loads(result.read_text())
-                if value.get('status') != 'passed':
-                    raise RuntimeError(f'guest suite failed: {value}')
+                validate_result(value, artifacts)
                 return
             if not alive():
                 raise RuntimeError('VM or Xvfb exited before a result')

@@ -138,6 +138,30 @@ class HarnessTests(unittest.TestCase):
                     host.prepare(args, directory, directory)
             self.assertEqual(run.call_args_list[-1].args[0][:3], ['docker', 'image', 'rm'])
 
+    def test_result_cannot_omit_skip_or_relabel_required_scenarios(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifacts = Path(temporary)
+            (artifacts / 'probe-only').touch()
+            probe = {'name': 'compositor-routed-input-probe', 'status': 'passed'}
+            result = {'status': 'passed', 'probe_only': True, 'tests': [probe]}
+            host.validate_result(result, artifacts)
+            for bad in ({**result, 'tests': []}, {**result, 'probe_only': False},
+                        {**result, 'tests': [{**probe, 'status': 'skipped'}]}):
+                with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                    host.validate_result(bad, artifacts)
+
+            (artifacts / 'probe-only').unlink()
+            (artifacts / 'ignored-inventory.txt').write_text('window::regression: test\n')
+            result['probe_only'] = False
+            with self.assertRaisesRegex(RuntimeError, 'omitted'):
+                host.validate_result(result, artifacts)
+            result['tests'] += [{'name': name, 'status': 'passed'} for name in
+                                ('shared-viewer-and-desktop-behavior', 'rust-default', 'window-regression')]
+            host.validate_result(result, artifacts)
+            (artifacts / 'ignored-inventory.txt').write_text('0 tests\n')
+            with self.assertRaisesRegex(RuntimeError, 'empty'):
+                host.validate_result(result, artifacts)
+
     def test_guest_failure_and_no_result_are_not_success(self):
         # Exercise the real VM supervision loop with only external processes replaced.
         for result in ({'status': 'failed'}, None):
@@ -153,9 +177,14 @@ class HarnessTests(unittest.TestCase):
                 def start(command, _log, **_kwargs):
                     if command[0] == 'Xvfb':
                         (directory / 'display').write_text('99\n')
+                    else:
+                        self.assertEqual(_kwargs['env']['SDL_VIDEODRIVER'], 'x11')
+                        self.assertNotIn('WAYLAND_DISPLAY', _kwargs['env'])
+                        self.assertNotIn('DBUS_SESSION_BUS_ADDRESS', _kwargs['env'])
                     return Mock(poll=lambda: None)
 
-                with patch.object(host.Processes, 'start', side_effect=start), \
+                with patch.dict(os.environ, WAYLAND_DISPLAY='host-wayland', DBUS_SESSION_BUS_ADDRESS='host-bus'), \
+                     patch.object(host.Processes, 'start', side_effect=start), \
                      patch.object(host.Processes, 'close') as cleanup, \
                      patch.object(host, 'QMP') as qmp, patch.object(host, 'screenshot'):
                     qmp.return_value.call.return_value = {}
