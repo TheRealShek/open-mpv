@@ -336,11 +336,14 @@ hl.bind("SUPER + V", hl.dsp.window.float({ action = "toggle" }))
                 os.environ['HYPRLAND_INSTANCE_SIGNATURE'] = instances[0].parent.name
             try:
                 suite.desktop.windows()
-                return True
+                return name != 'gnome' or suite.desktop.evaluate('Main.layoutManager._startingUp') is False
             except (GLib.Error, subprocess.SubprocessError):
                 return False
 
         wait_for(ready, f'{name} compositor and IPC', 90, lambda: compositor.poll() is None)
+        if name == 'gnome':
+            atomic_json(ARTIFACTS / 'desktop-ready.json', suite.desktop.evaluate(
+                '({startingUp: Main.layoutManager._startingUp, overview: Main.overview.visible})'))
         if name == 'gnome' and suite.desktop.evaluate('Main.overview.visible'):
             suite.input.key('esc')
             wait_for(lambda: not suite.desktop.evaluate('Main.overview.visible'),
