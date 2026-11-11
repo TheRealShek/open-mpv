@@ -109,6 +109,9 @@ keyboard key and pointer double-click. QEMU supplies both through virtual input
 devices. Screenshots must show the expected red-to-green change and fullscreen
 state. A compositor IPC call only observes window state; it never substitutes
 for keyboard or pointer input.
+Screenshots capture compositor output through GNOME Shell's screenshot API or
+Hyprland's screencopy protocol with `grim`. QEMU's OpenGL console does not
+provide the CPU surface required by QMP `screendump`.
 
 The shared Viewer scenario checks displayed image navigation, pointer
 fullscreen, keyboard exit from fullscreen, Trash and exact-byte Undo, and
