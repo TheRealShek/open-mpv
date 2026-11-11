@@ -51,6 +51,8 @@ class HarnessTests(unittest.TestCase):
         desktop.bus.call_sync.side_effect = evaluate
         self.assertEqual(desktop.window(123), window)
         desktop.bus.call_sync.side_effect = None
+        desktop.bus.call_sync.return_value = Mock(unpack=lambda: (True, 'true'))
+        self.assertIs(desktop.evaluate('Main.overview.visible'), True)
         desktop.bus.call_sync.return_value = Mock(unpack=lambda: (False, 'TypeError: invalid'))
         with self.assertRaisesRegex(RuntimeError, 'TypeError: invalid'):
             desktop.evaluate('bad expression')

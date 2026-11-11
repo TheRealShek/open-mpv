@@ -144,11 +144,20 @@ class Suite:
         return result['status'] == 'passed'
 
     def window(self, process, **expected):
+        observed = {}
+
         def matches():
             window = self.desktop.window(process.pid)
+            observed.clear()
+            observed.update(window or {})
             return window if window and all(window[k] == v for k, v in expected.items()) else None
 
-        return wait_for(matches, f'window {expected}', 20, lambda: process.poll() is None)
+        try:
+            return wait_for(matches, f'window {expected}', 20, lambda: process.poll() is None)
+        except TimeoutError:
+            atomic_json(ARTIFACTS / f'window-timeout-{process.pid}.json',
+                        {'pid': process.pid, 'expected': expected, 'observed': observed})
+            raise
 
     def color(self, name, window, channel):
         def displayed():
@@ -321,6 +330,10 @@ hl.bind("SUPER + V", hl.dsp.window.float({ action = "toggle" }))
                 return False
 
         wait_for(ready, f'{name} compositor and IPC', 90, lambda: compositor.poll() is None)
+        if name == 'gnome' and suite.desktop.evaluate('Main.overview.visible'):
+            suite.input.key('esc')
+            wait_for(lambda: not suite.desktop.evaluate('Main.overview.visible'),
+                     'GNOME startup overview dismissed', 10)
         if not suite.case('compositor-routed-input-probe', suite.probe):
             return
         if (ARTIFACTS / 'probe-only').exists():
