@@ -3,6 +3,7 @@
 use super::*;
 
 impl App {
+    /// Assemble the single Workspace and wire widget adapters to typed actions.
     pub fn new(gtk_app: &gtk::Application, cfg: Config) -> Rc<App> {
         let win = gtk::ApplicationWindow::builder()
             .application(gtk_app)
@@ -889,6 +890,7 @@ impl App {
         self.help_label.set_markup(&lines.join("\n"));
     }
 
+    /// Give native controls and help priority before adapting Viewer input.
     fn setup_controllers(self: &Rc<Self>) {
         // Run before application accelerators: native control keys belong
         // to the focused widget, and help's navigation must never change media.

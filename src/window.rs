@@ -658,6 +658,7 @@ impl App {
         self.start_video(path, subtitle, None);
     }
 
+    /// Start or restore playback and reconcile transport, media identity and focus.
     fn start_video(
         self: &Rc<Self>,
         path: &Path,
@@ -1104,6 +1105,7 @@ impl App {
         self.flash(&text);
     }
 
+    /// Refresh transport state while keeping the scrub target authoritative.
     fn update_transport(&self) {
         // Cheap to re-assert every tick: GTK ignores an unchanged
         // request, and this is the one place that sees every resize.
@@ -1146,6 +1148,7 @@ impl App {
         self.update_seek_value_text(dur);
     }
 
+    /// Expose the thumb target in time units rather than normalized fractions.
     fn update_seek_value_text(&self, duration: f64) {
         let text = if duration.is_finite() && duration > 0.0 {
             format!(
@@ -1421,6 +1424,7 @@ impl App {
         self.fitted_for.set(None);
     }
 
+    /// Swap the viewing controls for the transient clipboard-only markup mode.
     fn toggle_markup(self: &Rc<Self>) {
         if self.view.cancel_markup() {
             self.update_control_mode();
@@ -2321,6 +2325,7 @@ impl App {
 
     // ----- overlay chrome, toasts, indicator (FR-6.2) -------------------
 
+    /// Include internal control children and popovers in focus ownership checks.
     fn focus_is_inside(&self, widget: &impl IsA<gtk::Widget>) -> bool {
         let widget = widget.as_ref();
         RootExt::focus(&self.win).is_some_and(|focus| focus == *widget || focus.is_ancestor(widget))
@@ -2335,6 +2340,7 @@ impl App {
         widget.set_visible(visible);
     }
 
+    /// Keep one weak return target while help temporarily owns keyboard focus.
     fn set_help_visible(&self, visible: bool) {
         if visible == self.help_scroll.get_visible() {
             return;
@@ -2358,6 +2364,7 @@ impl App {
         }
     }
 
+    /// Reserve help navigation before Viewer accelerators, including at scroll limits.
     fn handle_help_key(&self, key: gdk::Key, mods: gdk::ModifierType) -> glib::Propagation {
         if mods.intersects(
             gdk::ModifierType::CONTROL_MASK
@@ -2389,6 +2396,7 @@ impl App {
         glib::Propagation::Stop
     }
 
+    /// Reveal controls and restart the fade deadline without overriding active holds.
     fn show_chrome(self: &Rc<Self>) {
         for w in &self.chrome {
             w.remove_css_class("invisible");
@@ -2409,6 +2417,7 @@ impl App {
         );
     }
 
+    /// Fade idle chrome only after focus, pointer, menu and mode holds have ended.
     fn hide_chrome(&self) {
         // Never pull the controls out from under the pointer: mid-scrub,
         // or while it simply rests on them. Both paths restart the
@@ -2491,6 +2500,7 @@ impl App {
         );
     }
 
+    /// Replace transient feedback and retire a previously focused Undo control safely.
     fn show_toast(self: &Rc<Self>, text: &str) {
         self.toast_label.set_text(text);
         self.set_control_visible(&self.toast_undo, false);
@@ -2510,6 +2520,7 @@ impl App {
         );
     }
 
+    /// Offer the exact pending Undo operation until its bounded recovery deadline.
     fn show_undo_toast(self: &Rc<Self>, text: &str, id: UndoId) {
         self.toast_label.set_text(text);
         self.set_control_visible(&self.toast_undo, true);
@@ -2545,6 +2556,7 @@ impl App {
         );
     }
 
+    /// Return focus before retiring the transient feedback and its Undo button.
     fn hide_toast(&self) {
         if self.focus_is_inside(&self.toast_revealer) {
             self.view.grab_focus();
@@ -2560,6 +2572,7 @@ impl App {
 
     // ----- actions and input -------------------------------------------
 
+    /// Snapshot command eligibility without retaining borrows across GTK callbacks.
     fn workspace_state(&self) -> WorkspaceState {
         let media = match &*self.media.borrow() {
             MediaState::Empty => Media::Empty,
@@ -2595,6 +2608,7 @@ impl App {
         }
     }
 
+    /// Apply typed action policy, transferring focus before GTK disables its target.
     fn sync_action_enabled(&self) {
         // GTK may clear focus as soon as an action becomes insensitive.
         // Resolve the focused actionable before changing any enabled state.
@@ -2652,6 +2666,7 @@ impl App {
         }
     }
 
+    /// Execute a command already resolved through the shared Workspace action policy.
     fn execute_command(self: &Rc<Self>, command: Command) {
         match command {
             Command::OpenFile => self.choose_media_file(),
