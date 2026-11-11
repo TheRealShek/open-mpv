@@ -14,6 +14,8 @@ impl App {
         register_icons(&WidgetExt::display(&win));
 
         let view = ImageView::default();
+        view.set_focusable(true);
+        view.update_property(&[gtk::accessible::Property::Label("Media viewer")]);
         view.set_default_fit_actual(cfg.fit == FitMode::Actual);
 
         let overlay = gtk::Overlay::new();
@@ -117,6 +119,10 @@ impl App {
         // would quantise the thumb to 1 % of the duration — 36 s of a
         // one-hour video. Scrubbing has to be continuous.
         seek_bar.set_round_digits(-1);
+        seek_bar.update_property(&[
+            gtk::accessible::Property::Label("Playback position"),
+            gtk::accessible::Property::ValueText("Duration unknown"),
+        ]);
         let time_label = gtk::Label::new(None);
         time_label.add_css_class("dim");
         // Reserve "0:00 / 0:00" so the bar does not twitch every time a
@@ -312,11 +318,28 @@ impl App {
 
         // Keybinding cheat sheet (NFR-5.2).
         let help_label = gtk::Label::new(None);
-        help_label.add_css_class("help");
-        help_label.set_halign(gtk::Align::Center);
-        help_label.set_valign(gtk::Align::Center);
-        help_label.set_visible(false);
-        overlay.add_overlay(&help_label);
+        help_label.set_wrap(true);
+        help_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        help_label.set_max_width_chars(74);
+        let help_scroll = gtk::ScrolledWindow::builder()
+            .child(&help_label)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_width(true)
+            .propagate_natural_height(true)
+            .max_content_width(760)
+            .max_content_height(600)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .visible(false)
+            .build();
+        help_scroll.add_css_class("help");
+        help_scroll.update_property(&[gtk::accessible::Property::Label("Keyboard shortcuts")]);
+        overlay.add_overlay(&help_scroll);
 
         win.set_child(Some(&overlay));
 
@@ -417,6 +440,8 @@ impl App {
             toast_undo,
             toast_undo_id: Cell::new(None),
             help_label,
+            help_scroll,
+            help_previous_focus: RefCell::new(None),
             chrome: vec![
                 prev_btn.upcast(),
                 next_btn.upcast(),
@@ -580,6 +605,17 @@ impl App {
             move |_, _, value| {
                 app.with_video(|p| p.seek_fraction(value));
                 glib::Propagation::Proceed
+            }
+        ));
+        app.seek_bar.connect_value_changed(clone!(
+            #[weak]
+            app,
+            move |_| {
+                let duration = app
+                    .with_video(Player::progress)
+                    .flatten()
+                    .map_or(0.0, |(_, dur)| dur);
+                app.update_seek_value_text(duration);
             }
         ));
 
@@ -851,8 +887,38 @@ impl App {
     }
 
     fn setup_controllers(self: &Rc<Self>) {
-        // Mouse movement reveals the chrome (FR-6.2); keyboard-only use
-        // never shows it.
+        // Run before application accelerators: native control keys belong
+        // to the focused widget, and help's navigation must never change media.
+        let control_keys = gtk::EventControllerKey::new();
+        control_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        control_keys.connect_key_pressed(clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |controller, key, _, mods| {
+                if app.help_scroll.get_visible() {
+                    return app.handle_help_key(key, mods);
+                }
+                if let Some(focus) = RootExt::focus(&app.win)
+                    && (app.chrome.iter().any(|w| app.focus_is_inside(w))
+                        || app.focus_is_inside(&app.status_area)
+                        || app.focus_is_inside(&app.toast_revealer))
+                    && controller.forward(&focus)
+                {
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            }
+        ));
+        self.win.add_controller(control_keys);
+        self.win.connect_focus_widget_notify(clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.show_chrome()
+        ));
+
+        // Mouse movement and keyboard focus reveal the chrome (FR-6.2).
         let motion = gtk::EventControllerMotion::new();
         // Keep pointer position and idle feedback current even after a child
         // gesture claims panning or drawing and stops bubble propagation.

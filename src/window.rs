@@ -278,6 +278,8 @@ pub struct App {
     toast_undo: gtk::Button,
     toast_undo_id: Cell<Option<UndoId>>,
     help_label: gtk::Label,
+    help_scroll: gtk::ScrolledWindow,
+    help_previous_focus: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     chrome: Vec<gtk::Widget>,
     chrome_timer: TimerSlot,
     indicator_timer: TimerSlot,
@@ -711,6 +713,8 @@ impl App {
         // Blank rather than carry the previous video's numbers over the
         // moment before this one's duration is known.
         self.seek_bar.set_value(0.0);
+        self.seek_bar
+            .update_property(&[gtk::accessible::Property::ValueText("Duration unknown")]);
         self.time_label.set_text("");
         self.update_transport();
         if self.chrome_visible() {
@@ -1021,27 +1025,27 @@ impl App {
         // Measure from all video controls restored, with the seek bar
         // contributing nothing, so `others` is everything around it.
         self.seek_bar.set_size_request(0, -1);
-        self.time_label.set_visible(true);
-        self.mute_btn.set_visible(true);
-        self.speed_btn.set_visible(true);
-        self.subtitle_btn.set_visible(true);
+        self.set_control_visible(&self.time_label, true);
+        self.set_control_visible(&self.mute_btn, true);
+        self.set_control_visible(&self.speed_btn, true);
+        self.set_control_visible(&self.subtitle_btn, true);
         let others = |s: &Self| s.control_bar.measure(gtk::Orientation::Horizontal, -1).0;
 
         let mut room = width - others(self);
         if room < SEEK_BAR_MIN_WIDTH {
-            self.time_label.set_visible(false);
+            self.set_control_visible(&self.time_label, false);
             room = width - others(self);
         }
         if room < SEEK_BAR_MIN_WIDTH {
-            self.mute_btn.set_visible(false);
+            self.set_control_visible(&self.mute_btn, false);
             room = width - others(self);
         }
         if room < SEEK_BAR_MIN_WIDTH {
-            self.subtitle_btn.set_visible(false);
+            self.set_control_visible(&self.subtitle_btn, false);
             room = width - others(self);
         }
         if room < SEEK_BAR_MIN_WIDTH {
-            self.speed_btn.set_visible(false);
+            self.set_control_visible(&self.speed_btn, false);
             room = width - others(self);
         }
         self.seek_bar
@@ -1125,6 +1129,8 @@ impl App {
         }
         let progress = self.player.borrow().as_ref().and_then(|p| p.progress());
         let Some((pos, dur)) = progress else {
+            self.seek_bar
+                .update_property(&[gtk::accessible::Property::ValueText("Duration unknown")]);
             return;
         };
         // While the pointer holds the thumb it owns the bar's value.
@@ -1135,6 +1141,21 @@ impl App {
         if self.time_label.text() != time {
             self.time_label.set_text(&time);
         }
+        self.update_seek_value_text(dur);
+    }
+
+    fn update_seek_value_text(&self, duration: f64) {
+        let text = if duration.is_finite() && duration > 0.0 {
+            format!(
+                "{} of {}",
+                format_time(self.seek_bar.value() * duration),
+                format_time(duration)
+            )
+        } else {
+            "Duration unknown".to_string()
+        };
+        self.seek_bar
+            .update_property(&[gtk::accessible::Property::ValueText(&text)]);
     }
 
     /// Drive the bar from the frame clock: it advances with the frames the
@@ -1350,14 +1371,11 @@ impl App {
         let marking = self.view.is_marking_up();
         let markup_available = self.markup_available();
         let status = self.view.markup_status();
-        let has_shapes = status.is_some_and(|status| status.shape_count > 0);
-        let can_copy = has_shapes && !self.view.markup_has_draft();
 
-        self.normal_controls.set_visible(!marking);
-        self.photo_controls.set_visible(photo && !marking);
+        self.set_control_visible(&self.normal_controls, !marking);
+        self.set_control_visible(&self.photo_controls, photo && !marking);
         let animation = self.animation.borrow();
-        self.animation_btn
-            .set_visible(animation.is_some() && !marking);
+        self.set_control_visible(&self.animation_btn, animation.is_some() && !marking);
         if let Some(playback) = animation.as_ref() {
             self.animation_btn.set_icon_name(if playback.paused() {
                 "open-mpv-media-playback-start-symbolic"
@@ -1371,14 +1389,14 @@ impl App {
                     "Pause animation"
                 }));
         }
-        self.transport.set_visible(video && !marking);
-        self.subtitle_btn.set_visible(video && !marking);
-        self.markup_btn.set_visible(markup_available);
-        self.markup_controls.set_visible(marking);
+        self.set_control_visible(&self.transport, video && !marking);
+        self.set_control_visible(&self.subtitle_btn, video && !marking);
+        self.set_control_visible(&self.markup_btn, markup_available);
+        self.set_control_visible(&self.markup_controls, marking);
         self.toast_revealer
             .set_margin_bottom(if marking { 100 } else { 56 });
-        self.prev_btn.set_visible(!marking);
-        self.next_btn.set_visible(!marking);
+        self.set_control_visible(&self.prev_btn, !marking);
+        self.set_control_visible(&self.next_btn, !marking);
         rebuild_markup_context(&self.markup_context_menu, markup_available);
         let audio_track_count = self
             .with_video(Player::audio_snapshot)
@@ -1390,12 +1408,7 @@ impl App {
             audio_track_count,
         );
         rebuild_subtitle_context(&self.subtitle_context_menu, &self.subtitle_menu, video);
-        self.control_bar.set_visible(photo || video || marking);
-        self.markup_action.set_enabled(markup_available || marking);
-        self.markup_box_action.set_enabled(marking);
-        self.markup_arrow_action.set_enabled(marking);
-        self.markup_copy_action.set_enabled(marking && can_copy);
-        self.markup_clear_action.set_enabled(marking && has_shapes);
+        self.set_control_visible(&self.control_bar, photo || video || marking);
         if let Some(status) = status {
             self.markup_box_btn
                 .set_active(status.tool == MarkupTool::Box);
@@ -1420,8 +1433,11 @@ impl App {
         // A previous trash toast describes another workflow. Keep its
         // timed restoration state, but remove the visual competition with
         // the focused markup toolbar.
+        if self.focus_is_inside(&self.toast_revealer) {
+            self.view.grab_focus();
+        }
         self.toast_revealer.set_reveal_child(false);
-        self.toast_undo.set_visible(false);
+        self.set_control_visible(&self.toast_undo, false);
         self.update_control_mode();
         self.show_chrome();
         self.update_cursor();
@@ -1827,12 +1843,12 @@ impl App {
     /// Put a message where the image would be (FR-1.4).
     fn show_status(&self, text: &str) {
         self.status.set_text(text);
-        self.status_area.set_visible(true);
+        self.set_control_visible(&self.status_area, true);
         self.update_save_enabled();
     }
 
     fn hide_status(&self) {
-        self.status_area.set_visible(false);
+        self.set_control_visible(&self.status_area, false);
         self.pointer_on_status.set(false);
     }
 
@@ -1955,7 +1971,7 @@ impl App {
             .map(|n| n.to_string_lossy());
         self.name_label.set_text(name.as_deref().unwrap_or(""));
         self.name_label.set_tooltip_text(name.as_deref());
-        self.info_bar.set_visible(name.is_some());
+        self.set_control_visible(&self.info_bar, name.is_some());
         self.win
             .set_title(Some(name.as_deref().unwrap_or("open-mpv")));
     }
@@ -2296,13 +2312,80 @@ impl App {
         let (enabled, tooltip) = self.save_availability();
         // `set_enabled` can emit into application code; never hold a
         // RefCell borrow across that framework boundary.
-        self.save_action.set_enabled(enabled);
-        self.save_btn.set_visible(enabled);
+        self.set_control_visible(&self.save_btn, enabled);
         self.save_btn.set_tooltip_text(Some(&tooltip));
         self.sync_action_enabled();
     }
 
     // ----- overlay chrome, toasts, indicator (FR-6.2) -------------------
+
+    fn focus_is_inside(&self, widget: &impl IsA<gtk::Widget>) -> bool {
+        let widget = widget.as_ref();
+        RootExt::focus(&self.win).is_some_and(|focus| focus == *widget || focus.is_ancestor(widget))
+    }
+
+    /// Transfer focus before GTK hides a subtree, rather than letting it
+    /// select an unrelated action from the replacement toolbar.
+    fn set_control_visible(&self, widget: &impl IsA<gtk::Widget>, visible: bool) {
+        if !visible && self.focus_is_inside(widget) {
+            self.view.grab_focus();
+        }
+        widget.set_visible(visible);
+    }
+
+    fn set_help_visible(&self, visible: bool) {
+        if visible == self.help_scroll.get_visible() {
+            return;
+        }
+        if visible {
+            *self.help_previous_focus.borrow_mut() =
+                RootExt::focus(&self.win).map(|w| w.downgrade());
+            self.help_scroll.set_visible(true);
+            self.help_scroll.vadjustment().set_value(0.0);
+            self.help_scroll.grab_focus();
+        } else {
+            let previous = self
+                .help_previous_focus
+                .borrow_mut()
+                .take()
+                .and_then(|w| w.upgrade());
+            self.help_scroll.set_visible(false);
+            if !previous.is_some_and(|w| w.is_visible() && w.is_sensitive() && w.grab_focus()) {
+                self.view.grab_focus();
+            }
+        }
+    }
+
+    fn handle_help_key(&self, key: gdk::Key, mods: gdk::ModifierType) -> glib::Propagation {
+        if mods.intersects(
+            gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK,
+        ) {
+            return glib::Propagation::Proceed;
+        }
+        let scroll = match key {
+            gdk::Key::Tab | gdk::Key::ISO_Left_Tab => {
+                self.help_scroll.grab_focus();
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Up | gdk::Key::Left => gtk::ScrollType::StepBackward,
+            gdk::Key::Down | gdk::Key::Right => gtk::ScrollType::StepForward,
+            gdk::Key::Page_Up => gtk::ScrollType::PageBackward,
+            gdk::Key::Page_Down => gtk::ScrollType::PageForward,
+            gdk::Key::Home => gtk::ScrollType::Start,
+            gdk::Key::End => gtk::ScrollType::End,
+            gdk::Key::space if mods.contains(gdk::ModifierType::SHIFT_MASK) => {
+                gtk::ScrollType::PageBackward
+            }
+            gdk::Key::space => gtk::ScrollType::PageForward,
+            _ => return glib::Propagation::Proceed,
+        };
+        self.help_scroll.emit_scroll_child(scroll, false);
+        // Consume the key even at a boundary, so the Viewer shortcut cannot
+        // navigate to another file when help reaches its first or last row.
+        glib::Propagation::Stop
+    }
 
     fn show_chrome(self: &Rc<Self>) {
         for w in &self.chrome {
@@ -2329,6 +2412,7 @@ impl App {
         // or while it simply rests on them. Both paths restart the
         // fade-out when the pointer is done.
         if self.view.is_marking_up()
+            || self.chrome.iter().any(|w| self.focus_is_inside(w))
             || chrome_is_held(
                 self.scrubbing.get(),
                 self.pointer_on_chrome.get() || self.pointer_on_status.get(),
@@ -2407,7 +2491,7 @@ impl App {
 
     fn show_toast(self: &Rc<Self>, text: &str) {
         self.toast_label.set_text(text);
-        self.toast_undo.set_visible(false);
+        self.set_control_visible(&self.toast_undo, false);
         self.toast_undo_id.set(None);
         self.update_undo_enabled();
         self.toast_revealer.set_reveal_child(true);
@@ -2426,7 +2510,7 @@ impl App {
 
     fn show_undo_toast(self: &Rc<Self>, text: &str, id: UndoId) {
         self.toast_label.set_text(text);
-        self.toast_undo.set_visible(true);
+        self.set_control_visible(&self.toast_undo, true);
         self.toast_undo_id.set(Some(id));
         self.update_undo_enabled();
         self.toast_revealer.set_reveal_child(true);
@@ -2460,18 +2544,15 @@ impl App {
     }
 
     fn hide_toast(&self) {
+        if self.focus_is_inside(&self.toast_revealer) {
+            self.view.grab_focus();
+        }
         self.toast_revealer.set_reveal_child(false);
         self.toast_undo_id.set(None);
         self.update_undo_enabled();
     }
 
     fn update_undo_enabled(&self) {
-        let markup_undo = self
-            .view
-            .markup_status()
-            .is_some_and(|status| status.can_undo);
-        let trash_undo = !self.view.is_marking_up() && self.operations.borrow().has_undo();
-        self.undo_action.set_enabled(markup_undo || trash_undo);
         self.sync_action_enabled();
     }
 
@@ -2507,12 +2588,25 @@ impl App {
             markup_can_undo: markup.is_some_and(|status| status.can_undo),
             can_save: self.save_availability().0,
             can_undo_trash: !self.media.borrow().detached() && self.operations.borrow().has_undo(),
-            help_visible: self.help_label.is_visible(),
+            help_visible: self.help_scroll.get_visible(),
             fullscreen: self.win.is_fullscreen(),
         }
     }
 
     fn sync_action_enabled(&self) {
+        // GTK may clear focus as soon as an action becomes insensitive.
+        // Resolve the focused actionable before changing any enabled state.
+        let mut widget = RootExt::focus(&self.win);
+        let mut focused_action = None;
+        while let Some(current) = widget {
+            if let Ok(actionable) = current.clone().dynamic_cast::<gtk::Actionable>()
+                && let Some(name) = actionable.action_name()
+            {
+                focused_action = Some(name);
+                break;
+            }
+            widget = current.parent();
+        }
         let state = self.workspace_state();
         for action in Action::all() {
             let Some(registered) = self.win.lookup_action(action.name()) else {
@@ -2521,7 +2615,11 @@ impl App {
             let Ok(simple) = registered.downcast::<gio::SimpleAction>() else {
                 continue;
             };
-            simple.set_enabled(action.enabled(state));
+            let enabled = action.enabled(state);
+            if !enabled && focused_action.as_deref() == Some(action.detailed_name().as_str()) {
+                self.view.grab_focus();
+            }
+            simple.set_enabled(enabled);
         }
     }
 
@@ -2675,7 +2773,7 @@ impl App {
                     self.win.fullscreen();
                 }
             }
-            Command::ToggleHelp => self.help_label.set_visible(!self.help_label.is_visible()),
+            Command::ToggleHelp => self.set_help_visible(!self.help_scroll.get_visible()),
             Command::CancelMarkupDraft => {
                 self.view.cancel_markup_draft();
                 self.update_undo_enabled();
@@ -2686,7 +2784,7 @@ impl App {
                 self.show_chrome();
                 self.update_cursor();
             }
-            Command::HideHelp => self.help_label.set_visible(false),
+            Command::HideHelp => self.set_help_visible(false),
             Command::LeaveFullscreen => self.win.unfullscreen(),
             Command::Close => self.win.close(),
         }

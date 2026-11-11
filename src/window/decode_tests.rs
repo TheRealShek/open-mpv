@@ -1416,3 +1416,195 @@ fn process_tree_pss(pid: u32) -> (u64, usize) {
             (total.0 + child.0, total.1 + child.1)
         })
 }
+
+/// Unmapped widgets exercise focus ownership and allocation without taking
+/// desktop focus. Real key routing and spoken feedback are separate checks.
+#[test]
+#[ignore = "requires a desktop session; run separately from other GTK tests"]
+fn accessible_controls_follow_focus_modes_and_configured_help() {
+    gtk::init().unwrap();
+    let gtk_app = gtk::Application::builder()
+        .application_id("io.github.TheRealShek.OpenMpv.AccessibilityTest")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    gtk_app.register(gio::Cancellable::NONE).unwrap();
+    let mut cfg = Config::default();
+    cfg.binds
+        .insert("<Control><Alt><Shift>F12".into(), "help".into());
+    cfg.binds.insert("question".into(), "none".into());
+    cfg.binds
+        .insert("<Control><Alt><Shift>F11".into(), "seek-forward".into());
+    let app = App::new(&gtk_app, cfg);
+    app.hide_status();
+    app.view.show_texture(test_image(3).first_texture(), None);
+    *app.media.borrow_mut() = MediaState::Image {
+        path: PathBuf::from("test.png"),
+        decoded: test_image(3),
+        mime: "image/png".into(),
+        detached: false,
+    };
+    app.update_control_mode();
+    assert!(app.view.grab_focus());
+    app.hide_chrome();
+    assert!(!app.chrome_visible());
+    assert!(app.markup_btn.grab_focus());
+    assert!(
+        app.chrome_visible(),
+        "focus reveals faded controls synchronously"
+    );
+    app.hide_chrome();
+    assert!(app.chrome_visible(), "focused controls must not fade");
+
+    app.dispatch_action(Action::Markup);
+    assert!(app.view.is_marking_up());
+    assert!(
+        app.focus_is_inside(&app.view),
+        "entering markup retires its entry button"
+    );
+    // Stage an enabled actionable, then let the real mode policy disable it.
+    // GTK clears focus during set_enabled(false), so recovery must happen first.
+    app.markup_copy_action.set_enabled(true);
+    let copy = app
+        .markup_controls
+        .last_child()
+        .unwrap()
+        .last_child()
+        .unwrap();
+    assert!(copy.grab_focus());
+    app.update_control_mode();
+    assert!(
+        app.focus_is_inside(&app.view),
+        "Copy becoming unavailable returns focus"
+    );
+    app.undo_action.set_enabled(true);
+    let undo = app
+        .markup_controls
+        .first_child()
+        .unwrap()
+        .last_child()
+        .unwrap();
+    assert!(undo.grab_focus());
+    app.update_undo_enabled();
+    assert!(
+        app.focus_is_inside(&app.view),
+        "Undo becoming unavailable returns focus"
+    );
+    assert!(app.markup_box_btn.grab_focus());
+    app.dispatch_action(Action::Escape);
+    assert!(!app.view.is_marking_up());
+    assert!(
+        app.focus_is_inside(&app.view),
+        "leaving markup retires its toolbar"
+    );
+
+    // Video -> image and error/loading transitions must not retain focus in
+    // the old transport. No pipeline is needed to test UI ownership.
+    *app.media.borrow_mut() = MediaState::Video(PathBuf::from("test.webm"));
+    app.update_control_mode();
+    assert!(app.seek_bar.grab_focus());
+    app.dispatch_action(Action::Help);
+    assert!(app.focus_is_inside(&app.help_scroll));
+    app.dispatch_action(Action::Escape);
+    assert!(
+        app.focus_is_inside(&app.view),
+        "an unmapped previous control is unavailable"
+    );
+    assert!(!app.help_scroll.get_visible());
+    assert!(app.seek_bar.grab_focus());
+    *app.media.borrow_mut() = MediaState::Loading {
+        path: PathBuf::from("test.png"),
+        snapshot: None,
+    };
+    app.update_control_mode();
+    assert!(app.focus_is_inside(&app.view));
+    assert!(!app.transport.is_visible());
+    app.show_status("Could not open the image");
+    let open = app.status_area.last_child().unwrap().first_child().unwrap();
+    assert!(open.grab_focus());
+    app.hide_status();
+    assert!(app.focus_is_inside(&app.view));
+
+    let help_accels = gtk_app.accels_for_action(&Action::Help.detailed_name());
+    assert_eq!(help_accels.len(), 1);
+    let (key, mods) = gtk::accelerator_parse(&help_accels[0]).unwrap();
+    let configured_label = gtk::accelerator_get_label(key, mods);
+    assert!(app.help_label.text().contains(configured_label.as_str()));
+    let seek_accels = gtk_app.accels_for_action(&Action::SeekForward.detailed_name());
+    assert_eq!(seek_accels.len(), 3, "custom keys extend existing bindings");
+
+    app.dispatch_action(Action::Help);
+    let overlay = app.win.child().unwrap();
+    overlay.allocate(320, 240, -1, None);
+    assert!(app.help_scroll.width() <= 296);
+    assert!(app.help_scroll.height() <= 216);
+    let adjustment = app.help_scroll.vadjustment();
+    assert!(
+        adjustment.upper() > adjustment.page_size(),
+        "short windows must scroll"
+    );
+    adjustment.set_value(adjustment.upper());
+    assert!(adjustment.value() > 0.0);
+    for key in [
+        gdk::Key::Up,
+        gdk::Key::Down,
+        gdk::Key::Page_Up,
+        gdk::Key::Page_Down,
+        gdk::Key::Home,
+        gdk::Key::End,
+    ] {
+        assert_eq!(
+            app.handle_help_key(key, gdk::ModifierType::empty()),
+            glib::Propagation::Stop
+        );
+    }
+    assert_eq!(
+        app.handle_help_key(gdk::Key::F12, gdk::ModifierType::CONTROL_MASK),
+        glib::Propagation::Proceed
+    );
+    let attributes = gtk::pango::AttrList::new();
+    attributes.insert(gtk::pango::AttrFloat::new_scale(2.0));
+    app.help_label.set_attributes(Some(&attributes));
+    overlay.allocate(280, 180, -1, None);
+    assert!(app.help_scroll.width() <= 256);
+    assert!(app.help_scroll.height() <= 156);
+    assert!(adjustment.upper() > adjustment.page_size());
+    app.set_help_visible(false);
+    assert!(app.focus_is_inside(&app.view));
+    assert!(gtk::test_accessible_has_property(
+        &app.seek_bar,
+        gtk::AccessibleProperty::Label
+    ));
+    assert!(gtk::test_accessible_has_property(
+        &app.seek_bar,
+        gtk::AccessibleProperty::ValueText
+    ));
+    let assert_value_text = |expected: &str| {
+        use glib::translate::{IntoGlib, ToGlibPtr, from_glib_full};
+        let expected = std::ffi::CString::new(expected).unwrap();
+        // SAFETY: the live accessible and NUL-terminated expected string
+        // match the ValueText vararg type. GTK returns an owned diagnostic.
+        let error: Option<glib::GString> = unsafe {
+            from_glib_full(gtk::ffi::gtk_test_accessible_check_property(
+                app.seek_bar
+                    .upcast_ref::<gtk::Accessible>()
+                    .to_glib_none()
+                    .0,
+                gtk::AccessibleProperty::ValueText.into_glib(),
+                expected.as_ptr(),
+            ))
+        };
+        assert!(error.is_none(), "{error:?}");
+    };
+    app.seek_bar.set_value(0.5);
+    app.update_seek_value_text(125.0);
+    assert_value_text("1:03 of 2:05");
+    app.seek_bar.set_value(1.0);
+    app.update_seek_value_text(3725.0);
+    assert_value_text("1:02:05 of 1:02:05");
+    for duration in [0.0, f64::NAN, f64::INFINITY] {
+        app.update_seek_value_text(duration);
+        assert_value_text("Duration unknown");
+    }
+    app.shutdown();
+    app.win.destroy();
+}
