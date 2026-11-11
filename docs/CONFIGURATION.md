@@ -82,7 +82,7 @@ current folder.
 
 | Setting | Default | Use it when | Values and effect |
 | --- | --- | --- | --- |
-| `overlay-timeout` | `2.0` | Controls disappear too quickly or stay visible too long. | Finite seconds from `0` to `4294967.295` after the last pointer activity (the GLib timer limit). Values below `0.2` are treated as `0.2`; invalid values warn and retain the previous value or default. |
+| `overlay-timeout` | `2.0` | Controls disappear too quickly or stay visible too long. | Finite seconds from `0` to `4294967.295` after pointer or focus activity (the GLib timer limit). Hover, open menus, keyboard focus within the controls and Quick Markup hold them visible. Values below `0.2` are treated as `0.2`; invalid values warn and retain the previous value or default. |
 | `hide-cursor` | `yes` | You want the pointer to remain visible after the controls fade. | `yes` hides it with the controls; `no` leaves it visible. Moving the pointer shows the controls again. |
 
 ### Video defaults
@@ -130,6 +130,11 @@ Common key forms include:
 
 Press `?` in open-mpv to see the active shortcuts after configuration is
 applied.
+
+Focused controls handle their native keys before Viewer shortcuts. For example,
+Space activates a focused button and arrow keys adjust a focused seek slider.
+While help is open, unmodified arrows, Page Up/Down, Home/End and Space scroll
+help instead of operating on the media. Control/Alt/Super shortcuts remain available.
 
 ### Available actions
 

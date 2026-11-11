@@ -166,8 +166,13 @@ new product decisions rather than incidental implementation.
 ### FR-6 — Window and interaction
 
 - **FR-6.1 / FR-6.2** Media fills one frameless dark Workspace. Contextual chrome appears on
-  pointer movement, stays for hover/open menus or focused modes, and hides
-  after the configured delay. Keyboard use does not reveal it.
+  pointer movement or focus entering its controls, stays for hover/open menus,
+  keyboard focus within the chrome or focused modes, and hides after the
+  configured delay once those holds end. Tab and Shift+Tab reveal controls
+  before they can be used. Before a focused control is hidden or disabled by a
+  media, mode or layout transition, focus returns to the media view.
+  Focused controls receive native activation and adjustment keys before Viewer
+  shortcuts, including Space/Enter for buttons and arrow keys for the seek slider.
 - **FR-6.2 / FR-6.5** Viewer, Explorer and future Edit mode use Progressive disclosure rather than
   permanent advanced toolbars.
 - **FR-6.5** The still-image More menu has six top-level rows: Open File,
@@ -193,6 +198,10 @@ new product decisions rather than incidental implementation.
 - **FR-6.7** Escape unwinds the active draft, focused mode, Explorer destination and
   fullscreen before closing. Quit closes immediately and leaves no process.
 - **NFR-5.2** A generated help surface documents every active action and binding.
+  It stays within the viewport, wraps long configured shortcuts and scrolls
+  with pointer or keyboard in small windows and with large text. Opening help
+  focuses its scrollable surface; Tab stays there. Dismissal restores the
+  previous usable control, or the media view if that control is unavailable.
 
 ### FR-7 — Single application workspace
 
@@ -246,6 +255,10 @@ new product decisions rather than incidental implementation.
   when an image is shown or the Workspace closes.
 - **FR-10.3 / FR-10.4 / FR-10.4a / FR-10.5** Contextual controls provide play/pause, accurate seek and scrub, duration,
   volume/mute, looping and 0.5×–2× pitch-preserving playback presets.
+  The seek slider is named "Playback position" and exposes elapsed time and
+  duration as accessible value text, including the scrub target while dragging.
+  A new video or unavailable duration exposes "Duration unknown" rather than
+  stale values from the previous video.
 - **FR-10.7** Embedded and local SRT/WebVTT subtitles support Automatic, Off and track
   selection. External attachment is local, non-modal and forgotten on
   navigation. Attachment accepts only readable regular files, including symlinks

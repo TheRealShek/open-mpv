@@ -112,8 +112,15 @@ open-mpv ~/Pictures
 
 ## Controls
 
-Move the pointer to show the controls. Right-click the photo or video, or
-click the three-dot button, for more options. Press `?` for all shortcuts.
+Move the pointer or use `Tab` / `Shift+Tab` to reach the controls. Controls stay
+visible while one has keyboard focus. If a control disappears when the media
+or mode changes, focus returns to the media view. `Space` / `Enter` activate
+focused buttons; arrow keys adjust a focused playback slider. Right-click the photo or video,
+or click the three-dot button, for more options. Press `?` for all shortcuts.
+Help wraps and scrolls in small windows or with large text. Use the arrow keys,
+`Page Up` / `Page Down`, or the pointer to scroll; `Escape` dismisses help and
+returns focus to the previous control when it is still available. The playback
+position slider exposes elapsed time and duration to assistive technology.
 Viewer controls use bundled monochrome [Lucide icons](https://lucide.dev/), so their shapes and colors stay
 consistent across desktop icon themes.
 Hold the scroll-wheel (middle) button and drag to move the window at any
