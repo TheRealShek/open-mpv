@@ -183,6 +183,9 @@ class Suite:
         window = self.window(process, focused=True, fullscreen=False)
         with Image.open(self.input.capture(f'{name}-before-pointer')) as image:
             width, height = image.size
+        # Keep this pair separate from the earlier focus click (GTK defaults to
+        # a 400 ms multi-click interval in these fresh profiles).
+        time.sleep(0.6)
         self.input.click(window['x'] + window['width'] // 2,
                          window['y'] + window['height'] // 2, width, height, count=2)
         window = self.window(process, fullscreen=True)

@@ -9,6 +9,8 @@ from gi.repository import Gdk, Gtk
 
 
 def activate(app):
+    print(f"[input-probe] double-click-time={Gtk.Settings.get_default().get_property('gtk-double-click-time')}",
+          flush=True)
     window = Gtk.ApplicationWindow(application=app, title='CI input probe')
     window.set_default_size(640, 480)
     area = Gtk.DrawingArea()
@@ -17,6 +19,7 @@ def activate(app):
     window.set_child(area)
 
     def key(_controller, keyval, _keycode, _state):
+        print(f'[input-probe] key={keyval}', flush=True)
         if keyval == Gdk.KEY_Right:
             color[:] = [0.12, 0.86, 0.12]
             area.queue_draw()
@@ -28,8 +31,16 @@ def activate(app):
     keyboard.connect('key-pressed', key)
     window.add_controller(keyboard)
     pointer = Gtk.GestureClick()
-    pointer.connect('pressed', lambda _gesture, count, _x, _y:
-                    window.fullscreen() if count == 2 else None)
+    def pressed(gesture, count, x, y):
+        event = gesture.get_current_event()
+        device = event.get_device()
+        print(f'[input-probe] click={count} x={x} y={y} time={event.get_time()} '
+              f'device={device.get_name()} source={device.get_source()}', flush=True)
+        if count == 2:
+            print('[input-probe] fullscreen requested', flush=True)
+            window.fullscreen()
+
+    pointer.connect('pressed', pressed)
     area.add_controller(pointer)
     window.present()
 
