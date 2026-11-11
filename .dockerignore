@@ -1,0 +1,6 @@
+.git
+target
+dist
+desktop-results
+__pycache__
+*.pyc
