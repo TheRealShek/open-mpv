@@ -177,28 +177,16 @@ if args[:2] == ['image', 'inspect']:
     def test_input_goes_only_through_qmp(self):
         qmp = Mock()
         events = [{'type': 'key', 'data': {'down': True, 'key': {'type': 'qcode', 'data': 'right'}}}]
-        host.service(qmp, {'kind': 'input', 'events': events}, Path('/unused'))
+        host.service(qmp, {'kind': 'input', 'events': events})
         qmp.call.assert_called_once_with('input-send-event', {'events': events})
         with self.assertRaises(ValueError):
-            host.service(qmp, {'kind': 'dispatch-action'}, Path('/unused'))
+            host.service(qmp, {'kind': 'dispatch-action'})
 
-    def test_screenshot_cannot_escape_artifact_directory(self):
-        for name in ('../escape.png', '/escape.png', 'not-png.jpg'):
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                host.service(Mock(), {'kind': 'screenshot', 'name': name}, Path('/unused'))
-
-    def test_screendump_validates_pixels_and_writes_png(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'image.png'
-            qmp = Mock()
-            qmp.call.side_effect = lambda _command, args: Path(args['filename']).write_bytes(
-                b'P6\n2 1\n255\n' + b'\xff\0\0' * 2)
-            host.screenshot(qmp, path)
-            self.assertEqual(path.read_bytes(), fixtures.png(2, 1, b'\xff\0\0' * 2))
-            self.assertFalse(path.with_suffix('.ppm').exists())
-            qmp.call.side_effect = lambda _command, args: Path(args['filename']).write_bytes(b'P6\n2 1\n255\n')
-            with self.assertRaisesRegex(RuntimeError, 'incomplete'):
-                host.screenshot(qmp, path)
+    def test_host_rejects_guest_file_write_requests(self):
+        qmp = Mock()
+        with self.assertRaises(ValueError):
+            host.service(qmp, {'kind': 'screenshot', 'name': '../escape.png'})
+        qmp.call.assert_not_called()
 
     def test_build_failure_removes_image_and_preserves_failure(self):
         args = argparse.Namespace(desktop='gnome', probe=True, base=None, image=None)
@@ -258,7 +246,7 @@ if args[:2] == ['image', 'inspect']:
                 with patch.dict(os.environ, WAYLAND_DISPLAY='host-wayland', DBUS_SESSION_BUS_ADDRESS='host-bus'), \
                      patch.object(host.Processes, 'start', side_effect=start), \
                      patch.object(host.Processes, 'close') as cleanup, \
-                     patch.object(host, 'QMP') as qmp, patch.object(host, 'screenshot'):
+                     patch.object(host, 'QMP') as qmp:
                     qmp.return_value.call.return_value = {}
                     with self.assertRaises((RuntimeError, TimeoutError)):
                         host.run_vm(directory, artifacts, timeout=0.01 if result is None else 1)

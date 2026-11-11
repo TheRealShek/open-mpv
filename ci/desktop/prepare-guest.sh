@@ -14,7 +14,7 @@ case "$desktop" in
         cargo rust gcc pkgconf-pkg-config gtk4-devel glycin-devel gstreamer1-devel \
         ImageMagick glycin-loaders gstreamer1-plugin-gtk4 gstreamer1-plugins-good ffmpeg-free
     fi
-    authselect select minimal --force
+    authselect select local --force
     kernel=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -1)
     dracut --no-hostonly --add-drivers 'virtio_pci virtio_blk virtio_gpu 9p 9pnet_virtio' \
       --force /boot/initramfs-ci.img "$kernel"
@@ -25,7 +25,7 @@ case "$desktop" in
   hyprland)
     pacman -Syu --noconfirm --needed \
       linux mkinitcpio systemd-sysvcompat shadow util-linux dbus \
-      hyprland mesa gtk4 python-gobject python-cairo python-pillow
+      hyprland mesa gtk4 grim python-gobject python-cairo python-pillow
     if [ "${PROBE_ONLY:-0}" != 1 ]; then
       pacman -S --noconfirm --needed rust gcc pkgconf imagemagick glycin \
         gst-plugin-gtk4 gst-plugins-good ffmpeg

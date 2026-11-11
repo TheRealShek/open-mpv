@@ -10,10 +10,7 @@ import socket
 import subprocess
 import tempfile
 import time
-import traceback
 from pathlib import Path
-
-from fixtures import png
 
 
 def wait_for(predicate, description, timeout=30, alive=lambda: True):
@@ -108,31 +105,10 @@ class QMP:
         self.socket.close()
 
 
-def screenshot(qmp, output):
-    ppm = output.with_suffix('.ppm')
-    qmp.call('screendump', {'filename': str(ppm)})
-    with ppm.open('rb') as image:
-        if image.readline() != b'P6\n':
-            raise RuntimeError('unexpected screendump format')
-        width, height = map(int, image.readline().split())
-        if image.readline() != b'255\n':
-            raise RuntimeError('unexpected screendump depth')
-        pixels = image.read()
-    if len(pixels) != width * height * 3:
-        raise RuntimeError('incomplete screendump')
-    output.write_bytes(png(width, height, pixels))
-    ppm.unlink()
-
-
-def service(qmp, request, artifacts):
+def service(qmp, request):
     if request['kind'] == 'input':
         # No app actions or desktop IPC dispatchers are accepted here.
         qmp.call('input-send-event', {'events': request['events']})
-    elif request['kind'] == 'screenshot':
-        name = request['name']
-        if Path(name).name != name or not name.endswith('.png'):
-            raise ValueError('screenshot must be a PNG basename')
-        screenshot(qmp, artifacts / name)
     else:
         raise ValueError(f'unknown request: {request["kind"]}')
 
@@ -245,16 +221,12 @@ def run_vm(directory, artifacts, timeout):
                 request = json.loads(request_file.read_text())
                 if request['sequence'] > sequence:
                     sequence = request['sequence']
-                    service(qmp, request, artifacts)
+                    service(qmp, request)
                     atomic_json(artifacts / 'response.json', {'sequence': sequence})
             time.sleep(0.05)
         raise TimeoutError('guest suite exceeded its wall-clock limit')
     finally:
         if qmp:
-            try:
-                screenshot(qmp, artifacts / 'final.png')
-            except (OSError, RuntimeError):
-                traceback.print_exc()
             qmp.close()
         processes.close()
 

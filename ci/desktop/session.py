@@ -24,8 +24,9 @@ ROOT = Path('/opt/open-mpv')
 
 
 class Input:
-    def __init__(self):
+    def __init__(self, desktop):
         self.sequence = 0
+        self.desktop = desktop
 
     def request(self, **request):
         self.sequence += 1
@@ -35,7 +36,7 @@ class Input:
             response = ARTIFACTS / 'response.json'
             return response.exists() and json.loads(response.read_text())['sequence'] == self.sequence
 
-        wait_for(acknowledged, 'host input/screenshot acknowledgement', 15)
+        wait_for(acknowledged, 'host input acknowledgement', 15)
 
     def events(self, events):
         self.request(kind='input', events=events)
@@ -57,8 +58,9 @@ class Input:
             self.events([{'type': 'btn', 'data': {'button': 'left', 'down': False}}])
 
     def capture(self, name):
-        self.request(kind='screenshot', name=f'{name}.png')
-        return ARTIFACTS / f'{name}.png'
+        path = ARTIFACTS / f'{name}.png'
+        self.desktop.capture(path)
+        return path
 
 
 class Desktop:
@@ -77,6 +79,19 @@ class Desktop:
 
     def hypr(self, command):
         return json.loads(subprocess.check_output(['hyprctl', '-j', command], timeout=5))
+
+    def capture(self, path):
+        path.unlink(missing_ok=True)
+        if self.name == 'gnome':
+            result = self.bus.call_sync(
+                'org.gnome.Shell.Screenshot', '/org/gnome/Shell/Screenshot',
+                'org.gnome.Shell.Screenshot', 'Screenshot',
+                GLib.Variant('(bbs)', (False, False, str(path))), None,
+                Gio.DBusCallFlags.NONE, 10000, None).unpack()
+            if not result[0]:
+                raise RuntimeError(f'GNOME Shell screenshot failed: {result}')
+        else:
+            subprocess.run(['grim', str(path)], check=True, timeout=10)
 
     def windows(self):
         if self.name == 'gnome':
@@ -100,7 +115,7 @@ class Desktop:
 class Suite:
     def __init__(self, desktop):
         self.desktop = Desktop(desktop)
-        self.input = Input()
+        self.input = Input(self.desktop)
         self.processes = Processes()
         self.results = []
         self.logs = []
@@ -282,7 +297,8 @@ def main():
             os.environ['XDG_CURRENT_DESKTOP'] = 'Hyprland'
             config = Path(os.environ['XDG_CONFIG_HOME']) / 'hyprland.lua'
             config.write_text('''hl.monitor({ output = "", mode = "1280x800@60", position = "auto", scale = 1 })
-hl.config({ animations = { enabled = false }, misc = { disable_hyprland_logo = true } })
+hl.config({ animations = { enabled = false }, misc = { disable_hyprland_logo = true }, debug = { enable_stdout_logs = true } })
+hl.permission("/usr/bin/grim", "screencopy", "allow")
 hl.bind("SUPER + V", hl.dsp.window.float({ action = "toggle" }))
 ''')
             compositor = suite.start(['Hyprland', '--config', str(config)], 'compositor')
@@ -329,6 +345,11 @@ hl.bind("SUPER + V", hl.dsp.window.float({ action = "toggle" }))
         suite.results.append({'name': 'setup', 'status': 'failed', 'error': traceback.format_exc()})
         traceback.print_exc()
     finally:
+        if os.environ.get('WAYLAND_DISPLAY'):
+            try:
+                suite.input.capture('final')
+            except Exception:
+                traceback.print_exc()
         suite.close()
         atomic_json(ARTIFACTS / 'result.json', {
             'status': 'passed' if suite.results and all(r['status'] == 'passed' for r in suite.results) else 'failed',
