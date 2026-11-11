@@ -1,4 +1,5 @@
 import argparse
+import importlib.util
 import json
 import os
 import socket
@@ -7,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
+import types
 import unittest
 import zlib
 from pathlib import Path
@@ -19,6 +20,41 @@ import host
 
 
 class HarnessTests(unittest.TestCase):
+    def test_gnome_eval_decodes_the_shells_json_exactly_once(self):
+        # GI/Pillow are runtime adapters. This protocol test needs no desktop or
+        # optional Python packages in the fast checks.
+        gi = types.ModuleType('gi')
+        gi.require_version = Mock()
+        repository = types.ModuleType('gi.repository')
+        repository.Gio = Mock()
+        repository.GLib = Mock()
+        repository.GLib.Variant.side_effect = lambda signature, values: (signature, values)
+        pillow = types.ModuleType('PIL')
+        pillow.Image = Mock()
+        spec = importlib.util.spec_from_file_location('desktop_session_test',
+                                                     Path(host.__file__).with_name('session.py'))
+        session = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {'gi': gi, 'gi.repository': repository, 'PIL': pillow}):
+            spec.loader.exec_module(session)
+        desktop = object.__new__(session.Desktop)
+        desktop.name = 'gnome'
+        desktop.bus = Mock()
+        window = {'pid': 123, 'title': 'CI input probe'}
+
+        def evaluate(*arguments):
+            signature, (script,) = arguments[4]
+            self.assertEqual(signature, '(s)')
+            # Shell Eval already JSON-encodes the evaluated value.
+            value = json.dumps([window]) if script.startswith('JSON.stringify(') else [window]
+            return Mock(unpack=lambda: (True, json.dumps(value)))
+
+        desktop.bus.call_sync.side_effect = evaluate
+        self.assertEqual(desktop.window(123), window)
+        desktop.bus.call_sync.side_effect = None
+        desktop.bus.call_sync.return_value = Mock(unpack=lambda: (False, 'TypeError: invalid'))
+        with self.assertRaisesRegex(RuntimeError, 'TypeError: invalid'):
+            desktop.evaluate('bad expression')
+
     def test_bootstrap_failure_is_retained_before_guest_start(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

@@ -71,7 +71,7 @@ class Desktop:
     def evaluate(self, script):
         result = self.bus.call_sync(
             'org.gnome.Shell', '/org/gnome/Shell', 'org.gnome.Shell', 'Eval',
-            GLib.Variant('(s)', (f'JSON.stringify({script})',)),
+            GLib.Variant('(s)', (script,)),
             None, Gio.DBusCallFlags.NONE, 3000, None).unpack()
         if not result[0]:
             raise RuntimeError(f'GNOME Shell observation failed: {result[1]}')
