@@ -92,3 +92,80 @@ The memory check needs ImageMagick, generates temporary 12 MP RGBA16 TIFFs and
 reports Linux process-tree PSS over repeated navigation and after cleanup.
 Texture downloads fault in the CPU mappings without presenting a window.
 These checks do not establish displayed behavior or GPU memory use.
+
+## Disposable desktop CI
+
+CI keeps the fast Fedora checks and runs two independent desktop jobs on
+GitHub's Ubuntu 24.04 runners: Fedora 44 with GNOME Shell/Wayland, and rolling
+Arch with Hyprland. Neither job uses a developer's desktop, home, configuration,
+trash, display sockets or D-Bus. The jobs build distribution root filesystems
+with Docker, then boot disposable QEMU/KVM guests with a virtual GPU. Virgl uses
+software rendering on an isolated Xvfb display on the runner. The application
+itself uses native Wayland inside the guest.
+
+Before testing the application, a displayed GTK probe must respond to a virtual
+keyboard key and pointer double-click. QEMU supplies both through virtual input
+devices. Screenshots must show the expected red-to-green change and fullscreen
+state. A compositor IPC call only observes window state; it never substitutes
+for keyboard or pointer input.
+
+The shared Viewer scenario checks displayed image navigation, pointer
+fullscreen, keyboard exit from fullscreen, Trash and exact-byte Undo, and
+single-instance forwarding. GNOME also checks the Shell overview shortcut and
+focus return. Hyprland checks a compositor-owned binding and idle-inhibitor
+release/resumption around video pause. All input uses the same QEMU route.
+
+The guest also reuses the Rust suite. Every ignored test is discovered and run
+in its own process, with `--ignored --exact` and a 180-second deadline. The
+harness rejects zero-test success. Generated fixtures provide three colored
+PNGs, twelve stress images, a broken image, and a fixed VP8 video. File hashes
+and package versions accompany results. Ordinary Rust tests run as the guest
+user with a private session bus and trash. Glycin's sandbox remains enabled;
+the test does not disable bubblewrap, relax the runner's container security
+policy, or forward host devices into the guest.
+
+Run the harness unit tests without a desktop:
+
+```sh
+python3 -m unittest discover -s ci/desktop/tests -v
+shellcheck ci/desktop/*.sh
+bash -n ci/desktop/*.sh
+```
+
+To reproduce a job, use a **disposable Ubuntu runner**, with Docker, KVM,
+`qemu-system-x86`, `qemu-system-gui`, `xvfb`, `xauth`, `e2fsprogs`, Python and
+Git installed. The runner needs enough space for a distribution root filesystem
+and a 12 GiB sparse guest disk. Do not run guest provisioning scripts on your
+workstation. From this checkout:
+
+```sh
+sudo python3 ci/desktop/host.py gnome --artifacts "$PWD/desktop-results/gnome"
+sudo python3 ci/desktop/host.py hyprland --artifacts "$PWD/desktop-results/hyprland"
+```
+
+Use a new artifact directory for each run. Add `--probe` to prove boot,
+compositor readiness and routed input without compiling Rust. The CI workflow's
+`desktop_probe` dispatch input runs this same smaller proof. A successful probe
+is explicitly marked `probe_only`; it is not an application-suite pass.
+
+Artifacts are retained for 14 days, including failed runs: build, serial,
+compositor and per-test logs, screenshots, progressive and final JSON results,
+fixture hashes, guest package/kernel details, image identity and QEMU version
+and command. Setup errors, missing results, timeouts and test failures fail the
+job. Process groups are stopped on completion or interruption, and the guest
+disk and extracted root are removed. The matrix does not cancel one desktop
+when the other fails.
+
+These jobs establish only their recorded scenarios. GNOME runs the actual
+Shell in a native logind/Wayland login, not bare Mutter. It does not run GDM or
+the complete GNOME session manager and portal stack. This is GNOME Shell
+integration coverage, not full GNOME Workstation acceptance. Software-rendered
+virtual hardware does not establish physical GPU decoding, real-device
+performance, fractional-scale appearance, packaging lifecycle, or all clipboard
+and accessibility interactions. Orca speech is excluded. Human desktop and
+hardware verification remain required by FR-9.4.
+
+The known installed-loader Radiance coverage failure remains a baseline
+failure until the format allowlist is fixed separately. It is not filtered,
+marked successful, or silently skipped by this harness. Inspect the per-test
+logs and final results instead of interpreting artifact upload as test success.

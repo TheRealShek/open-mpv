@@ -103,6 +103,10 @@ by the recipe; GTK runs in the existing Wayland session.
 This is a local package, not an AUR submission or an Arch repository release.
 Fedora remains the Reference environment. Full Hyprland support still requires
 the desktop, hardware and performance evidence in FR-9.4.
+The [disposable desktop CI](../CONTRIBUTING.md#disposable-desktop-ci) tests
+Fedora GNOME Shell and Arch Hyprland independently with virtual devices. Its
+recorded scenarios do not replace full desktop acceptance, package lifecycle,
+physical hardware or performance verification.
 
 On an up-to-date Arch installation with a stable Rust toolchain, install the
 build tools and then build from a copy of the recipe, keeping generated files
