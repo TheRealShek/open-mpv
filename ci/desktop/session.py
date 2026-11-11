@@ -49,10 +49,10 @@ class Input:
         time.sleep(0.08)
         self.events([event(key, False) for key in reversed(keys)])
 
-    def double_click(self, x, y, width, height):
+    def click(self, x, y, width, height, count=1):
         self.events([{'type': 'abs', 'data': {'axis': axis, 'value': round(value * 32767 / size)}}
                      for axis, value, size in (('x', x, width), ('y', y, height))])
-        for _ in range(2):
+        for _ in range(count):
             self.events([{'type': 'btn', 'data': {'button': 'left', 'down': True}}])
             time.sleep(0.04)
             self.events([{'type': 'btn', 'data': {'button': 'left', 'down': False}}])
@@ -171,12 +171,20 @@ class Suite:
 
         wait_for(displayed, f'displayed {name} pixels', 20)
 
+    def focus(self, process, name):
+        window = self.window(process, fullscreen=False)
+        with Image.open(self.input.capture(f'{name}-before-focus')) as image:
+            width, height = image.size
+        self.input.click(window['x'] + window['width'] // 2,
+                         window['y'] + window['height'] // 2, width, height)
+        return self.window(process, focused=True, fullscreen=False)
+
     def pointer_fullscreen(self, process, name):
         window = self.window(process, focused=True, fullscreen=False)
         with Image.open(self.input.capture(f'{name}-before-pointer')) as image:
             width, height = image.size
-        self.input.double_click(window['x'] + window['width'] // 2,
-                                window['y'] + window['height'] // 2, width, height)
+        self.input.click(window['x'] + window['width'] // 2,
+                         window['y'] + window['height'] // 2, width, height, count=2)
         window = self.window(process, fullscreen=True)
         self.color(f'{name}-pointer-fullscreen', window, 1)
         self.input.key('esc')
@@ -185,7 +193,7 @@ class Suite:
     def probe(self):
         process = self.start(['python3', 'ci/desktop/input-probe.py'], 'input-probe')
         try:
-            window = self.window(process, focused=True, fullscreen=False)
+            window = self.focus(process, 'probe')
             self.color('probe-before-input', window, 0)
             self.input.key('right')
             self.color('probe-keyboard', window, 1)
@@ -209,7 +217,7 @@ class Suite:
     def behavior(self, fixtures):
         process = self.start([str(ROOT / 'bin/open-mpv'), str(fixtures / 'images/01.png')], 'viewer')
         try:
-            window = self.window(process, focused=True, fullscreen=False)
+            window = self.focus(process, 'viewer')
             self.color('viewer-open', window, 0)
             self.input.key('right')
             window = self.window(process, focused=True)
