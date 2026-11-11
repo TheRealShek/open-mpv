@@ -48,6 +48,7 @@ use open::{ScanJob, ScanQueue};
 use operation::{Coordinator as OperationCoordinator, UndoDisposition, UndoEffect, UndoId};
 
 const SEEK_STEP_SECONDS: f64 = 10.0;
+const MAX_FORWARDED_KEYS: usize = 32;
 
 /// Seek bar width when the window has room for it: wide enough that a
 /// pixel is a usable unit of time (a ten-minute video scrubs in ~2 s
@@ -280,6 +281,7 @@ pub struct App {
     help_label: gtk::Label,
     help_scroll: gtk::ScrolledWindow,
     help_previous_focus: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
+    forwarded_key_targets: RefCell<BTreeMap<u32, glib::WeakRef<gtk::Widget>>>,
     chrome: Vec<gtk::Widget>,
     chrome_timer: TimerSlot,
     indicator_timer: TimerSlot,

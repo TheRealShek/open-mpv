@@ -15,6 +15,7 @@ impl App {
 
         let view = ImageView::default();
         view.set_focusable(true);
+        view.set_accessible_role(gtk::AccessibleRole::Group);
         view.update_property(&[gtk::accessible::Property::Label("Media viewer")]);
         view.set_default_fit_actual(cfg.fit == FitMode::Actual);
 
@@ -338,6 +339,7 @@ impl App {
             .visible(false)
             .build();
         help_scroll.add_css_class("help");
+        help_scroll.set_accessible_role(gtk::AccessibleRole::Group);
         help_scroll.update_property(&[gtk::accessible::Property::Label("Keyboard shortcuts")]);
         overlay.add_overlay(&help_scroll);
 
@@ -442,6 +444,7 @@ impl App {
             help_label,
             help_scroll,
             help_previous_focus: RefCell::new(None),
+            forwarded_key_targets: RefCell::new(BTreeMap::new()),
             chrome: vec![
                 prev_btn.upcast(),
                 next_btn.upcast(),
@@ -896,19 +899,44 @@ impl App {
             self,
             #[upgrade_or]
             glib::Propagation::Proceed,
-            move |controller, key, _, mods| {
+            move |controller, key, keycode, mods| {
                 if app.help_scroll.get_visible() {
                     return app.handle_help_key(key, mods);
                 }
-                if let Some(focus) = RootExt::focus(&app.win)
+                if !matches!(key, gdk::Key::Tab | gdk::Key::ISO_Left_Tab)
+                    && app.forwarded_key_targets.borrow().len() < MAX_FORWARDED_KEYS
                     && (app.chrome.iter().any(|w| app.focus_is_inside(w))
                         || app.focus_is_inside(&app.status_area)
                         || app.focus_is_inside(&app.toast_revealer))
-                    && controller.forward(&focus)
                 {
-                    return glib::Propagation::Stop;
+                    let mut widget = RootExt::focus(&app.win);
+                    while let Some(current) = widget {
+                        if current == *app.win.upcast_ref::<gtk::Widget>() {
+                            break;
+                        }
+                        if controller.forward(&current) {
+                            app.forwarded_key_targets
+                                .borrow_mut()
+                                .insert(keycode, current.downgrade());
+                            return glib::Propagation::Stop;
+                        }
+                        widget = current.parent();
+                    }
                 }
                 glib::Propagation::Proceed
+            }
+        ));
+        // The window controller consumes matching releases after a handled
+        // press. Complete the pair at its original recipient, even if the
+        // action moved focus. Weak references do not retain retired widgets.
+        control_keys.connect_key_released(clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |controller, _, keycode, _| {
+                let target = app.forwarded_key_targets.borrow_mut().remove(&keycode);
+                if let Some(target) = target.and_then(|target| target.upgrade()) {
+                    controller.forward(&target);
+                }
             }
         ));
         self.win.add_controller(control_keys);
