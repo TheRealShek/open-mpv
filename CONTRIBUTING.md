@@ -98,8 +98,9 @@ These checks do not establish displayed behavior or GPU memory use.
 CI keeps the fast Fedora checks and runs two independent desktop jobs on
 GitHub's Ubuntu 24.04 runners: Fedora 44 with GNOME Shell/Wayland, and rolling
 Arch with Hyprland. Neither job uses a developer's desktop, home, configuration,
-trash, display sockets or D-Bus. The jobs build distribution root filesystems
-with Docker, then boot disposable QEMU/KVM guests with a virtual GPU. Virgl uses
+trash, display sockets or D-Bus. A Fedora runner-tools container builds
+distribution root filesystems with Docker, then boots disposable QEMU/KVM
+guests with a virtual GPU. Virgl uses
 software rendering on an isolated Xvfb display on the runner. The application
 itself uses native Wayland inside the guest.
 
@@ -132,15 +133,15 @@ shellcheck ci/desktop/*.sh
 bash -n ci/desktop/*.sh
 ```
 
-To reproduce a job, use a **disposable Ubuntu runner**, with Docker, KVM,
-`qemu-system-x86`, `qemu-system-gui`, `xvfb`, `xauth`, `e2fsprogs`, Python and
-Git installed. The runner needs enough space for a distribution root filesystem
+To reproduce a job, use a **disposable Linux runner** with Docker and KVM.
+The wrapper builds the VM tools container from Fedora's signed packages;
+it does not install host packages. The runner needs enough space for a distribution root filesystem
 and a 12 GiB sparse guest disk. Do not run guest provisioning scripts on your
 workstation. From this checkout:
 
 ```sh
-sudo python3 ci/desktop/host.py gnome --artifacts "$PWD/desktop-results/gnome"
-sudo python3 ci/desktop/host.py hyprland --artifacts "$PWD/desktop-results/hyprland"
+ci/desktop/run.sh gnome "$PWD/desktop-results/gnome"
+ci/desktop/run.sh hyprland "$PWD/desktop-results/hyprland"
 ```
 
 Use a new artifact directory for each run. Add `--probe` to prove boot,
@@ -151,7 +152,8 @@ is explicitly marked `probe_only`; it is not an application-suite pass.
 Artifacts are retained for 14 days, including failed runs: build, serial,
 compositor and per-test logs, screenshots, progressive and final JSON results,
 fixture hashes, guest package/kernel details, image identity and QEMU version
-and command. Setup errors, missing results, timeouts and test failures fail the
+and command. Bootstrap failures retain a separate result and runner build log.
+Setup errors, missing results, timeouts and test failures fail the
 job. Process groups are stopped on completion or interruption, and the guest
 disk and extracted root are removed. The matrix does not cancel one desktop
 when the other fails.
