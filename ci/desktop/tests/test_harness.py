@@ -19,6 +19,78 @@ import host
 
 
 class HarnessTests(unittest.TestCase):
+    def test_bootstrap_failure_is_retained_before_guest_start(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            docker = directory / 'docker'
+            docker.write_text('#!/bin/sh\ncase "$1" in build) exit 17 ;; container) exit 1 ;; esac\n')
+            docker.chmod(0o755)
+            artifacts = directory / 'evidence'
+            command = ['bash', str(Path(host.__file__).with_name('run.sh')), 'gnome', str(artifacts)]
+            result = subprocess.run(command, env={**os.environ, 'PATH': f'{directory}:{os.environ["PATH"]}'},
+                                    capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 17)
+            status = json.loads((artifacts / 'bootstrap-result.json').read_text())
+            self.assertEqual(status, {'status': 'failed', 'exit_code': result.returncode})
+            self.assertFalse((artifacts / 'guest/result.json').exists())
+
+    def test_bootstrap_rejects_stale_artifacts_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            artifacts = Path(temporary)
+            marker = artifacts / 'bootstrap-result.json'
+            marker.write_text('existing evidence')
+            result = subprocess.run(['bash', str(Path(host.__file__).with_name('run.sh')),
+                                     'hyprland', str(artifacts)], capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(marker.read_text(), 'existing evidence')
+
+    def test_wrapper_mounts_external_evidence_and_cleans_labelled_resources(self):
+        fake_docker = '''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['FAKE_DOCKER_ROOT'])
+args = sys.argv[1:]
+with (root / 'calls').open('a') as log:
+    log.write(json.dumps(args) + '\\n')
+if args[:2] == ['container', 'inspect']:
+    sys.exit(0 if (root / 'running').exists() else 1)
+if args[0] == 'run':
+    (root / 'running').touch()
+    sys.exit(int(os.environ['FAKE_RUN_CODE']))
+if args[0] == 'rm' and args[-1].startswith('open-mpv-vm-'):
+    (root / 'running').unlink()
+if args[0] == 'ps':
+    print('guest-container')
+if args[:2] == ['image', 'ls']:
+    print('guest-image\\nrunner-image')
+if args[:2] == ['image', 'inspect']:
+    print('{}')
+'''
+        for code in (0, 23):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                docker = root / 'docker'
+                docker.write_text(fake_docker)
+                docker.chmod(0o755)
+                artifacts = root / 'outside-checkout'
+                result = subprocess.run(['bash', str(Path(host.__file__).with_name('run.sh')),
+                                         'gnome', str(artifacts), '--probe'], capture_output=True, timeout=5,
+                                        env={**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}',
+                                             'FAKE_DOCKER_ROOT': str(root), 'FAKE_RUN_CODE': str(code)})
+                self.assertEqual(result.returncode, code, result.stderr.decode())
+                calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
+                run = next(call for call in calls if call[0] == 'run')
+                self.assertIn(f'type=bind,src={artifacts},dst={artifacts}', run)
+                self.assertEqual(run[run.index('--device') + 1], '/dev/kvm')
+                self.assertNotIn('--privileged', run)
+                self.assertLess(next(i for i, c in enumerate(calls) if c[0] == 'stop'),
+                                next(i for i, c in enumerate(calls) if c[0] == 'rm'))
+                self.assertIn(['rm', '-f', 'guest-container'], calls)
+                self.assertIn(['image', 'rm', 'guest-image'], calls)
+                self.assertIn(['image', 'rm', 'runner-image'], calls)
+                status = json.loads((artifacts / 'bootstrap-result.json').read_text())
+                self.assertEqual(status['status'], 'passed' if code == 0 else 'failed')
+
     def test_readiness_returns_evidence(self):
         attempts = iter([False, {'ready': True}])
         self.assertEqual(host.wait_for(lambda: next(attempts), 'ready', 1), {'ready': True})

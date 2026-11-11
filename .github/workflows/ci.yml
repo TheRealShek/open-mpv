@@ -175,24 +175,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install VM tools
-        timeout-minutes: 10
-        run: |
-          # Avoid the runner mirror chain: a DNS failure there can otherwise
-          # fall back to stale indexes and retry separately for every package.
-          cat > "$RUNNER_TEMP/open-mpv-apt.list" <<'EOF'
-          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main universe
-          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main universe
-          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main universe
-          EOF
-          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/open-mpv-apt.list"
-            -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
-            qemu-system-x86 qemu-system-gui xvfb xauth e2fsprogs
-          test -c /dev/kvm
-
       - name: Test desktop harness
         run: python3 -m unittest discover -s ci/desktop/tests -v
 
@@ -201,8 +183,7 @@ jobs:
           DESKTOP: ${{ matrix.desktop }}
           PROBE: ${{ inputs.desktop_probe == true && '--probe' || '' }}
         run: |
-          sudo python3 ci/desktop/host.py "$DESKTOP" \
-            --artifacts "$GITHUB_WORKSPACE/desktop-results/$DESKTOP" ${PROBE:+"$PROBE"}
+          ci/desktop/run.sh "$DESKTOP" "$GITHUB_WORKSPACE/desktop-results/$DESKTOP" ${PROBE:+"$PROBE"}
 
       - name: Retain desktop evidence, including failures
         if: always()

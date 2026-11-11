@@ -158,6 +158,7 @@ def validate_result(value, artifacts):
 
 def prepare(args, directory, artifacts):
     tag = args.image or f'open-mpv-ci-{args.desktop}:{os.getpid()}'
+    label = 'io.github.therealshek.openmpv.ci-run=' + os.environ.get('OPEN_MPV_CI_RUN_ID', f'host-{os.getpid()}')
     container = None
     try:
         if not args.image:
@@ -166,11 +167,11 @@ def prepare(args, directory, artifacts):
                     'docker', 'build', '--progress=plain', '-f', 'ci/desktop/Dockerfile',
                     '--build-arg', f'BASE={args.base or ("fedora:44" if args.desktop == "gnome" else "archlinux:base")}',
                     '--build-arg', f'DESKTOP={args.desktop}', '--build-arg',
-                    f'PROBE_ONLY={int(args.probe)}', '-t', tag, '.',
+                    f'PROBE_ONLY={int(args.probe)}', '--label', label, '-t', tag, '.',
                 ], check=True, timeout=2400, stdout=log, stderr=subprocess.STDOUT)
         image_info = subprocess.check_output(['docker', 'image', 'inspect', tag], text=True, timeout=30)
         (artifacts / 'guest-image.json').write_text(image_info)
-        container = subprocess.check_output(['docker', 'create', tag, '/bin/true'], text=True).strip()
+        container = subprocess.check_output(['docker', 'create', '--label', label, tag, '/bin/true'], text=True).strip()
         root = directory / 'root'
         root.mkdir()
         archive = directory / 'root.tar'
@@ -282,6 +283,8 @@ def main():
             'commit': subprocess.check_output(['git', '-c', f'safe.directory={Path.cwd()}',
                                                'rev-parse', 'HEAD'], text=True).strip(),
         })
+        if Path('/runner-packages.txt').exists():
+            shutil.copy2('/runner-packages.txt', artifacts / 'runner-packages.txt')
         if args.probe:
             (artifacts / 'probe-only').touch()
         with tempfile.TemporaryDirectory(prefix='open-mpv-vm-') as temporary:
