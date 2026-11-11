@@ -264,6 +264,15 @@ def main():
                             ('HOME', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
                              'XDG_SESSION_TYPE', 'DBUS_SESSION_BUS_ADDRESS')},
         })
+        runtime = os.environ.get('XDG_RUNTIME_DIR')
+        if not runtime:
+            raise RuntimeError('login did not establish XDG_RUNTIME_DIR; check PAM and logind')
+        runtime_stat = Path(runtime).stat()
+        if runtime_stat.st_uid != os.getuid() or runtime_stat.st_mode & 0o777 != 0o700:
+            raise RuntimeError('login runtime directory must be private and owned by the test user')
+        with (ARTIFACTS / 'login-session.txt').open('w') as log:
+            subprocess.run(['loginctl', 'show-session', 'self'], check=True, timeout=5,
+                           stdout=log, stderr=subprocess.STDOUT)
         if name == 'gnome':
             os.environ['XDG_CURRENT_DESKTOP'] = 'GNOME'
             subprocess.run(['gsettings', 'set', 'org.gnome.desktop.interface', 'enable-animations', 'false'],

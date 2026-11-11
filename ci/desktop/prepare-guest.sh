@@ -6,7 +6,7 @@ mkdir -p /opt/open-mpv
 case "$desktop" in
   gnome)
     dnf --setopt=install_weak_deps=False -y install \
-      kernel-core kernel-modules dracut systemd pam shadow-utils util-linux \
+      kernel-core kernel-modules dracut systemd systemd-pam pam authselect shadow-utils util-linux \
       gnome-shell gnome-settings-daemon dbus-daemon mesa-dri-drivers mesa-libEGL \
       gtk4 python3-gobject python3-cairo python3-pillow adwaita-icon-theme
     if [ "${PROBE_ONLY:-0}" != 1 ]; then
@@ -14,6 +14,7 @@ case "$desktop" in
         cargo rust gcc pkgconf-pkg-config gtk4-devel glycin-devel gstreamer1-devel \
         ImageMagick glycin-loaders gstreamer1-plugin-gtk4 gstreamer1-plugins-good ffmpeg-free
     fi
+    authselect select minimal --force
     kernel=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -1)
     dracut --no-hostonly --add-drivers 'virtio_pci virtio_blk virtio_gpu 9p 9pnet_virtio' \
       --force /boot/initramfs-ci.img "$kernel"
@@ -59,4 +60,6 @@ fi
 EOF
 systemctl enable getty@tty1.service
 systemctl set-default multi-user.target
-ln -sf /usr/lib/systemd/systemd /sbin/init
+# Keep the distribution's relative init link: the BusyBox initramfs checks it
+# under /new_root before chroot, where an absolute link resolves incorrectly.
+test -x /sbin/init
